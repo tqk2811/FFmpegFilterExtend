@@ -24,13 +24,26 @@
 - **Vì sao**: phần negotiate format và chuyển đổi swscale trong `vf_gpufx.c` là logic phức tạp, nên có một lượt review riêng.
 - **Ngày ghi**: 2026-10-12
 
-### Chưa có test cho việc bỏ side data; gray limited range; độ chính xác alpha float
+### Chưa có test cho việc bỏ side data; gray limited range
 - **Vấn đề**:
   - `vf_gpufx.c` bỏ side data phụ thuộc màu (mastering display, content light level, ICC…), motion vector và video enc params, nhưng chưa có clip nào mang side data để test. Với input PQ, output vẫn là PQ nhưng mất HDR10 static metadata (đã có cảnh báo HDR).
-  - swscale luôn coi gray là full range (FIXME trong `libswscale/format.c`), nên gray limited range bị chuyển sai.
-  - Input premultiplied dạng float (EXR `gbrapf32`) bị hạ về 8 bit trước khi bỏ premultiply, nên điểm ảnh alpha thấp mất độ chính xác màu.
-- **Vị trí**: [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`process_frame`, `input_image`, `unpremultiply`).
-- **Vì sao**: sẽ xử lý cùng pipeline trên GPU (YUV/float trên GPU, `rgba16float`) ở bước B-chung của kế hoạch.
+  - `gray`/`gray10` chưa chuyển trên GPU, vẫn qua swscale, mà swscale luôn coi gray là full range (FIXME trong `libswscale/format.c`), nên gray limited range bị chuyển sai.
+  - Input premultiplied dạng float (EXR `gbrapf32`) giờ đi qua swscale sang `rgba64le` rồi GPU mới bỏ premultiply (đã sửa phần lớn: 16 bit thay vì 8 bit), nhưng vẫn mất phần float vượt 16 bit và giá trị ngoài 0..1.
+- **Vị trí**: [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`process_frame`, `input_frame`), [crates/gpufx-core/src/frame.rs](../crates/gpufx-core/src/frame.rs).
+- **Vì sao**: gray có thể thêm vào `PixelFormat` (một plane, range lấy từ frame) là sửa được; side data cần clip test.
+- **Ngày ghi**: 2026-10-12
+
+### P1: các giới hạn còn lại của chuyển YUV trên GPU
+- **Vấn đề**:
+  - Chỉ có các format trong `PixelFormat` (nv12, p010le, yuv420p/422p/444p, bản 10le, yuva420p/444p, rgba, rgba64le). 12/16 bit, `p016`, `nv21`, `nv16`, `yuva*p10` vẫn qua swscale. Ma trận FCC, SMPTE 240M, YCgCo, BT.2020 constant luminance cũng qua swscale.
+  - Mẫu 16 bit được đọc theo little endian: trên máy big endian, `vf_gpufx.c` vẫn đưa tên `...le` nhưng texture upload theo thứ tự byte của máy, nên sai màu. Chưa có máy để thử.
+  - Lọc chroma khác swscale (bilinear lên, tam giác xuống): trên cạnh sắc (testsrc2) chênh trung bình khoảng 1.4 mã 8 bit so với swscale. Không có transfer/tonemap: PQ/HLG vẫn coi như SDR.
+  - Vị trí chroma không rõ: GPU đoán center cho full range, left cho limited; swscale (đường dự phòng) tự đoán theo cách của nó, có thể khác.
+  - Pipeline `rgba16float` của gói được biên dịch lúc gặp frame trên 8 bit đầu tiên (lazy, chưa có API để báo trước độ sâu lúc configure), nên frame đó chậm hơn; output đi qua storage buffer theo plane rồi một buffer map được (thêm một bản output trong bộ nhớ GPU).
+  - `gpufx run` (CLI) vẫn đọc/ghi PNG 8 bit, chưa dùng `rgba64le` cho PNG 16 bit.
+  - Đo khác biệt trong `scripts/test-bundle.sh` dùng `od`/`awk` trên 3 frame; ngưỡng (trung bình) đặt theo testsrc2, chưa có clip 10-bit mịn để kiểm 10 bit qua `ffmpeg` (test Rust `ten_bit_steps_survive_a_chain` có kiểm).
+- **Vị trí**: [crates/gpufx-core/src/convert.rs](../crates/gpufx-core/src/convert.rs), [crates/gpufx-core/src/frame.rs](../crates/gpufx-core/src/frame.rs), [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`gpu_color`, `rgba_for`).
+- **Vì sao**: phạm vi B-chung chỉ cần các format thông dụng; phần còn lại thêm dần khi có nhu cầu.
 - **Ngày ghi**: 2026-10-12
 
 ### Cache gói: khoá toàn cục khi nạp, không phát hiện file đổi

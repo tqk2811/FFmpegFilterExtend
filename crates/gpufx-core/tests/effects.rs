@@ -236,7 +236,9 @@ fn a_chain_runs_like_its_effects_one_after_the_other() {
     let mut chain = EffectChain::new(vec![open(&ctx, "grayscale"), open(&ctx, "vignette")]).unwrap();
     let mut out = vec![0u8; src.len()];
     chain.process(&input, target(&mut out, w, h, w * 4), &info).unwrap();
-    assert_eq!(out, want);
+    // The chain keeps the gray frame in half float instead of rounding it to 8 bits.
+    let diff = out.iter().zip(&want).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+    assert!(diff <= 1, "chain differs from two effects by {diff}");
 
     // Inverting twice restores the frame.
     let mut twice = EffectChain::new(vec![open(&ctx, "invert"), open(&ctx, "invert")]).unwrap();
@@ -295,18 +297,29 @@ fn chain_rules_follow_two_filters_in_a_row() {
     transition.process(&[img, img], target(&mut out, 8, 8, 32), &FrameInfo::new(0.0, 0)).unwrap();
 
     // The format the first effect outputs must be one the next accepts.
-    let yuv_only = TempPackage::new(
-        "yuv-only",
-        r#"{"id":"t.yuv","name":"YUV only","inputs":[{"name":"src","formats":["yuv420p"],"width":{"max":100}}],"passes":[{"shader":"shaders/main.wgsl"}]}"#,
+    let gray_only = TempPackage::new(
+        "gray-only",
+        r#"{"id":"t.gray","name":"Gray only","inputs":[{"name":"src","formats":["gray"],"width":{"max":100}}],"passes":[{"shader":"shaders/main.wgsl"}]}"#,
         "@compute @workgroup_size(8, 8) fn main(@builtin(global_invocation_id) id: vec3u) { if (gpufx_in_bounds(id)) { gpufx_write(id, textureLoad(src, vec2i(id.xy), 0)); } }",
     );
-    let yuv = || ("yuv".to_string(), Effect::new(ctx.clone(), Package::open(&yuv_only.0).unwrap()).unwrap());
-    let err = EffectChain::new(vec![open(&ctx, "invert"), yuv()]).err().unwrap().to_string();
-    assert!(err.contains("`invert` outputs rgba but `yuv` accepts yuv420p"), "{err}");
-    // A YUV-only first effect is fine: its input is the chain input. Later effects check
+    let gray = || ("gray".to_string(), Effect::new(ctx.clone(), Package::open(&gray_only.0).unwrap()).unwrap());
+    let err = EffectChain::new(vec![open(&ctx, "invert"), gray()]).err().unwrap().to_string();
+    assert!(err.contains("`invert` outputs rgba, rgba64le, nv12") && err.contains("but `gray` accepts gray"), "{err}");
+    // An effect without output rules may output YUV, as two filters would negotiate.
+    let yuv_only = TempPackage::new(
+        "yuv-only",
+        r#"{"id":"t.yuv","name":"YUV only","inputs":[{"name":"src","formats":["yuv420p"]}],"passes":[{"shader":"shaders/main.wgsl"}]}"#,
+        "@compute @workgroup_size(8, 8) fn main(@builtin(global_invocation_id) id: vec3u) { if (gpufx_in_bounds(id)) { gpufx_write(id, textureLoad(src, vec2i(id.xy), 0)); } }",
+    );
+    EffectChain::new(vec![
+        open(&ctx, "invert"),
+        ("yuv".to_string(), Effect::new(ctx.clone(), Package::open(&yuv_only.0).unwrap()).unwrap()),
+    ])
+    .unwrap();
+    // A gray-only first effect is fine: its input is the chain input. Later effects check
     // their rules against the size of the first input.
-    let chain = EffectChain::new(vec![yuv(), open(&ctx, "invert")]).unwrap();
-    let stream = |w| [StreamInfo { format: Some("yuv420p"), width: w, height: 8 }];
+    let chain = EffectChain::new(vec![gray(), open(&ctx, "invert")]).unwrap();
+    let stream = |w| [StreamInfo { format: Some("gray"), width: w, height: 8 }];
     chain.check_inputs(&stream(64)).unwrap();
     assert!(chain.check_inputs(&stream(128)).is_err());
     let narrow = TempPackage::new(
@@ -389,4 +402,28 @@ fn fit_places_any_picture_in_the_frame() {
         assert_ne!(px(&out, 0, 0), [0, 0, 0, 255], "mode {mode}");
         assert_ne!(px(&out, w - 1, h - 1), [0, 0, 0, 255], "mode {mode}");
     }
+}
+
+#[test]
+fn pooled_pass_outputs_do_not_clobber_each_other() {
+    // Pass outputs of a chain share a few pooled textures; multi-pass effects in a row
+    // must still give what each effect gives alone (8-bit frames: exact).
+    let Some(ctx) = gpu() else { return };
+    let (w, h) = (67, 41);
+    let src = gradient(w, h);
+    let info = FrameInfo::new(0.5, 3);
+    let run = |fx: &mut Effect, data: &[u8]| {
+        let mut out = vec![0u8; data.len()];
+        fx.process(&[Image { data, width: w, height: h, stride: w * 4 }], target(&mut out, w, h, w * 4), &info).unwrap();
+        out
+    };
+    let names = ["gaussian-blur", "invert", "gaussian-blur", "sharpen", "gaussian-blur"];
+    let mut want = src.clone();
+    for name in names {
+        want = run(&mut open(&ctx, name).1, &want);
+    }
+    let mut chain = EffectChain::new(names.iter().map(|n| open(&ctx, n)).collect()).unwrap();
+    let mut out = vec![0u8; src.len()];
+    chain.process(&[Image { data: &src, width: w, height: h, stride: w * 4 }], target(&mut out, w, h, w * 4), &info).unwrap();
+    assert_eq!(out, want);
 }

@@ -86,7 +86,8 @@ impl SizeRule {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct OutputDef {
-    /// Pixel formats the effect may produce, in order of preference. Defaults to `rgba`.
+    /// Pixel formats the effect may produce, in order of preference. Defaults to `rgba`
+    /// and every other format the runtime writes on the GPU ([`crate::PixelFormat`]).
     #[serde(default = "default_output_formats")]
     pub formats: Vec<String>,
 }
@@ -195,7 +196,7 @@ fn default_output() -> String {
     "out".into()
 }
 fn default_output_formats() -> Vec<String> {
-    vec!["rgba".into()]
+    crate::PixelFormat::ALL.iter().map(|f| f.name().to_string()).collect()
 }
 fn default_inputs() -> Vec<InputDef> {
     vec![InputDef { name: "src".into(), description: String::new(), formats: Vec::new(), width: None, height: None, same_size: false }]
@@ -368,11 +369,13 @@ mod tests {
     }
 
     #[test]
-    fn default_rules_accept_anything_and_output_rgba() {
+    fn default_rules_accept_anything_and_output_gpu_formats() {
         let m = manifest(r#"[{"name":"src"}]"#, "").unwrap();
         m.check_inputs(&[info("yuv420p", 3, 5)]).unwrap();
-        m.check_output_format("rgba").unwrap();
-        assert!(m.check_output_format("yuv420p").is_err());
+        assert_eq!(m.output.formats[0], "rgba");
+        m.check_output_format("yuv420p").unwrap();
+        m.check_output_format("p010le").unwrap();
+        assert!(m.check_output_format("gray").is_err());
     }
 
     #[test]

@@ -15,10 +15,13 @@ use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use gpufx_core::{Backend, Effect, EffectChain, FrameInfo, GpuContext, Image, ImageMut, Package, Program, StreamInfo};
+use gpufx_core::{
+    Backend, ChromaLocation, ColorInfo, Effect, EffectChain, Frame, FrameInfo, FrameMut, GpuContext, Image, ImageMut, Matrix, Package,
+    PixelFormat, Program, Range, StreamInfo,
+};
 
 /// Bumped when the C ABI changes incompatibly. Must match `GPUFX_API_VERSION` in gpufx.h.
-const API_VERSION: u32 = 3;
+const API_VERSION: u32 = 4;
 
 thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
@@ -132,6 +135,128 @@ pub struct GpufxStreamInfo {
     pub height: u32,
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct GpufxColor {
+    pub matrix: u32,
+    pub range: u32,
+    pub chroma_location: u32,
+    pub flags: u32,
+}
+
+#[repr(C)]
+pub struct GpufxFrame {
+    pub format: *const c_char,
+    pub width: u32,
+    pub height: u32,
+    pub data: [*const u8; 4],
+    pub stride: [u32; 4],
+    pub color: GpufxColor,
+}
+
+#[repr(C)]
+pub struct GpufxFrameOut {
+    pub format: *const c_char,
+    pub width: u32,
+    pub height: u32,
+    pub data: [*mut u8; 4],
+    pub stride: [u32; 4],
+    pub color: GpufxColor,
+}
+
+const FRAME_PREMULTIPLIED: u32 = 1;
+
+fn color_info(c: &GpufxColor) -> Result<ColorInfo, String> {
+    let matrix = match c.matrix {
+        0 => Matrix::Bt601,
+        1 => Matrix::Bt709,
+        2 => Matrix::Bt2020,
+        m => return Err(format!("unknown colour matrix {m}")),
+    };
+    let range = match c.range {
+        0 => Range::Limited,
+        1 => Range::Full,
+        r => return Err(format!("unknown range {r}")),
+    };
+    use ChromaLocation::*;
+    let chroma_location = *[Left, Center, TopLeft, Top, BottomLeft, Bottom]
+        .get(c.chroma_location as usize)
+        .ok_or_else(|| format!("unknown chroma location {}", c.chroma_location))?;
+    Ok(ColorInfo { matrix, range, chroma_location, premultiplied: c.flags & FRAME_PREMULTIPLIED != 0 })
+}
+
+unsafe fn pixel_format(name: *const c_char, what: &str) -> Result<PixelFormat, String> {
+    let name = str_arg(name, what)?;
+    PixelFormat::from_name(name).ok_or_else(|| format!("{what}: pixel format `{name}` is not converted on the GPU"))
+}
+
+/// Byte length of every plane of a `format` frame, checking the pointers.
+fn plane_lens(what: &str, format: PixelFormat, w: u32, h: u32, nulls: [bool; 4], strides: [u32; 4]) -> Result<[usize; 4], String> {
+    if w == 0 || h == 0 {
+        return Err(format!("{what} is empty"));
+    }
+    // Far above what GPUs take (16384), and keeps the row sizes within u32.
+    if w > 1 << 16 || h > 1 << 16 {
+        return Err(format!("{what}: {w}x{h} is too large"));
+    }
+    let mut lens = [0; 4];
+    for p in 0..format.plane_count() {
+        let (row, rows) = format.plane_size(p, w, h);
+        if nulls[p] {
+            return Err(format!("{what}: plane {p} is NULL"));
+        }
+        if strides[p] < row {
+            return Err(format!("{what}: stride {} of plane {p} is below {row} bytes", strides[p]));
+        }
+        lens[p] = (rows as usize - 1)
+            .checked_mul(strides[p] as usize)
+            .and_then(|n| n.checked_add(row as usize))
+            .ok_or_else(|| format!("{what}: plane {p} is too large for the address space"))?;
+    }
+    Ok(lens)
+}
+
+/// Refuses an output plane that overlaps an input plane or another output plane: the
+/// GPU result is copied into it while the inputs are still borrowed.
+fn check_no_alias(inputs: &[Frame], out: &FrameMut) -> Result<(), String> {
+    let range = |s: &[u8]| (s.as_ptr() as usize, s.as_ptr() as usize + s.len());
+    let outs: Vec<(usize, usize)> = out.planes.iter().filter(|p| !p.is_empty()).map(|p| range(p)).collect();
+    let ins = inputs.iter().flat_map(|f| f.planes.iter().filter(|p| !p.is_empty()).map(|p| range(p)));
+    let overlap = |a: (usize, usize), b: (usize, usize)| a.0 < b.1 && b.0 < a.1;
+    for (i, &o) in outs.iter().enumerate() {
+        if outs[..i].iter().any(|&p| overlap(o, p)) || ins.clone().any(|p| overlap(o, p)) {
+            return Err(format!("out plane {i} overlaps another plane of the input or output frames"));
+        }
+    }
+    Ok(())
+}
+
+unsafe fn frame_arg<'a>(f: &GpufxFrame, what: &str) -> Result<Frame<'a>, String> {
+    let format = pixel_format(f.format, what)?;
+    let lens = plane_lens(what, format, f.width, f.height, f.data.map(|d| d.is_null()), f.stride)?;
+    let mut planes: [&[u8]; 4] = [&[]; 4];
+    for p in 0..format.plane_count() {
+        planes[p] = std::slice::from_raw_parts(f.data[p], lens[p]);
+    }
+    Ok(Frame { format, width: f.width, height: f.height, planes, strides: f.stride, color: color_info(&f.color)? })
+}
+
+unsafe fn frame_out_arg<'a>(f: &GpufxFrameOut) -> Result<FrameMut<'a>, String> {
+    let format = pixel_format(f.format, "out")?;
+    let lens = plane_lens("out", format, f.width, f.height, f.data.map(|d| d.is_null()), f.stride)?;
+    let mut planes: [&mut [u8]; 4] = Default::default();
+    for p in 0..format.plane_count() {
+        planes[p] = std::slice::from_raw_parts_mut(f.data[p], lens[p]);
+    }
+    Ok(FrameMut { format, width: f.width, height: f.height, planes, strides: f.stride, color: color_info(&f.color)? })
+}
+
+/// Names of the formats converted on the GPU, as C strings.
+fn format_names() -> &'static [CString] {
+    static NAMES: OnceLock<Vec<CString>> = OnceLock::new();
+    NAMES.get_or_init(|| PixelFormat::ALL.iter().map(|f| cstring(f.name())).collect())
+}
+
 fn cstring(s: &str) -> CString {
     CString::new(s.replace('\0', " ")).unwrap_or_default()
 }
@@ -144,6 +269,24 @@ pub extern "C" fn gpufx_version() -> u32 {
 #[no_mangle]
 pub extern "C" fn gpufx_last_error() -> *const c_char {
     LAST_ERROR.with(|e| e.borrow().as_ptr())
+}
+
+#[no_mangle]
+pub extern "C" fn gpufx_format_count() -> u32 {
+    format_names().len() as u32
+}
+
+#[no_mangle]
+pub extern "C" fn gpufx_format_name(index: u32) -> *const c_char {
+    format_names().get(index as usize).map_or(ptr::null(), |s| s.as_ptr())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_format_supported(format: *const c_char) -> c_int {
+    if format.is_null() {
+        return 0;
+    }
+    CStr::from_ptr(format).to_str().ok().and_then(PixelFormat::from_name).is_some() as c_int
 }
 
 /// Label of a package in parameter names: its file name without `.zip`.
@@ -349,6 +492,45 @@ pub unsafe extern "C" fn gpufx_effect_process(
     })
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_process_frames(
+    fx: *mut GpufxEffect,
+    inputs: *const GpufxFrame,
+    nb_inputs: u32,
+    out: *const GpufxFrameOut,
+    info: *const GpufxFrameInfo,
+) -> c_int {
+    guard(-1, || {
+        let fx = fx.as_mut().ok_or("effect is NULL")?;
+        let (out, info) = (out.as_ref().ok_or("out is NULL")?, info.as_ref().ok_or("info is NULL")?);
+        if inputs.is_null() || nb_inputs == 0 {
+            return Err("inputs must not be NULL".into());
+        }
+        let raw = std::slice::from_raw_parts(inputs, nb_inputs as usize);
+        let mut frames = Vec::with_capacity(raw.len());
+        for (i, f) in raw.iter().enumerate() {
+            frames.push(frame_arg(f, &format!("input {i}"))?);
+        }
+        let info = FrameInfo { time: info.time, frame: info.frame, pixel_aspect: info.pixel_aspect };
+        let out = frame_out_arg(out)?;
+        check_no_alias(&frames, &out)?;
+        fx.chain.process_frames(&frames, out, &info).map_err(|e| e.to_string())?;
+        Ok(0)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_convert_frame(fx: *mut GpufxEffect, input: *const GpufxFrame, out: *const GpufxFrameOut) -> c_int {
+    guard(-1, || {
+        let fx = fx.as_mut().ok_or("effect is NULL")?;
+        let input = frame_arg(input.as_ref().ok_or("input is NULL")?, "input")?;
+        let out = frame_out_arg(out.as_ref().ok_or("out is NULL")?)?;
+        check_no_alias(std::slice::from_ref(&input), &out)?;
+        fx.chain.convert(&input, out).map_err(|e| e.to_string())?;
+        Ok(0)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -442,6 +624,66 @@ mod tests {
         // An output of another size is refused instead of overflowing.
         let small = GpufxOutput { data: out.as_mut_ptr(), width: 2, height: 2, stride: 8 };
         assert!(unsafe { gpufx_effect_process(fx, &input, 1, &small, &info) } < 0);
+        unsafe { gpufx_effect_free(fx) };
+    }
+
+    #[test]
+    fn planar_frames_are_converted_on_the_gpu() {
+        let _serial = serial();
+        if GpuContext::new(Backend::Auto).is_err() {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        }
+        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects");
+        let fx = open(&examples.join("invert"));
+        assert!(!fx.is_null());
+        assert!(unsafe { gpufx_format_supported(c"p010le".as_ptr()) } == 1);
+        assert!(unsafe { gpufx_format_supported(c"yuvj420p".as_ptr()) } == 1);
+        assert!(unsafe { gpufx_format_supported(c"gray".as_ptr()) } == 0);
+        let names: Vec<String> =
+            (0..gpufx_format_count()).map(|i| unsafe { CStr::from_ptr(gpufx_format_name(i)) }.to_str().unwrap().into()).collect();
+        assert!(names.contains(&"nv12".to_string()) && names.contains(&"yuv420p10le".to_string()), "{names:?}");
+
+        // BT.709 limited white, 4x2 NV12 with padded rows.
+        let y = [235u8; 8 * 2];
+        let uv = [128u8; 8];
+        let color = GpufxColor { matrix: 1, range: 0, chroma_location: 0, flags: 0 };
+        let input = GpufxFrame {
+            format: c"nv12".as_ptr(),
+            width: 4,
+            height: 2,
+            data: [y.as_ptr(), uv.as_ptr(), ptr::null(), ptr::null()],
+            stride: [8, 8, 0, 0],
+            color,
+        };
+        let mut out = [0u8; 4 * 4 * 2];
+        let target = GpufxFrameOut {
+            format: c"rgba".as_ptr(),
+            width: 4,
+            height: 2,
+            data: [out.as_mut_ptr(), ptr::null_mut(), ptr::null_mut(), ptr::null_mut()],
+            stride: [16, 0, 0, 0],
+            color,
+        };
+        let info = GpufxFrameInfo { time: 0.0, frame: 0, pixel_aspect: 1.0 };
+        assert_eq!(unsafe { gpufx_effect_process_frames(fx, &input, 1, &target, &info) }, 0, "{:?}", unsafe {
+            CStr::from_ptr(gpufx_last_error())
+        });
+        assert_eq!(out[..4], [0, 0, 0, 255]);
+        assert_eq!(unsafe { gpufx_effect_convert_frame(fx, &input, &target) }, 0);
+        assert_eq!(out[..4], [255, 255, 255, 255]);
+        // A missing plane is an error, not a crash.
+        let broken = GpufxFrame { data: [y.as_ptr(), ptr::null(), ptr::null(), ptr::null()], ..input };
+        assert!(unsafe { gpufx_effect_process_frames(fx, &broken, 1, &target, &info) } < 0);
+        assert!(unsafe { CStr::from_ptr(gpufx_last_error()) }.to_str().unwrap().contains("plane 1 is NULL"));
+        // Writing over the input is refused.
+        let mut same = y;
+        let inplace = GpufxFrame { data: [same.as_ptr(), uv.as_ptr(), ptr::null(), ptr::null()], ..input };
+        let over =
+            GpufxFrameOut { data: [same.as_mut_ptr(), ptr::null_mut(), ptr::null_mut(), ptr::null_mut()], width: 2, height: 2, ..target };
+        let small = GpufxFrame { width: 2, height: 2, ..inplace };
+        assert!(unsafe { gpufx_effect_convert_frame(fx, &small, &over) } < 0);
+        assert!(unsafe { CStr::from_ptr(gpufx_last_error()) }.to_str().unwrap().contains("overlaps"));
         unsafe { gpufx_effect_free(fx) };
     }
 }

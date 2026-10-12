@@ -128,9 +128,10 @@ warns "different sample aspect ratios" "has sample aspect ratio 2:1" -i "$A" -i 
 
 echo "pixels:"
 # The GPU must really change frames: invert once differs from the source, twice restores
-# it exactly (8-bit, 1 - (1 - x) has no rounding loss).
+# it exactly (8-bit RGBA, 1 - (1 - x) has no rounding loss). The frames are RGBA before
+# gpufx, else it converts YUV itself and differs from swscale by rounding.
 md5() {
-    "$FF" -hide_banner -nostdin -v error -i "$A" -frames:v 3 -an -vf "$1" -pix_fmt rgba -f framemd5 - \
+    "$FF" -hide_banner -nostdin -v error -i "$A" -frames:v 3 -an -vf "format=rgba,$1" -pix_fmt rgba -f framemd5 - \
         2> "$CLIPS/last.log" | grep -v '^#' | awk -F, '{print $NF}'
 }
 SRC_MD5=$(md5 "format=rgba")
@@ -190,19 +191,47 @@ else
 fi
 
 echo "colors:"
-# RGBA -> YUV inside gpufx must use the output link colorspace and range (BT.709 here),
-# exactly like an auto-inserted scale after an RGBA output does.
-yuv_md5() {
-    "$FF" -hide_banner -nostdin -v error -i "$E" -frames:v 3 -an -vf "$1" -pix_fmt yuva420p \
-        -colorspace bt709 -color_range tv -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | awk -F, '{print $NF}'
+# raw OUT ARGS...: first 3 frames as raw video.
+raw() {
+    out=$1; shift
+    "$FF" -hide_banner -nostdin -v error "$@" -frames:v 3 -an -f rawvideo -y "$out" 2> "$CLIPS/last.log"
 }
-VIA_SCALE=$(yuv_md5 "gpufx=effect=$FX/chroma-key.zip,format=rgba,format=yuva420p")
-INSIDE=$(yuv_md5 "gpufx=effect=$FX/chroma-key.zip,format=yuva420p")
-if [ -n "$VIA_SCALE" ] && [ "$INSIDE" = "$VIA_SCALE" ]; then
-    pass "YUV output follows the BT.709 output link"
+# diff_stats A B BYTES: "max mean" of the differences of the 1 or 2 byte samples.
+diff_stats() {
+    od -An -v -tu"$3" "$1" | tr -s ' ' '\n' | grep -v '^$' > "$CLIPS/a.txt"
+    od -An -v -tu"$3" "$2" | tr -s ' ' '\n' | grep -v '^$' > "$CLIPS/b.txt"
+    paste "$CLIPS/a.txt" "$CLIPS/b.txt" | awk '{d = $1 - $2; if (d < 0) d = -d; if (d > m) m = d; s += d; n++}
+                                              END {if (n) printf "%d %.3f\n", m, s / n}'
+}
+# below VALUE LIMIT: VALUE < LIMIT
+below() { awk -v v="$1" -v l="$2" 'BEGIN {exit !(v < l)}'; }
+# RGBA -> YUV inside gpufx (on the GPU now) must use the output link colorspace and range
+# (BT.709 here), like an auto-inserted scale after an RGBA output: the same picture up
+# to rounding and chroma filtering, far from what a BT.601 output gives.
+raw "$CLIPS/scale.yuv" -i "$E" -vf "gpufx=effect=$FX/chroma-key.zip,format=rgba,format=yuva420p" -pix_fmt yuva420p -colorspace bt709 -color_range tv
+raw "$CLIPS/inside.yuv" -i "$E" -vf "gpufx=effect=$FX/chroma-key.zip,format=yuva420p" -pix_fmt yuva420p -colorspace bt709 -color_range tv
+raw "$CLIPS/bt601.yuv" -i "$E" -vf "gpufx=effect=$FX/chroma-key.zip,format=yuva420p" -pix_fmt yuva420p -colorspace bt470bg -color_range tv
+GOOD=$(diff_stats "$CLIPS/scale.yuv" "$CLIPS/inside.yuv" 1 | cut -d' ' -f2)
+BAD=$(diff_stats "$CLIPS/scale.yuv" "$CLIPS/bt601.yuv" 1 | cut -d' ' -f2)
+if [ -n "$GOOD" ] && [ -n "$BAD" ] && below "$GOOD" 1 && below 3 "$BAD"; then
+    pass "YUV output follows the BT.709 output link (mean difference $GOOD, BT.601 $BAD)"
 else
-    fail "YUV output follows the BT.709 output link"; cat "$CLIPS/last.log"
+    fail "YUV output follows the BT.709 output link (mean difference $GOOD, BT.601 $BAD)"; cat "$CLIPS/last.log"
 fi
+# yuv420p in and out: gpufx converts on the GPU, FFmpeg inserts no scale filter.
+"$FF" -hide_banner -nostdin -v verbose -i "$A" -frames:v 2 -an -vf "gpufx=effect=$FX/invert.zip" -pix_fmt yuv420p -f null - > "$CLIPS/last.log" 2>&1
+if grep -q "Loaded 'Invert'" "$CLIPS/last.log" && ! grep -q auto_scale "$CLIPS/last.log"; then pass "yuv420p in and out without swscale"
+else fail "yuv420p in and out without swscale"; cat "$CLIPS/last.log"; fi
+# GPU formats round trip: invert twice gives the frame back, up to chroma filtering on
+# the sharp edges of testsrc2 (limits in sample units: 8-bit, P010 high bits, 10-bit).
+for spec in nv12:1:2 yuv420p:1:2 p010le:2:640 yuv420p10le:2:10; do
+    f=${spec%%:*} rest=${spec#*:}; bytes=${rest%%:*} limit=${rest#*:}
+    raw "$CLIPS/ref.yuv" -i "$A" -vf "format=$f" -pix_fmt "$f"
+    raw "$CLIPS/gpu.yuv" -i "$A" -vf "format=$f,gpufx=effect=$FX/invert.zip,gpufx=effect=$FX/invert.zip" -pix_fmt "$f"
+    MEAN=$(diff_stats "$CLIPS/ref.yuv" "$CLIPS/gpu.yuv" "$bytes" | cut -d' ' -f2)
+    if [ -n "$MEAN" ] && below "$MEAN" "$limit"; then pass "$f through the GPU (mean difference $MEAN)"
+    else fail "$f through the GPU (mean difference $MEAN)"; cat "$CLIPS/last.log"; fi
+done
 
 echo "premultiplied alpha:"
 # The bundles have no premultiply_dynamic filter: gpufx converts alpha modes itself.

@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define GPUFX_API_VERSION 3
+#define GPUFX_API_VERSION 4
 
 typedef struct GpufxEffect GpufxEffect;
 
@@ -38,6 +38,63 @@ typedef struct GpufxOutput {
     uint32_t stride;
 } GpufxOutput;
 
+/*
+ * Colour properties of a GpufxFrame. matrix, range and chroma_location only matter for
+ * YUV formats; RGB and alpha are always full range.
+ */
+#define GPUFX_MATRIX_BT601  0 /* also BT.470BG, SMPTE 170M; FFmpeg's guess when unknown */
+#define GPUFX_MATRIX_BT709  1
+#define GPUFX_MATRIX_BT2020 2 /* non-constant luminance */
+
+#define GPUFX_RANGE_LIMITED 0 /* "tv": luma 16..235, chroma 16..240, scaled for more bits */
+#define GPUFX_RANGE_FULL    1 /* "pc", JPEG */
+
+/* Where chroma samples sit in a subsampled format (the AVChromaLocation names). */
+#define GPUFX_CHROMA_LEFT       0 /* MPEG-2, H.264: the usual default */
+#define GPUFX_CHROMA_CENTER     1 /* MPEG-1, JPEG */
+#define GPUFX_CHROMA_TOPLEFT    2
+#define GPUFX_CHROMA_TOP        3
+#define GPUFX_CHROMA_BOTTOMLEFT 4
+#define GPUFX_CHROMA_BOTTOM     5
+
+/*
+ * The frame has premultiplied alpha. Effects see straight alpha: the colours are divided
+ * by alpha after reading and multiplied again before writing, in RGB.
+ */
+#define GPUFX_FRAME_PREMULTIPLIED 1u
+
+typedef struct GpufxColor {
+    uint32_t matrix;          /* GPUFX_MATRIX_* */
+    uint32_t range;           /* GPUFX_RANGE_* */
+    uint32_t chroma_location; /* GPUFX_CHROMA_* */
+    uint32_t flags;           /* GPUFX_FRAME_* */
+} GpufxColor;
+
+/*
+ * A frame in CPU memory in one of the formats of gpufx_format_name(), converted to and
+ * from RGBA on the GPU. format is the FFmpeg pixel format name ("nv12", "p010le",
+ * "yuv420p"...). data and stride (bytes per row, >= the row size) are per plane, in the
+ * FFmpeg plane order; unused planes are ignored. Samples above 8 bits are little endian.
+ */
+typedef struct GpufxFrame {
+    const char *format;
+    uint32_t width;
+    uint32_t height;
+    const uint8_t *data[4];
+    uint32_t stride[4];
+    GpufxColor color;
+} GpufxFrame;
+
+/* Where the effect writes its result, as GpufxFrame. */
+typedef struct GpufxFrameOut {
+    const char *format;
+    uint32_t width;
+    uint32_t height;
+    uint8_t *data[4];
+    uint32_t stride[4];
+    GpufxColor color;
+} GpufxFrameOut;
+
 /* Per-frame values exposed to shaders as globals. */
 typedef struct GpufxFrameInfo {
     double time;         /* seconds; globals.time, globals.time_int + globals.time_frac */
@@ -52,11 +109,25 @@ typedef struct GpufxStreamInfo {
     uint32_t height;
 } GpufxStreamInfo;
 
-/* Returns GPUFX_API_VERSION of the loaded library. */
+/*
+ * Returns GPUFX_API_VERSION of the loaded library. Versions only grow by additions
+ * (new functions, constants): a library with a version >= the header's works, an older
+ * one does not. A change that breaks existing callers renames the library.
+ */
 uint32_t gpufx_version(void);
 
 /* Message of the last error on this thread. Never NULL; valid until the next call. */
 const char *gpufx_last_error(void);
+
+/*
+ * Pixel formats gpufx_effect_process_frames() takes and writes: "rgba", "rgba64le",
+ * "nv12", "p010le", "yuv420p", "yuv422p", "yuv444p", their 10-bit "...10le" versions,
+ * "yuva420p", "yuva444p". Static strings.
+ */
+uint32_t gpufx_format_count(void);
+const char *gpufx_format_name(uint32_t index);
+/* 1 if format is one of the above or an alias ("yuvj420p" and the like), else 0. */
+int gpufx_format_supported(const char *format);
 
 /*
  * Opens a package (.zip file or unpacked directory) and compiles its shaders.
@@ -131,9 +202,28 @@ int gpufx_effect_set_param_values(GpufxEffect *fx, const char *name,
 /*
  * Runs the effect. inputs holds one image per input, in order. out must have the size of
  * inputs[0]. Fails when the input sizes break the manifest rules.
+ * Same as gpufx_effect_process_frames() with "rgba" frames.
  */
 int gpufx_effect_process(GpufxEffect *fx, const GpufxImage *inputs, uint32_t nb_inputs,
                          const GpufxOutput *out, const GpufxFrameInfo *info);
+
+/*
+ * Runs the effect on frames of any gpufx_format_name() format: inputs are converted to
+ * RGBA (rgba16float, so 10-bit survives) on the GPU, every effect of the chain runs, and
+ * the result is converted to out's format and colour properties on the GPU before it is
+ * read back. Inputs and out may each have another format. out must have the size of
+ * inputs[0]. The planes of out must not overlap each other or any input plane (refused). The manifest format rules are the caller's to check
+ * (gpufx_effect_check_inputs()); the frames' formats here are only how they are stored.
+ */
+int gpufx_effect_process_frames(GpufxEffect *fx, const GpufxFrame *inputs, uint32_t nb_inputs,
+                                const GpufxFrameOut *out, const GpufxFrameInfo *info);
+
+/*
+ * Converts input to out's format and colour properties without running
+ * the effects, as a disabled filter passes its first input through. input stands for
+ * the first input; out must have its size.
+ */
+int gpufx_effect_convert_frame(GpufxEffect *fx, const GpufxFrame *input, const GpufxFrameOut *out);
 
 #ifdef __cplusplus
 }

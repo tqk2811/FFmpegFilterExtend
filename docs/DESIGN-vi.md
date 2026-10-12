@@ -100,7 +100,7 @@ Mỗi pass là một **compute shader**. Trước mã của tác giả, runtime 
 |---------|------------------|---------|
 | 0 | `globals.size`, `globals.time`, `globals.frame`, `globals.time_int`, `globals.time_frac`, `globals.pixel_aspect` | Kích thước output (px), thời gian (giây, f32), số frame, thời gian chính xác (giây nguyên + phần lẻ), tỉ lệ cạnh của pixel (SAR) |
 | 1 | `params.<tên>` | Tham số từ manifest |
-| 2 | `out_tex` | Texture ghi kết quả (`rgba8unorm`) |
+| 2 | `out_tex` | Texture ghi kết quả (`rgba8unorm`, hoặc `rgba16float` khi chuỗi có frame trên 8 bit) |
 | 3 | `smp` | Sampler tuyến tính, clamp |
 | 4.. | tên input/texture/pass | Texture đọc (`texture_2d<f32>`) |
 
@@ -154,10 +154,10 @@ gpufx=effect=<zip|thư mục>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1
   vector và video enc params bị bỏ vì pixel đã khác.
 - Kích thước hay pixel format của input đổi giữa chừng thì báo lỗi (`ffmpeg` tự dựng lại
   graph nên chỉ gặp khi dùng libavfilter trực tiếp).
-- Cảnh báo (không chặn): SAR các input khác nhau, input trên 8 bit (pipeline 8-bit RGBA),
-  input HDR PQ/HLG (shader coi như SDR), input interlaced (shader thấy hai field là một
-  frame). Shader làm việc với alpha thường (straight): filter tự bỏ premultiply của input
-  (EXR, JPEG XL…) và premultiply lại khi output cần.
+- Cảnh báo (không chặn): SAR các input khác nhau, input trên 10 bit (hiệu ứng chạy bằng half
+  float, khoảng 11 bit), input HDR PQ/HLG (shader coi như SDR), input interlaced (shader thấy hai
+  field là một frame). Shader làm việc với alpha thường (straight): libgpufx chia input
+  premultiplied (EXR, JPEG XL…) cho alpha trên GPU và nhân lại khi output cần.
 
 Ví dụ:
 
@@ -178,11 +178,35 @@ ffmpeg -i in.mp4 -vf "gpufx=effect='gaussian-blur.zip|gradient-map.zip':params='
 
 ## 6. Đường đi của frame và hiệu năng
 
-**Prototype (đã chạy):** frame RGBA trong RAM → upload texture → các pass compute → copy về
-RAM. Input không khai báo `formats` thì FFmpeg tự chèn `scale`/`format` để chuyển YUV ↔ RGBA;
-input có `formats` (và output khác RGBA) thì filter nhận nguyên frame, kiểm tra theo quy tắc
-của manifest rồi tự chuyển bằng `swscale`. Các filter `gpufx` trong cùng
-process dùng chung một GPU device.
+**Hiện tại (P1 xong):** các plane của frame trong RAM → upload texture → pass chuyển đổi dựng sẵn →
+các pass của hiệu ứng → pass chuyển đổi dựng sẵn → copy về RAM. libgpufx tự chuyển `rgba`,
+`rgba64le`, `nv12`, `p010le`, `yuv420p`/`yuv422p`/`yuv444p` và bản `10le`, `yuva420p`, `yuva444p`
+(và tên gọi `yuvj`):
+
+- Mỗi plane được upload vào một texture số nguyên (`r8uint`, `rg8uint`, `r16uint`, `rg16uint`,
+  `rgba16uint`: format cơ bản của WebGPU, có trên mọi backend, khác với `r16unorm` cần feature chỉ có
+  trên native). Một pass compute áp ma trận (BT.601, BT.709, BT.2020 non-constant luminance) và range
+  (limited/full) của `AVFrame`, nội suy chroma bilinear theo vị trí chroma (left, center, top-left,
+  top, bottom-left, bottom; không rõ thì left) rồi ghi texture RGBA mà hiệu ứng đầu đọc thẳng. RGBA
+  8-bit straight bỏ qua pass này.
+- Ở output, một pass đổi kết quả RGBA sang format output (chroma lấy mẫu xuống bằng lọc tam giác,
+  `[1 3 3 1]` khi ở giữa, `[1 2 1]` khi co-sited), đóng gói từng plane vào storage buffer, copy sang
+  một buffer map được rồi đọc về.
+- Texture RGBA là `rgba16float` khi chuỗi có frame (input hoặc output) trên 8 bit, nên 10-bit giữ
+  được qua chuỗi; còn lại là `rgba8unorm`. PNG trong gói vẫn là `rgba8unorm`.
+- Filter: input không có `formats` nhận thẳng các format này (FFmpeg đổi format khác sang một trong
+  số đó); input có `formats` nhận nguyên frame. Format, ma trận (FCC, SMPTE 240M, YCgCo…) và BT.2020
+  constant luminance mà libgpufx không xử lý thì vẫn đổi bằng `swscale` sang `rgba` (hoặc `rgba64le`
+  khi trên 8 bit) như trước; output cũng vậy. Manifest không có `output` thì được xuất mọi format
+  này (`rgba` đứng đầu), nên encoder nhận `yuv420p` không cần `scale` sau `gpufx`. Output đó có thể
+  là YUV không alpha, bỏ alpha mà hiệu ứng ghi: hiệu ứng tạo ra alpha cần khai báo `output.formats`.
+- Vị trí chroma không rõ thì là center với frame full range (JPEG/MJPEG), còn lại là left.
+- Mỗi gói biên dịch pipeline `rgba8unorm` lúc nạp, pipeline `rgba16float` khi gặp frame trên 8 bit
+  đầu tiên (frame đó chờ biên dịch; lỗi có ghi tên gói).
+- `GPUFX_API_VERSION` chỉ tăng khi thêm mới: filter nhận thư viện có version không nhỏ hơn header.
+- Filter bị tắt (timeline) đổi input 0 sang format output trên GPU mà không chạy hiệu ứng.
+
+Các filter `gpufx` trong cùng process dùng chung một GPU device.
 
 Gói đã nạp cũng được dùng chung. Mỗi gói (khoá theo đường dẫn tuyệt đối và GPU device) chỉ
 được đọc và biên dịch một lần trong process: `Program` gồm manifest, pipeline, texture PNG,
@@ -195,7 +219,7 @@ Chi phí chính là upload/readback và chuyển màu trên CPU. Lộ trình b�
 
 | Giai đoạn | Thay đổi | Lợi ích |
 |-----------|----------|---------|
-| P1 | Chuyển YUV (NV12/P010/yuv420p) ↔ RGBA trên GPU trong runtime; texture `rgba16float` cho pass trung gian | Bỏ `swscale`, hỗ trợ 10-bit/HDR |
+| P1 (xong) | Chuyển YUV (NV12/P010/yuv420p…) ↔ RGBA trên GPU trong runtime; texture `rgba16float` khi có frame trên 8 bit | Bỏ `swscale`, hỗ trợ 10-bit/HDR |
 | P2 | Pipeline hoá: double buffer readback, không chặn chờ frame trước | Tăng throughput 2–3× trên GPU rời |
 | P3 | **Zero-copy** với `AV_PIX_FMT_VULKAN`: tạo wgpu device từ `AVVulkanDeviceContext` (`wgpu-hal` `create_device_from_hal`) và nhập `VkImage` của `AVVKFrame` | Không qua RAM khi decode/encode bằng Vulkan |
 | P4 | Interop **CUDA** (NVDEC/NVENC): `hwmap` CUDA → Vulkan (external memory) hoặc `VK_KHR_external_memory` trực tiếp | Dùng được với `-hwaccel cuda` |
@@ -234,7 +258,8 @@ VRAM có hạn, nên bộ nhớ GPU giữ ở mức thấp nhất và không nh�
 - Không chép thêm khi vào/ra: texture các plane YUV và texture RGBA sau chuyển đổi được dùng
   lại qua các frame; hiệu ứng đầu tiên đọc thẳng texture đã chuyển đổi.
 - Texture trung gian (output của pass, chỗ nối chuỗi, cạnh của đồ thị) lấy từ pool theo kích
-  thước và format. Texture có thời gian sống không chồng nhau dùng chung bộ nhớ (ping-pong);
+  thước và format (đã làm cho chuỗi: chuỗi 1 input, 2 hiệu ứng mỗi cái một pass cấp hai texture
+  output, hiệu ứng thứ ba dùng lại texture đầu). Texture có thời gian sống không chồng nhau dùng chung bộ nhớ (ping-pong);
   texture trả về pool ngay sau lần đọc cuối. Bước kiểm tra đồ thị tính trước số texture sống
   cùng lúc tối đa, nên đồ thị rộng chỉ tốn số texture sống đồng thời, không phải một cái mỗi nút.
 - `rgba16float` (gấp đôi `rgba8unorm`) chỉ dùng khi cần độ chính xác (input/output trên
@@ -306,7 +331,8 @@ nguyên), chạy `integrate.sh`, rồi configure FFmpeg với:
   `docker/keep-filters.txt` (`null`, `format`, `scale`, `trim`, `crop`, `hflip`, `vflip`,
   `transpose`, `rotate`, `sendcmd`, `split`, `gpufx`). Các filter video còn giữ là hạ tầng
   mà ffmpeg CLI tự chèn (trim cho `-ss/-t`, xoay theo metadata) hoặc gpufx cần (đổi
-  YUV ↔ RGBA). Khi gpufx tự chuyển màu trên GPU (P1), có thể bỏ thêm `scale`.
+  YUV ↔ RGBA). gpufx đã tự chuyển các format YUV thông dụng trên GPU (P1); `scale` còn giữ cho
+  các format khác.
 - `libgpufx` được link động: Linux dùng `rpath=$ORIGIN` để tìm `libgpufx.so` cạnh `ffmpeg`,
   Windows đặt `gpufx.dll` cạnh `ffmpeg.exe`. DLL chỉ phụ thuộc DLL hệ thống
   (đã kiểm tra bằng `objdump`).

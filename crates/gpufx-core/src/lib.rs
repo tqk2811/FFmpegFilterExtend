@@ -2,11 +2,14 @@
 //! and run them on any GPU wgpu supports. This crate is the engine behind the FFmpeg
 //! `gpufx` filter; the C ABI lives in `gpufx-ffi`.
 
+mod convert;
+pub mod frame;
 pub mod manifest;
 pub mod package;
 pub mod params;
 pub mod runtime;
 
+pub use frame::{ChromaLocation, ColorInfo, Frame, FrameMut, Matrix, PixelFormat, Range};
 pub use manifest::{Manifest, StreamInfo};
 pub use package::Package;
 pub use runtime::{Backend, Effect, EffectChain, FrameInfo, GpuContext, Image, ImageMut, Program};

@@ -39,7 +39,7 @@ scripts/pack-effects.sh --check -o out my-fx    # compile the shaders on the GPU
 | `name` | string | yes | Display name |
 | `version`, `description` | string | no | |
 | `inputs` | array | no (`[{"name":"src"}]`) | The video inputs, in the filter's pad order, with their rules (see below) |
-| `output` | `{formats}` | no (`{"formats":["rgba"]}`) | Allowed output pixel formats |
+| `output` | `{formats}` | no (`rgba` and every format converted on the GPU) | Allowed output pixel formats |
 | `params` | array | no | Parameters, see below |
 | `textures` | array of `{name, path}` | no | Bundled PNG images (LUT, mask) |
 | `passes` | array | yes | The compute passes, run in order |
@@ -64,7 +64,12 @@ Each element of `inputs`:
 | `width`, `height` | unrestricted | `{ "min": 16, "max": 4096, "multiple_of": 2 }`, each field is optional |
 | `same_size` | `false` | The size must equal the first input (not for the first input itself) |
 
-`output.formats`: the allowed output pixel formats, in order of preference. FFmpeg
+`output.formats`: the allowed output pixel formats, in order of preference. Without `output` the list is
+`rgba`, `rgba64le`, `nv12`, `p010le`, `yuv420p`, `yuv422p`, `yuv444p`, `yuv420p10le`, `yuv422p10le`,
+`yuv444p10le`, `yuva420p`, `yuva444p`: the formats gpufx writes on the GPU. So an effect without
+`output.formats` may output YUV without alpha: the alpha it writes is dropped unless the filter after it
+takes an alpha format. **An effect that produces alpha should declare `output.formats`** (e.g.
+`["rgba", "yuva420p"]`). FFmpeg
 picks one format from the list when linking filters; if a downstream filter demands a format outside the list,
 FFmpeg inserts a converter after `gpufx`.
 
@@ -79,14 +84,17 @@ FFmpeg inserts a converter after `gpufx`.
 
 How the rules apply:
 
-- **FFmpeg:** an input without `formats` behaves as before (FFmpeg converts to RGBA itself). An input with
+- **FFmpeg:** an input without `formats` takes the formats gpufx converts on the GPU (the list above, plus
+  `yuvj420p`/`yuvj422p`/`yuvj444p`); FFmpeg converts other formats to one of them. An input with
   `formats` receives the stream's format as is; if it is not in the list, configuring the filter graph fails.
   To make it work, change the format first with `format=yuv420p,gpufx=...`. The size is checked
   at configuration and whenever the frame size changes. A misspelled format name is also an error.
 - **`gpufx run`:** the format comes from the PNG (`rgba`, `rgb24`, `gray`, `ya8`, and the 16-bit versions
   `rgba64be`, `rgb48be`, `gray16be`, `ya16be`). The CLI always writes an RGBA PNG, so it does not check
   `output.formats`.
-- Shaders always see 8-bit RGBA, whatever the input/output format is: the conversion happens outside the shader.
+- Shaders always see RGBA with straight alpha, whatever the input/output format is: the conversion happens
+  on the GPU outside the shader. The textures are `rgba8unorm`, or `rgba16float` when an input or the
+  output of the chain has more than 8 bits (10-bit video keeps its precision).
 
 Each element of `params`:
 
@@ -131,7 +139,7 @@ struct GpufxGlobals {
 struct GpufxParams { strength: f32 };
 @group(0) @binding(0) var<uniform> globals: GpufxGlobals;
 @group(0) @binding(1) var<uniform> params: GpufxParams;
-@group(0) @binding(2) var out_tex: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var out_tex: texture_storage_2d<rgba8unorm, write>; // rgba16float above 8 bits
 @group(0) @binding(3) var smp: sampler;
 @group(0) @binding(4) var src: texture_2d<f32>;
 fn gpufx_in_bounds(id: vec3u) -> bool
@@ -158,7 +166,9 @@ Notes:
 - The runtime dispatches in **8×8** groups; use `@workgroup_size(8, 8)`.
 - Compute shaders have no derivatives, so use `textureSampleLevel(..., 0.0)` or
   `textureLoad` instead of `textureSample`.
-- Colors are 8-bit RGBA, 0..1, with no gamma conversion (sRGB values as in the video).
+- Colors are RGBA 0..1 (8-bit or half float), with no gamma conversion (sRGB values as in the video).
+  Always write through `gpufx_write`: the storage format of `out_tex` depends on the frames (in GLSL the
+  prelude declares it `rgba8` or `rgba16f`).
 
 ## Writing GLSL shaders
 

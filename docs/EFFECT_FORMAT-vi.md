@@ -39,7 +39,7 @@ scripts/pack-effects.sh --check -o out my-fx    # biên dịch shader trên GPU 
 | `name` | chuỗi | có | Tên hiển thị |
 | `version`, `description` | chuỗi | không | |
 | `inputs` | mảng | không (`[{"name":"src"}]`) | Các video input, theo thứ tự pad của filter, kèm quy tắc (xem bên dưới) |
-| `output` | `{formats}` | không (`{"formats":["rgba"]}`) | Pixel format output được phép |
+| `output` | `{formats}` | không (`rgba` và mọi format chuyển trên GPU) | Pixel format output được phép |
 | `params` | mảng | không | Tham số, xem bên dưới |
 | `textures` | mảng `{name, path}` | không | Ảnh PNG đi kèm (LUT, mask) |
 | `passes` | mảng | có | Các pass compute, chạy theo thứ tự |
@@ -64,7 +64,12 @@ Mỗi phần tử `inputs`:
 | `width`, `height` | không giới hạn | `{ "min": 16, "max": 4096, "multiple_of": 2 }`, mỗi trường đều tuỳ chọn |
 | `same_size` | `false` | Kích thước phải bằng input đầu tiên (không dùng cho input đầu) |
 
-`output.formats`: danh sách pixel format output được phép, theo thứ tự ưu tiên. FFmpeg
+`output.formats`: danh sách pixel format output được phép, theo thứ tự ưu tiên. Không có `output` thì
+danh sách là `rgba`, `rgba64le`, `nv12`, `p010le`, `yuv420p`, `yuv422p`, `yuv444p`, `yuv420p10le`,
+`yuv422p10le`, `yuv444p10le`, `yuva420p`, `yuva444p`: các format gpufx ghi trên GPU. Vì vậy hiệu ứng
+không có `output.formats` có thể xuất YUV không alpha: alpha mà hiệu ứng ghi bị bỏ, trừ khi filter
+phía sau nhận format có alpha. **Hiệu ứng tạo ra alpha nên khai báo `output.formats`** (ví dụ
+`["rgba", "yuva420p"]`). FFmpeg
 chọn một format trong danh sách khi nối filter; filter phía sau đòi format ngoài danh sách
 thì FFmpeg tự chèn bộ chuyển đổi sau `gpufx`.
 
@@ -79,14 +84,17 @@ thì FFmpeg tự chèn bộ chuyển đổi sau `gpufx`.
 
 Cách áp dụng:
 
-- **FFmpeg:** input không có `formats` vẫn như cũ (FFmpeg tự đổi sang RGBA). Input có
+- **FFmpeg:** input không có `formats` nhận các format gpufx chuyển trên GPU (danh sách trên, thêm
+  `yuvj420p`/`yuvj422p`/`yuvj444p`); FFmpeg đổi format khác sang một trong số đó. Input có
   `formats` nhận nguyên format của stream; khác danh sách thì lỗi khi cấu hình filter graph.
   Muốn chạy thì đổi format trước bằng `format=yuv420p,gpufx=...`. Kích thước được kiểm tra
   khi cấu hình và mỗi khi kích thước frame đổi. Tên format sai chính tả cũng là lỗi.
 - **`gpufx run`:** format lấy từ PNG (`rgba`, `rgb24`, `gray`, `ya8`, bản 16-bit là
   `rgba64be`, `rgb48be`, `gray16be`, `ya16be`). CLI luôn ghi PNG RGBA nên không kiểm tra
   `output.formats`.
-- Shader luôn thấy RGBA 8-bit, dù format vào/ra là gì: chuyển đổi nằm ngoài shader.
+- Shader luôn thấy RGBA alpha thường (straight), dù format vào/ra là gì: chuyển đổi chạy trên GPU,
+  ngoài shader. Texture là `rgba8unorm`, hoặc `rgba16float` khi input hay output của chuỗi trên 8 bit
+  (video 10-bit giữ được độ chính xác).
 
 Mỗi phần tử `params`:
 
@@ -131,7 +139,7 @@ struct GpufxGlobals {
 struct GpufxParams { strength: f32 };
 @group(0) @binding(0) var<uniform> globals: GpufxGlobals;
 @group(0) @binding(1) var<uniform> params: GpufxParams;
-@group(0) @binding(2) var out_tex: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(2) var out_tex: texture_storage_2d<rgba8unorm, write>; // rgba16float khi trên 8 bit
 @group(0) @binding(3) var smp: sampler;
 @group(0) @binding(4) var src: texture_2d<f32>;
 fn gpufx_in_bounds(id: vec3u) -> bool
@@ -158,7 +166,9 @@ Lưu ý:
 - Runtime dispatch theo nhóm **8×8**; hãy dùng `@workgroup_size(8, 8)`.
 - Trong compute shader không có đạo hàm, nên dùng `textureSampleLevel(..., 0.0)` hoặc
   `textureLoad` thay cho `textureSample`.
-- Màu là RGBA 8-bit, 0..1, không chuyển đổi gamma (giá trị sRGB như trong video).
+- Màu là RGBA 0..1 (8-bit hoặc half float), không chuyển đổi gamma (giá trị sRGB như trong video).
+  Luôn ghi qua `gpufx_write`: storage format của `out_tex` tuỳ theo frame (trong GLSL prelude khai báo
+  `rgba8` hoặc `rgba16f`).
 
 ## Viết shader GLSL
 

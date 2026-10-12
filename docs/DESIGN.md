@@ -101,7 +101,7 @@ Each pass is a **compute shader**. Before the author's code, the runtime inserts
 |---------|--------------------|---------|
 | 0 | `globals.size`, `globals.time`, `globals.frame`, `globals.time_int`, `globals.time_frac`, `globals.pixel_aspect` | Output size (px), time (seconds, f32), frame number, exact time (whole seconds + fraction), pixel aspect ratio (SAR) |
 | 1 | `params.<name>` | Parameters from the manifest |
-| 2 | `out_tex` | Texture the result is written to (`rgba8unorm`) |
+| 2 | `out_tex` | Texture the result is written to (`rgba8unorm`, or `rgba16float` when a frame of the chain has more than 8 bits) |
 | 3 | `smp` | Linear sampler, clamp |
 | 4.. | input/texture/pass names | Textures to read (`texture_2d<f32>`) |
 
@@ -155,10 +155,10 @@ gpufx=effect=<zip|directory>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)
   vectors and video enc params are dropped because the pixels have changed.
 - If an input's size or pixel format changes midstream, that is an error (`ffmpeg` rebuilds the
   graph itself, so you only hit this when using libavfilter directly).
-- Warnings (non-blocking): different SARs across inputs, inputs above 8 bit (the pipeline is 8-bit RGBA),
-  HDR PQ/HLG inputs (the shader treats them as SDR), interlaced inputs (the shader sees two fields as one
-  frame). Shaders work with straight alpha: the filter un-premultiplies inputs by itself
-  (EXR, JPEG XL...) and premultiplies again when the output needs it.
+- Warnings (non-blocking): different SARs across inputs, inputs above 10 bits (effects work in half
+  float, about 11 bits), HDR PQ/HLG inputs (the shader treats them as SDR), interlaced inputs (the shader
+  sees two fields as one frame). Shaders work with straight alpha: libgpufx divides premultiplied inputs
+  (EXR, JPEG XL...) by alpha on the GPU and multiplies again when the output needs it.
 
 Examples:
 
@@ -179,11 +179,37 @@ ffmpeg -i in.mp4 -vf "gpufx=effect='gaussian-blur.zip|gradient-map.zip':params='
 
 ## 6. Frame path and performance
 
-**Prototype (working):** RGBA frame in RAM → texture upload → compute passes → copy back to
-RAM. If an input does not declare `formats`, FFmpeg inserts `scale`/`format` to convert YUV ↔ RGBA;
-if an input has `formats` (and the output is not RGBA), the filter receives the frame as is, checks it against the
-manifest rules, then converts it with `swscale`. All `gpufx` filters in the same
-process share one GPU device.
+**Working now (P1 done):** frame planes in RAM → texture upload → built-in conversion pass → effect
+passes → built-in conversion pass → copy back to RAM. libgpufx converts `rgba`, `rgba64le`, `nv12`,
+`p010le`, `yuv420p`/`yuv422p`/`yuv444p` and their `10le` versions, `yuva420p`, `yuva444p` (and the
+`yuvj` aliases) itself:
+
+- Each plane is uploaded to an integer texture (`r8uint`, `rg8uint`, `r16uint`, `rg16uint`,
+  `rgba16uint`: core WebGPU formats on every backend, unlike `r16unorm`, which needs a native-only
+  feature). A compute pass applies the matrix (BT.601, BT.709, BT.2020 non-constant luminance) and range
+  (limited/full) of the `AVFrame`, upsamples chroma bilinearly at its siting (left, centre, top-left, top,
+  bottom-left, bottom; unspecified is left) and writes the RGBA texture the first effect reads. Straight
+  8-bit RGBA skips the pass.
+- On output a pass converts the RGBA result to the output format (chroma downsampled with a triangle
+  filter, `[1 3 3 1]` centred, `[1 2 1]` co-sited) and packs each plane into a storage buffer, which is
+  copied to one mappable buffer and read back.
+- RGBA textures are `rgba16float` when a frame of the chain (an input or the output) has more than 8 bits,
+  so 10-bit survives the chain; otherwise `rgba8unorm`. Package PNGs stay `rgba8unorm`.
+- The filter: inputs without `formats` accept these formats directly (FFmpeg converts other formats to
+  one of them); inputs with `formats` receive the frame as is. Formats, matrices (FCC, SMPTE 240M,
+  YCgCo...) and BT.2020 constant luminance that libgpufx does not handle are converted with `swscale` to
+  `rgba` (or `rgba64le` above 8 bits) as before; so is the output. A manifest without `output` may output
+  any of these formats (`rgba` first), so an encoder taking `yuv420p` needs no `scale` after `gpufx`.
+  Such an output may be YUV without alpha, dropping the alpha the effect writes: effects that produce alpha
+  declare `output.formats`.
+- Unspecified chroma siting is centre for full range frames (JPEG/MJPEG) and left otherwise.
+- Each package compiles its `rgba8unorm` pipelines when it loads and its `rgba16float` ones when the
+  first frame above 8 bits comes (that frame waits for the compile; an error names the package).
+- `GPUFX_API_VERSION` only grows by additions: the filter accepts a library whose version is at least
+  the header's.
+- A disabled filter (timeline) converts input 0 to the output format on the GPU without running effects.
+
+All `gpufx` filters in the same process share one GPU device.
 
 Loaded packages are shared too. Each package (keyed by absolute path and GPU device) is read and compiled
 only once per process: a `Program` holds the manifest, pipelines, PNG textures and
@@ -196,7 +222,7 @@ The main costs are upload/readback and color conversion on the CPU. The roadmap 
 
 | Phase | Change | Benefit |
 |-------|--------|---------|
-| P1 | Convert YUV (NV12/P010/yuv420p) ↔ RGBA on the GPU in the runtime; `rgba16float` textures for intermediate passes | Drops `swscale`, supports 10-bit/HDR |
+| P1 (done) | Convert YUV (NV12/P010/yuv420p...) ↔ RGBA on the GPU in the runtime; `rgba16float` textures when a frame is above 8 bits | Drops `swscale`, supports 10-bit/HDR |
 | P2 | Pipelining: double-buffered readback, no blocking on the previous frame | 2–3× throughput on discrete GPUs |
 | P3 | **Zero-copy** with `AV_PIX_FMT_VULKAN`: create the wgpu device from `AVVulkanDeviceContext` (`wgpu-hal` `create_device_from_hal`) and import the `VkImage` of `AVVKFrame` | No trip through RAM when decoding/encoding with Vulkan |
 | P4 | **CUDA** interop (NVDEC/NVENC): `hwmap` CUDA → Vulkan (external memory) or `VK_KHR_external_memory` directly | Works with `-hwaccel cuda` |
@@ -234,7 +260,8 @@ VRAM is limited, so GPU memory is kept as low as possible and nothing is duplica
 - No copies on the way in or out: YUV plane textures and the converted RGBA texture are reused frame to
   frame, and the first effect reads the converted texture directly.
 - Intermediate textures (pass outputs, chain links, graph edges) come from a pool keyed by size and
-  format. Textures whose lifetimes do not overlap share memory (ping-pong); a texture goes back to the pool
+  format (done for chains: a 1-input 2-effect chain of one pass each allocates two pass outputs, a third
+  effect reuses the first). Textures whose lifetimes do not overlap share memory (ping-pong); a texture goes back to the pool
   right after its last reader. The graph check computes the peak number of live textures up front, so a
   wide graph costs only the textures alive at the same time, not one per node.
 - `rgba16float` (twice the size of `rgba8unorm`) only where precision needs it (inputs or outputs above
@@ -305,7 +332,8 @@ untouched), runs `integrate.sh`, then configures FFmpeg with:
   `docker/keep-filters.txt` (`null`, `format`, `scale`, `trim`, `crop`, `hflip`, `vflip`,
   `transpose`, `rotate`, `sendcmd`, `split`, `gpufx`). The video filters that are kept are the infrastructure
   that the ffmpeg CLI inserts itself (trim for `-ss/-t`, rotation from metadata) or that gpufx needs (converting
-  YUV ↔ RGBA). Once gpufx converts color on the GPU itself (P1), `scale` can be dropped too.
+  YUV ↔ RGBA). gpufx converts the common YUV formats on the GPU itself (P1); `scale` stays for the
+  other formats.
 - `libgpufx` is linked dynamically: on Linux `rpath=$ORIGIN` finds `libgpufx.so` next to `ffmpeg`,
   and on Windows `gpufx.dll` sits next to `ffmpeg.exe`. The DLL depends only on system DLLs
   (checked with `objdump`).

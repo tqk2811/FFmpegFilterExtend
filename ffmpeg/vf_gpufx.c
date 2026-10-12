@@ -4,8 +4,9 @@
  *
  * The package manifest decides which pixel formats and sizes each input accepts
  * and which formats the output may have. Inputs with a format list take frames
- * as they come and fail on a mismatch instead of being converted silently; the
- * filter converts to and from the RGBA the GPU works in with swscale.
+ * as they come and fail on a mismatch instead of being converted silently.
+ * libgpufx converts the common YUV formats (NV12, P010, yuv420p...) to and from
+ * the RGBA the effects work in on the GPU; other formats go through swscale.
  *
  * This file is part of FFmpeg.
  *
@@ -61,12 +62,12 @@ typedef struct GpufxContext {
     unsigned nb_inputs;
     ParamExpr *exprs;
     int nb_exprs;
-    AVFrame **rgba;   /* per-input RGBA copies: converted or flipped frames */
+    AVFrame **conv;   /* per-input copies: swscale RGBA conversions or flipped frames */
     SwsContext **in_sws;
     SwsContext *out_sws;
-    AVFrame *rgba_out; /* GPU result when the output format is not RGBA */
+    AVFrame *rgba_out; /* GPU result when swscale converts it to the output format */
     AVFrame **blank;  /* transparent image for inputs > 0 before their first frame */
-    GpufxImage *images;
+    GpufxFrame *frames;
     FFFrameSync fs;
     int64_t frame_count;
     int warned_interlaced;
@@ -235,8 +236,9 @@ static av_cold int init(AVFilterContext *ctx)
         av_log(ctx, AV_LOG_ERROR, "The 'effect' option (path to a .zip package) is required.\n");
         return AVERROR(EINVAL);
     }
-    if (gpufx_version() != GPUFX_API_VERSION) {
-        av_log(ctx, AV_LOG_ERROR, "libgpufx API version %u does not match headers (%u).\n",
+    /* Versions only add functions: a newer library works. */
+    if (gpufx_version() < GPUFX_API_VERSION) {
+        av_log(ctx, AV_LOG_ERROR, "libgpufx API version %u is older than the headers (%u).\n",
                gpufx_version(), GPUFX_API_VERSION);
         return AVERROR(EINVAL);
     }
@@ -266,11 +268,11 @@ static av_cold int init(AVFilterContext *ctx)
         if ((ret = check_format_name(ctx, gpufx_effect_output_format(s->fx, j), 1)) < 0)
             return ret;
 
-    s->rgba   = av_calloc(s->nb_inputs, sizeof(*s->rgba));
+    s->conv   = av_calloc(s->nb_inputs, sizeof(*s->conv));
     s->in_sws = av_calloc(s->nb_inputs, sizeof(*s->in_sws));
-    s->images = av_calloc(s->nb_inputs, sizeof(*s->images));
+    s->frames = av_calloc(s->nb_inputs, sizeof(*s->frames));
     s->blank  = av_calloc(s->nb_inputs, sizeof(*s->blank));
-    if (!s->rgba || !s->in_sws || !s->images || !s->blank)
+    if (!s->conv || !s->in_sws || !s->frames || !s->blank)
         return AVERROR(ENOMEM);
 
     return apply_params(ctx, s->params_str);
@@ -284,18 +286,18 @@ static av_cold void uninit(AVFilterContext *ctx)
     for (int i = 0; i < s->nb_exprs; i++)
         free_expr(&s->exprs[i]);
     av_freep(&s->exprs);
-    for (unsigned i = 0; s->rgba && i < s->nb_inputs; i++)
-        av_frame_free(&s->rgba[i]);
+    for (unsigned i = 0; s->conv && i < s->nb_inputs; i++)
+        av_frame_free(&s->conv[i]);
     for (unsigned i = 0; s->in_sws && i < s->nb_inputs; i++)
         sws_free_context(&s->in_sws[i]);
     for (unsigned i = 0; s->blank && i < s->nb_inputs; i++)
         av_frame_free(&s->blank[i]);
     av_freep(&s->blank);
-    av_freep(&s->rgba);
+    av_freep(&s->conv);
     av_freep(&s->in_sws);
     sws_free_context(&s->out_sws);
     av_frame_free(&s->rgba_out);
-    av_freep(&s->images);
+    av_freep(&s->frames);
     gpufx_effect_free(s->fx);
     s->fx = NULL;
 }
@@ -354,89 +356,158 @@ static int has_alpha(enum AVPixelFormat fmt)
     return !!(av_pix_fmt_desc_get(fmt)->flags & AV_PIX_FMT_FLAG_ALPHA);
 }
 
-/* Shaders work on straight alpha: in place conversions of an RGBA frame we own. */
-static void unpremultiply(AVFrame *f)
+/* RGBA format swscale converts to and from: 16 bits per channel for deep formats. */
+static enum AVPixelFormat rgba_for(enum AVPixelFormat fmt)
 {
-    for (int y = 0; y < f->height; y++) {
-        uint8_t *p = f->data[0] + y * f->linesize[0];
-        for (int x = 0; x < f->width; x++, p += 4) {
-            const unsigned a = p[3];
-            for (int c = 0; c < 3; c++)
-                p[c] = a ? FFMIN(255, (p[c] * 255 + a / 2) / a) : 0;
-        }
+    return av_pix_fmt_desc_get(fmt)->comp[0].depth > 8 ? AV_PIX_FMT_RGBA64LE : AV_PIX_FMT_RGBA;
+}
+
+/* GPUFX_MATRIX_* of a colorspace, or -1 when only swscale converts it. */
+static int gpu_matrix(enum AVColorSpace cs)
+{
+    switch (cs) {
+    case AVCOL_SPC_BT709:      return GPUFX_MATRIX_BT709;
+    case AVCOL_SPC_BT2020_NCL: return GPUFX_MATRIX_BT2020;
+    /* Unknown matrices are BT.601 for swscale too. */
+    case AVCOL_SPC_UNSPECIFIED:
+    case AVCOL_SPC_BT470BG:
+    case AVCOL_SPC_SMPTE170M:  return GPUFX_MATRIX_BT601;
+    default:                   return -1;
     }
 }
 
-static void premultiply(AVFrame *f)
+static uint32_t gpu_chroma_location(const AVFrame *f, int full_range)
 {
-    for (int y = 0; y < f->height; y++) {
-        uint8_t *p = f->data[0] + y * f->linesize[0];
-        for (int x = 0; x < f->width; x++, p += 4)
-            for (int c = 0; c < 3; c++)
-                p[c] = (p[c] * p[3] + 127) / 255;
+    switch (f->chroma_location) {
+    case AVCHROMA_LOC_CENTER:     return GPUFX_CHROMA_CENTER;
+    case AVCHROMA_LOC_TOPLEFT:    return GPUFX_CHROMA_TOPLEFT;
+    case AVCHROMA_LOC_TOP:        return GPUFX_CHROMA_TOP;
+    case AVCHROMA_LOC_BOTTOMLEFT: return GPUFX_CHROMA_BOTTOMLEFT;
+    case AVCHROMA_LOC_BOTTOM:     return GPUFX_CHROMA_BOTTOM;
+    case AVCHROMA_LOC_LEFT:       return GPUFX_CHROMA_LEFT;
+    /*
+     * Unspecified: centred for full range (JPEG/MJPEG convention), else left (the
+     * MPEG-2/H.264 default). swscale makes its own guess on the frames it converts.
+     */
+    default:                      return full_range ? GPUFX_CHROMA_CENTER : GPUFX_CHROMA_LEFT;
     }
 }
 
-/* Gives libgpufx a top-down RGBA view of input i, converting it if needed. */
-static int input_image(AVFilterContext *ctx, unsigned i, AVFrame *in)
+static uint32_t alpha_flags(const AVFrame *f)
+{
+    return f->alpha_mode == AVALPHA_MODE_PREMULTIPLIED && has_alpha(f->format) ?
+           GPUFX_FRAME_PREMULTIPLIED : 0;
+}
+
+/*
+ * Colour properties of f for libgpufx. Returns the format name when the GPU converts
+ * f as it is, or NULL when swscale must convert it (other formats or matrices).
+ */
+static const char *gpu_color(const AVFrame *f, GpufxColor *c)
+{
+    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(f->format);
+    int matrix = GPUFX_MATRIX_BT601;
+
+    if (!gpufx_format_supported(desc->name))
+        return NULL;
+    if (!(desc->flags & AV_PIX_FMT_FLAG_RGB) && (matrix = gpu_matrix(f->colorspace)) < 0)
+        return NULL;
+    c->matrix          = matrix;
+    /* yuvj formats are full range whatever the frame says, as for swscale. */
+    c->range           = f->color_range == AVCOL_RANGE_JPEG || !strncmp(desc->name, "yuvj", 4) ?
+                         GPUFX_RANGE_FULL : GPUFX_RANGE_LIMITED;
+    c->chroma_location = gpu_chroma_location(f, c->range == GPUFX_RANGE_FULL);
+    c->flags           = alpha_flags(f);
+    return desc->name;
+}
+
+/*
+ * Points frames[i] at input i: the frame itself when the GPU converts its format, else
+ * an RGBA copy made by swscale. Effects work on straight alpha: libgpufx divides
+ * premultiplied frames by alpha on the GPU (swscale keeps alpha as it is).
+ */
+static int input_frame(AVFilterContext *ctx, unsigned i, AVFrame *in)
 {
     GpufxContext *s = ctx->priv;
-    const int premultiplied = in->alpha_mode == AVALPHA_MODE_PREMULTIPLIED && has_alpha(in->format);
-    AVFrame *dst;
+    GpufxFrame *g = &s->frames[i];
+    const char *name = gpu_color(in, &g->color);
+    const AVFrame *src = in;
     int ret;
 
-    if (in->format == AV_PIX_FMT_RGBA && in->linesize[0] > 0 && !premultiplied) {
-        s->images[i] = (GpufxImage){ in->data[0], in->width, in->height, in->linesize[0] };
-        return 0;
-    }
-    if ((ret = alloc_frame(&s->rgba[i], AV_PIX_FMT_RGBA, in->width, in->height)) < 0)
-        return ret;
-    dst = s->rgba[i];
-    set_rgba_props(dst, in);
-    if (in->format == AV_PIX_FMT_RGBA) {
-        /* Negative linesize (bottom-up rows): a copy flips it. */
-        if ((ret = av_frame_copy(dst, in)) < 0)
+    if (!name) {
+        enum AVPixelFormat fmt = rgba_for(in->format);
+
+        if ((ret = alloc_frame(&s->conv[i], fmt, in->width, in->height)) < 0)
             return ret;
+        set_rgba_props(s->conv[i], in);
+        if ((ret = sws_convert(&s->in_sws[i], s->conv[i], in)) < 0)
+            return ret;
+        name = av_get_pix_fmt_name(fmt);
+        g->color = (GpufxColor){ GPUFX_MATRIX_BT601, GPUFX_RANGE_FULL, GPUFX_CHROMA_LEFT,
+                                 alpha_flags(in) };
+        src = s->conv[i];
     } else {
-        if ((ret = sws_convert(&s->in_sws[i], dst, in)) < 0)
-            return ret;
+        int flipped = 0;
+
+        for (int p = 0; p < av_pix_fmt_count_planes(in->format); p++)
+            flipped |= in->linesize[p] < 0;
+        /* Negative linesize (bottom-up rows): a copy flips it. */
+        if (flipped) {
+            if ((ret = alloc_frame(&s->conv[i], in->format, in->width, in->height)) < 0 ||
+                (ret = av_frame_copy(s->conv[i], in)) < 0)
+                return ret;
+            src = s->conv[i];
+        }
     }
-    /* swscale keeps alpha as it is, so the copy is still premultiplied: undo it. */
-    if (premultiplied)
-        unpremultiply(dst);
-    s->images[i] = (GpufxImage){ dst->data[0], dst->width, dst->height, dst->linesize[0] };
+    g->format = name;
+    g->width  = src->width;
+    g->height = src->height;
+    for (int p = 0; p < 4; p++) {
+        g->data[p]   = src->data[p];
+        g->stride[p] = FFMAX(src->linesize[p], 0);
+    }
     return 0;
 }
 
 /*
- * Converts the straight alpha RGBA image into out, which has the output link format
- * and color properties. rgba is s->rgba_out or s->rgba[0], or input 0 itself (never
- * modified) when the filter is disabled.
+ * Points target at out when the GPU writes its format and colours, else at
+ * s->rgba_out, which finish_output() then converts into out with swscale.
  */
-static int write_output(GpufxContext *s, AVFrame *out, AVFrame *rgba)
+static int output_target(GpufxContext *s, AVFrame *out, GpufxFrameOut *target)
 {
-    const int premul = out->alpha_mode == AVALPHA_MODE_PREMULTIPLIED && has_alpha(out->format);
+    const char *name = gpu_color(out, &target->color);
+    AVFrame *dst = out;
     int ret;
 
-    if (out->format == AV_PIX_FMT_RGBA) {
-        if (rgba->data[0] != out->data[0])
-            av_image_copy_plane(out->data[0], out->linesize[0], rgba->data[0], rgba->linesize[0],
-                                out->width * 4, out->height);
-        if (premul)
-            premultiply(out);
-        return 0;
-    }
-    if (rgba != s->rgba_out && rgba != s->rgba[0]) {
-        /* Input 0 is not ours to change: work on a copy. */
-        if ((ret = alloc_frame(&s->rgba_out, AV_PIX_FMT_RGBA, out->width, out->height)) < 0 ||
-            (ret = av_frame_copy(s->rgba_out, rgba)) < 0)
+    if (!name) {
+        enum AVPixelFormat fmt = rgba_for(out->format);
+
+        if ((ret = alloc_frame(&s->rgba_out, fmt, out->width, out->height)) < 0)
             return ret;
-        rgba = s->rgba_out;
+        dst  = s->rgba_out;
+        name = av_get_pix_fmt_name(fmt);
+        /* Premultiplied on the GPU when the output wants it; swscale keeps alpha. */
+        target->color = (GpufxColor){ GPUFX_MATRIX_BT601, GPUFX_RANGE_FULL, GPUFX_CHROMA_LEFT,
+                                      alpha_flags(out) };
     }
-    if (premul)
-        premultiply(rgba);
-    set_rgba_props(rgba, out);
-    return sws_convert(&s->out_sws, out, rgba);
+    /* Frames we allocate have top-down rows: a negative linesize would be a huge stride. */
+    av_assert0(dst->linesize[0] > 0);
+    target->format = name;
+    target->width  = dst->width;
+    target->height = dst->height;
+    for (int p = 0; p < 4; p++) {
+        target->data[p]   = dst->data[p];
+        target->stride[p] = FFMAX(dst->linesize[p], 0);
+    }
+    return 0;
+}
+
+static int finish_output(GpufxContext *s, AVFrame *out, const GpufxFrameOut *target)
+{
+    if (target->data[0] == out->data[0])
+        return 0;
+    set_rgba_props(s->rgba_out, out);
+    return sws_convert(&s->out_sws, out, s->rgba_out);
 }
 
 /*
@@ -475,8 +546,7 @@ static int process_frame(FFFrameSync *fs)
     GpufxContext *s = ctx->priv;
     AVFilterLink *outlink = ctx->outputs[0];
     AVFrame *in0 = NULL, *out;
-    AVFrame *dst;
-    GpufxOutput target;
+    GpufxFrameOut target;
     GpufxFrameInfo info;
     double vars[VAR_NB];
     int ret;
@@ -489,7 +559,8 @@ static int process_frame(FFFrameSync *fs)
         if (!in) {
             /* Input i > 0 has not started yet (input 0 always has a frame here). */
             const AVFrame *b = s->blank[i];
-            s->images[i] = (GpufxImage){ b->data[0], b->width, b->height, b->linesize[0] };
+            s->frames[i] = (GpufxFrame){ "rgba", b->width, b->height, { b->data[0] },
+                                         { b->linesize[0] } };
             continue;
         }
         if ((ret = check_frame(ctx, i, in)) < 0)
@@ -509,7 +580,7 @@ static int process_frame(FFFrameSync *fs)
                    av_color_transfer_name(in->color_trc));
             s->warned_hdr = 1;
         }
-        if ((ret = input_image(ctx, i, in)) < 0)
+        if ((ret = input_frame(ctx, i, in)) < 0)
             return ret;
     }
 
@@ -536,48 +607,40 @@ static int process_frame(FFFrameSync *fs)
                                        AV_SIDE_DATA_PROP_COLOR_DEPENDENT);
     av_frame_remove_side_data(out, AV_FRAME_DATA_MOTION_VECTORS);
     av_frame_remove_side_data(out, AV_FRAME_DATA_VIDEO_ENC_PARAMS);
+    if ((ret = output_target(s, out, &target)) < 0)
+        goto fail;
 
     if (ctx->is_disabled) {
         /* Pass input 0 through, converted to the output format. */
-        if ((ret = write_output(s, out, s->images[0].data == in0->data[0] ? in0 : s->rgba[0])) < 0)
-            goto fail;
-        return ff_filter_frame(outlink, out);
-    }
-
-    if (out->format == AV_PIX_FMT_RGBA) {
-        dst = out;
-    } else {
-        if ((ret = alloc_frame(&s->rgba_out, AV_PIX_FMT_RGBA, out->width, out->height)) < 0)
-            goto fail;
-        dst = s->rgba_out;
-    }
-
-    vars[VAR_T]   = fs->pts == AV_NOPTS_VALUE ? NAN : fs->pts * av_q2d(fs->time_base);
-    vars[VAR_N]   = s->frame_count;
-    vars[VAR_W]   = outlink->w;
-    vars[VAR_H]   = outlink->h;
-    vars[VAR_A]   = (double)outlink->w / outlink->h;
-    vars[VAR_SAR] = outlink->sample_aspect_ratio.num ? av_q2d(outlink->sample_aspect_ratio) : 1.0;
-    vars[VAR_DAR] = vars[VAR_A] * vars[VAR_SAR];
-    for (int i = 0; i < s->nb_exprs; i++) {
-        double v = av_expr_eval(s->exprs[i].expr, vars, NULL);
-        if (gpufx_effect_set_param_values(s->fx, s->exprs[i].name, &v, 1) < 0) {
-            ret = gpufx_error(ctx, s->exprs[i].name);
+        if (gpufx_effect_convert_frame(s->fx, &s->frames[0], &target) < 0) {
+            ret = gpufx_error(ctx, "Conversion failed");
             goto fail;
         }
-    }
+    } else {
+        vars[VAR_T]   = fs->pts == AV_NOPTS_VALUE ? NAN : fs->pts * av_q2d(fs->time_base);
+        vars[VAR_N]   = s->frame_count;
+        vars[VAR_W]   = outlink->w;
+        vars[VAR_H]   = outlink->h;
+        vars[VAR_A]   = (double)outlink->w / outlink->h;
+        vars[VAR_SAR] = outlink->sample_aspect_ratio.num ? av_q2d(outlink->sample_aspect_ratio) : 1.0;
+        vars[VAR_DAR] = vars[VAR_A] * vars[VAR_SAR];
+        for (int i = 0; i < s->nb_exprs; i++) {
+            double v = av_expr_eval(s->exprs[i].expr, vars, NULL);
+            if (gpufx_effect_set_param_values(s->fx, s->exprs[i].name, &v, 1) < 0) {
+                ret = gpufx_error(ctx, s->exprs[i].name);
+                goto fail;
+            }
+        }
 
-    /* Frames we allocate have top-down rows: a negative linesize would be a huge stride. */
-    av_assert0(dst->linesize[0] > 0);
-    target = (GpufxOutput){ dst->data[0], dst->width, dst->height, dst->linesize[0] };
-    info   = (GpufxFrameInfo){ isnan(vars[VAR_T]) ? 0.0 : vars[VAR_T], s->frame_count, vars[VAR_SAR] };
-    if (gpufx_effect_process(s->fx, s->images, s->nb_inputs, &target, &info) < 0) {
-        ret = gpufx_error(ctx, "Processing failed");
-        goto fail;
+        info = (GpufxFrameInfo){ isnan(vars[VAR_T]) ? 0.0 : vars[VAR_T], s->frame_count, vars[VAR_SAR] };
+        if (gpufx_effect_process_frames(s->fx, s->frames, s->nb_inputs, &target, &info) < 0) {
+            ret = gpufx_error(ctx, "Processing failed");
+            goto fail;
+        }
+        s->frame_count++;
     }
-    if ((ret = write_output(s, out, dst)) < 0)
+    if ((ret = finish_output(s, out, &target)) < 0)
         goto fail;
-    s->frame_count++;
     return ff_filter_frame(outlink, out);
 
 fail:
@@ -586,9 +649,10 @@ fail:
 }
 
 /*
- * Inputs without a format list get RGBA and FFmpeg converts for them, as before.
- * Inputs with a list accept every format swscale reads, so a frame in a format
- * the effect does not support reaches config_output and fails there.
+ * Inputs without a format list take the formats libgpufx converts on the GPU, and
+ * FFmpeg converts other formats to one of them. Inputs with a list accept every
+ * format swscale reads, so a frame in a format the effect does not support reaches
+ * config_output and fails there.
  * Shaders work on straight alpha. The filter takes premultiplied input and gives
  * premultiplied output itself: the bundles have no premultiply_dynamic filter.
  */
@@ -602,21 +666,19 @@ static int query_formats(const AVFilterContext *ctx,
     int ret;
 
     for (unsigned i = 0; i < s->nb_inputs; i++) {
+        const AVPixFmtDescriptor *desc = NULL;
+        const int listed = gpufx_effect_input_format_count(s->fx, i) > 0;
+
         formats = NULL;
-        if (!gpufx_effect_input_format_count(s->fx, i)) {
-            ret = ff_add_format(&formats, AV_PIX_FMT_RGBA);
-        } else {
-            const AVPixFmtDescriptor *desc = NULL;
+        ret = 0;
+        while (ret >= 0 && (desc = av_pix_fmt_desc_next(desc))) {
+            enum AVPixelFormat fmt = av_pix_fmt_desc_get_id(desc);
 
-            ret = 0;
-            while (ret >= 0 && (desc = av_pix_fmt_desc_next(desc))) {
-                enum AVPixelFormat fmt = av_pix_fmt_desc_get_id(desc);
-
-                if (desc->flags & (AV_PIX_FMT_FLAG_HWACCEL | AV_PIX_FMT_FLAG_BITSTREAM) ||
-                    !sws_isSupportedInput(fmt))
-                    continue;
-                ret = ff_add_format(&formats, fmt);
-            }
+            if (listed ? desc->flags & (AV_PIX_FMT_FLAG_HWACCEL | AV_PIX_FMT_FLAG_BITSTREAM) ||
+                         !sws_isSupportedInput(fmt)
+                       : !gpufx_format_supported(desc->name))
+                continue;
+            ret = ff_add_format(&formats, fmt);
         }
         if (ret < 0 || (ret = ff_formats_ref(formats, &cfg_in[i]->formats)) < 0)
             return ret;
@@ -670,9 +732,9 @@ static int config_output(AVFilterLink *outlink)
                    "input %d:%d; the effect treats pixels of both as the same shape. "
                    "Use setsar or scale to match them.\n", ctx->input_pads[i].name,
                    sar.num, sar.den, sar0.num, sar0.den);
-        if (desc->comp[0].depth > 8)
-            av_log(ctx, AV_LOG_WARNING, "Input '%s' is %s; effects work on 8-bit RGBA, so "
-                   "precision above 8 bits is lost.\n", ctx->input_pads[i].name, desc->name);
+        if (desc->comp[0].depth > 10)
+            av_log(ctx, AV_LOG_WARNING, "Input '%s' is %s; effects work on half float RGBA, so "
+                   "precision above about 11 bits is lost.\n", ctx->input_pads[i].name, desc->name);
 
         /* Transparent black, what an input that has not started yet shows. */
         if (i > 0) {

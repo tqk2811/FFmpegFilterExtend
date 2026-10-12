@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::convert::{texture_2d, work_format, Converter, InputKey, InputSlot, OutputSlot};
+use crate::frame::{Frame, FrameMut, PixelFormat};
 use crate::manifest::{PassDef, ShaderLanguage, StreamInfo};
 use crate::package::Package;
 use crate::params::ParamBlock;
@@ -50,6 +52,7 @@ pub struct GpuContext {
     device: wgpu::Device,
     queue: wgpu::Queue,
     info: wgpu::AdapterInfo,
+    conv: Converter,
 }
 
 impl GpuContext {
@@ -74,10 +77,22 @@ impl GpuContext {
             request(true)
                 .map_err(|fallback| Error::Gpu(format!("no GPU adapter for backend {backend:?}: {first}; software fallback: {fallback}")))
         })?;
-        let (device, queue) =
-            pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("gpufx"), ..Default::default() }))
-                .map_err(|e| Error::Gpu(e.to_string()))?;
-        Ok(Arc::new(GpuContext { device, queue, info: adapter.get_info() }))
+        // Output planes are encoded into storage buffers: allow what the adapter allows,
+        // an 8K RGBA64 frame is above the 128 MiB default.
+        let supported = adapter.limits();
+        let required_limits = wgpu::Limits {
+            max_storage_buffer_binding_size: supported.max_storage_buffer_binding_size,
+            max_buffer_size: supported.max_buffer_size,
+            ..Default::default()
+        };
+        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+            label: Some("gpufx"),
+            required_limits,
+            ..Default::default()
+        }))
+        .map_err(|e| Error::Gpu(e.to_string()))?;
+        let conv = Converter::new(&device);
+        Ok(Arc::new(GpuContext { device, queue, info: adapter.get_info(), conv }))
     }
 
     /// e.g. `"NVIDIA GeForce RTX 4070 (Vulkan)"`.
@@ -86,7 +101,7 @@ impl GpuContext {
     }
 }
 
-/// A tightly or loosely packed RGBA8 image in CPU memory.
+/// A tightly or loosely packed RGBA8 image in CPU memory. [`Frame`] takes other formats.
 #[derive(Debug, Clone, Copy)]
 pub struct Image<'a> {
     pub data: &'a [u8],
@@ -94,23 +109,6 @@ pub struct Image<'a> {
     pub height: u32,
     /// Bytes per row; at least `width * 4`.
     pub stride: u32,
-}
-
-impl Image<'_> {
-    fn check(&self, what: &str) -> Result<(), Error> {
-        let ok = self.width > 0
-            && self.height > 0
-            && self.stride >= self.width * 4
-            && self.data.len() as u64 >= (self.height as u64 - 1) * self.stride as u64 + self.width as u64 * 4;
-        if ok {
-            Ok(())
-        } else {
-            Err(Error::Frame(format!(
-                "{what}: buffer does not hold a {}x{} RGBA image with stride {}",
-                self.width, self.height, self.stride
-            )))
-        }
-    }
 }
 
 /// Where an effect writes its RGBA8 result.
@@ -169,7 +167,6 @@ fn globals_bytes(size: (u32, u32), info: &FrameInfo) -> [u8; GLOBALS_SIZE as usi
     g
 }
 
-const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const WORKGROUP: u32 = 8;
 const FIRST_TEXTURE_BINDING: u32 = 4;
 
@@ -183,35 +180,21 @@ struct Pass {
 /// Pass outputs and bind groups of one effect, for one set of input textures.
 struct Bound {
     size: (u32, u32),
+    /// Pass outputs are `rgba16float` (else `rgba8unorm`).
+    deep: bool,
     outputs: HashMap<String, wgpu::Texture>,
     bind_groups: Vec<wgpu::BindGroup>,
 }
 
-/// Frame upload and readback resources, shared by the effects of a chain.
+/// Frame upload, conversion and readback resources, shared by the effects of a chain.
+#[derive(Default)]
 struct FrameIo {
-    sizes: Vec<(u32, u32)>,
-    inputs: Vec<wgpu::Texture>,
-    readback: wgpu::Buffer,
-    padded_row: u32,
-}
-
-impl FrameIo {
-    fn new(device: &wgpu::Device, names: &[String], sizes: Vec<(u32, u32)>) -> Self {
-        let inputs = names
-            .iter()
-            .zip(&sizes)
-            .map(|(name, &(w, h))| create_texture(device, name, w, h, wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST))
-            .collect();
-        let (w, h) = sizes[0];
-        let padded_row = (w * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("gpufx readback"),
-            size: padded_row as u64 * h as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        FrameIo { sizes, inputs, readback, padded_row }
-    }
+    /// How many times textures or bind groups were made; see [`EffectChain::allocations`].
+    allocations: usize,
+    /// The frames of the chain carry more than 8 bits: see [`work_format`].
+    deep: bool,
+    inputs: Vec<InputSlot>,
+    output: Option<OutputSlot>,
 }
 
 /// The immutable, compiled part of an effect: package, pipelines, textures and sampler.
@@ -220,7 +203,10 @@ impl FrameIo {
 pub struct Program {
     ctx: Arc<GpuContext>,
     package: Package,
+    /// Pipelines writing `rgba8unorm`, for chains of 8-bit frames.
     passes: Vec<Pass>,
+    /// Pipelines writing `rgba16float`, compiled the first time a deeper frame comes.
+    deep_passes: std::sync::OnceLock<Result<Vec<Pass>, String>>,
     sampler: wgpu::Sampler,
     textures: HashMap<String, wgpu::Texture>,
 }
@@ -244,22 +230,44 @@ impl Program {
             let img = image::load_from_memory(package.file(&t.path)?)
                 .map_err(|e| Error::Package(format!("texture `{}`: {e}", t.path)))?
                 .to_rgba8();
-            let tex = create_texture(
+            // Package images stay 8-bit: they are only read.
+            let (w, h) = (img.width(), img.height());
+            let tex = texture_2d(
                 device,
                 &t.name,
-                img.width(),
-                img.height(),
+                w,
+                h,
+                wgpu::TextureFormat::Rgba8Unorm,
                 wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             );
-            upload(&ctx.queue, &tex, &Image { data: img.as_raw(), width: img.width(), height: img.height(), stride: img.width() * 4 });
+            ctx.queue.write_texture(
+                tex.as_image_copy(),
+                img.as_raw(),
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
             textures.insert(t.name.clone(), tex);
         }
 
         let mut passes = Vec::new();
         for (i, def) in package.manifest.passes.iter().enumerate() {
-            passes.push(compile_pass(&ctx, &package, &params, i, def)?);
+            passes.push(compile_pass(&ctx, &package, &params, i, def, false)?);
         }
-        Ok(Arc::new(Program { ctx, package, passes, sampler, textures }))
+        Ok(Arc::new(Program { ctx, package, passes, deep_passes: Default::default(), sampler, textures }))
+    }
+
+    /// The pipelines for one work format; the shaders were validated in `new`.
+    fn passes(&self, deep: bool) -> Result<&[Pass], Error> {
+        if !deep {
+            return Ok(&self.passes);
+        }
+        let compiled = self.deep_passes.get_or_init(|| {
+            let params = ParamBlock::new(&self.package.manifest.params).map_err(|e| e.to_string())?;
+            let defs = self.package.manifest.passes.iter().enumerate();
+            defs.map(|(i, def)| compile_pass(&self.ctx, &self.package, &params, i, def, true).map_err(|e| e.to_string())).collect()
+        });
+        // Compiled when the first frame above 8 bits comes: name the package in errors.
+        compiled.as_deref().map_err(|e| Error::Shader(format!("{} (rgba16float variant): {e}", self.package.manifest.name)))
     }
 
     pub fn context(&self) -> &Arc<GpuContext> {
@@ -331,31 +339,31 @@ impl Effect {
     /// into `out`, which must have the size of `inputs[0]`.
     /// Fails with [`Error::Unsupported`] when the input sizes break the manifest rules.
     pub fn process(&mut self, inputs: &[Image], out: ImageMut, info: &FrameInfo) -> Result<(), Error> {
-        let mut io = self.io.take();
-        let res = run(std::slice::from_mut(self), &mut io, inputs, out, info);
-        self.io = io;
+        let frames: Vec<Frame> = inputs.iter().map(|&i| i.into()).collect();
+        self.process_frames(&frames, out.into(), info)
+    }
+
+    /// [`Effect::process`] for frames in any [`PixelFormat`]: they are converted to and
+    /// from RGBA on the GPU.
+    pub fn process_frames(&mut self, inputs: &[Frame], out: FrameMut, info: &FrameInfo) -> Result<(), Error> {
+        let mut io = self.io.take().unwrap_or_default();
+        let res = run(std::slice::from_mut(self), &mut io, inputs, out, Some(info));
+        self.io = Some(io);
         res
     }
 
-    /// Creates the pass outputs and bind groups for `inputs` (one texture per manifest
-    /// input). Called again whenever the input textures are created anew.
-    fn bind(&mut self, inputs: &[&wgpu::Texture], size: (u32, u32)) {
+    /// Creates the bind groups for `inputs` (one texture per manifest input) and the
+    /// pass `outputs` handed out by `allocate`. Called again whenever they change.
+    fn bind(
+        &mut self,
+        inputs: &[&wgpu::Texture],
+        outputs: HashMap<String, wgpu::Texture>,
+        size: (u32, u32),
+        deep: bool,
+    ) -> Result<(), Error> {
         let program = &self.program;
         let device = &program.ctx.device;
-        let (w, h) = size;
-        let mut outputs = HashMap::new();
-        for pass in &program.passes {
-            outputs.entry(pass.output.clone()).or_insert_with(|| {
-                create_texture(
-                    device,
-                    &pass.output,
-                    w,
-                    h,
-                    wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
-                )
-            });
-        }
-
+        let passes = program.passes(deep)?;
         let lookup = |name: &str| -> &wgpu::Texture {
             if let Some(i) = program.package.manifest.inputs.iter().position(|d| d.name == name) {
                 inputs[i]
@@ -365,8 +373,7 @@ impl Effect {
                 &outputs[name]
             }
         };
-        let bind_groups = program
-            .passes
+        let bind_groups = passes
             .iter()
             .map(|pass| {
                 let views: Vec<wgpu::TextureView> = pass.inputs.iter().map(|n| lookup(n).create_view(&Default::default())).collect();
@@ -386,13 +393,14 @@ impl Effect {
                 device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("gpufx pass"), layout: &pass.layout, entries: &entries })
             })
             .collect();
-        self.bound = Some(Bound { size, outputs, bind_groups });
+        self.bound = Some(Bound { size, deep, outputs, bind_groups });
+        Ok(())
     }
 
     /// The texture the last pass writes. Only valid after `bind`.
     fn output(&self) -> &wgpu::Texture {
         let bound = self.bound.as_ref().expect("bound before use");
-        &bound.outputs[&self.program.passes.last().expect("validated").output]
+        &bound.outputs[&self.program.package.manifest.passes.last().expect("validated").output]
     }
 
     fn encode(&self, cpass: &mut wgpu::ComputePass, info: &FrameInfo) {
@@ -401,7 +409,8 @@ impl Effect {
         queue.write_buffer(&self.globals, 0, &globals_bytes(bound.size, info));
         queue.write_buffer(&self.params_buf, 0, &self.params.bytes());
         let (w, h) = bound.size;
-        for (pass, bg) in self.program.passes.iter().zip(&bound.bind_groups) {
+        let passes = self.program.passes(bound.deep).expect("compiled in bind");
+        for (pass, bg) in passes.iter().zip(&bound.bind_groups) {
             cpass.set_pipeline(&pass.pipeline);
             cpass.set_bind_group(0, bg, &[]);
             cpass.dispatch_workgroups(w.div_ceil(WORKGROUP), h.div_ceil(WORKGROUP), 1);
@@ -411,17 +420,19 @@ impl Effect {
 
 /// Runs `effects` one after the other: the frames are uploaded once, every pass goes into
 /// one command buffer and the result of the last effect is read back once. Effects after
-/// the first take one input, the output of the effect before them.
-fn run(effects: &mut [Effect], io: &mut Option<FrameIo>, inputs: &[Image], out: ImageMut, info: &FrameInfo) -> Result<(), Error> {
+/// the first take one input, the output of the effect before them. Without `info` the
+/// effects are bypassed: input 0 is only converted to the output format.
+fn run(effects: &mut [Effect], io: &mut FrameIo, inputs: &[Frame], mut out: FrameMut, info: Option<&FrameInfo>) -> Result<(), Error> {
     let first = &effects[0];
-    if inputs.len() != first.input_count() {
-        return Err(Error::Frame(format!("effect expects {} inputs, got {}", first.input_count(), inputs.len())));
+    let wanted = if info.is_some() { first.input_count() } else { 1 };
+    if inputs.len() != wanted {
+        return Err(Error::Frame(format!("effect expects {wanted} inputs, got {}", inputs.len())));
     }
-    for (i, img) in inputs.iter().enumerate() {
-        img.check(&format!("input {i}"))?;
+    for (i, f) in inputs.iter().enumerate() {
+        f.check(&format!("input {i}"))?;
     }
     let (w, h) = (inputs[0].width, inputs[0].height);
-    Image { data: out.data, width: out.width, height: out.height, stride: out.stride }.check("output")?;
+    out.check("output")?;
     if (out.width, out.height) != (w, h) {
         return Err(Error::Frame(format!(
             "output is {}x{}, the effect writes {w}x{h} (the size of the first input)",
@@ -429,64 +440,160 @@ fn run(effects: &mut [Effect], io: &mut Option<FrameIo>, inputs: &[Image], out: 
         )));
     }
 
-    let sizes: Vec<(u32, u32)> = inputs.iter().map(|i| (i.width, i.height)).collect();
-    if io.as_ref().is_none_or(|io| io.sizes != sizes) {
+    let ctx = first.program.ctx.clone();
+    let (device, queue, conv) = (&ctx.device, &ctx.queue, &ctx.conv);
+    let keys: Vec<InputKey> = inputs
+        .iter()
+        .map(|f| InputKey {
+            format: f.format,
+            width: f.width,
+            height: f.height,
+            direct: f.format == PixelFormat::Rgba && !f.color.premultiplied,
+        })
+        .collect();
+    // A bypass call only brings input 0: keep the slots of the other inputs, and their
+    // depth, so toggling the filter on and off does not rebuild anything.
+    let others = if info.is_some() { &[][..] } else { io.inputs.get(1..).unwrap_or_default() };
+    let deep = keys.iter().chain(others.iter().map(|slot| &slot.key)).any(|k| work_format(k.format) != wgpu::TextureFormat::Rgba8Unorm)
+        || work_format(out.format) != wgpu::TextureFormat::Rgba8Unorm;
+    let stale = io.deep != deep
+        || if info.is_some() {
+            io.inputs.len() != keys.len() || io.inputs.iter().zip(&keys).any(|(slot, k)| slot.key != *k)
+        } else {
+            io.inputs.first().is_none_or(|slot| slot.key != keys[0])
+        };
+    if stale {
+        let mut keys = keys.clone();
+        if info.is_none() {
+            // Other inputs keep their keys, or take input 0's when there are none yet.
+            for i in 1..first.input_count() {
+                keys.push(io.inputs.get(i).map_or(keys[0], |slot| slot.key));
+            }
+        }
         // Size rules of the manifests; pixel formats are the caller's to check.
-        let streams: Vec<StreamInfo> = sizes.iter().map(|&(width, height)| StreamInfo { format: None, width, height }).collect();
+        let streams: Vec<StreamInfo> = keys.iter().map(|k| StreamInfo { format: None, width: k.width, height: k.height }).collect();
         first.package().manifest.check_inputs(&streams)?;
         for fx in &effects[1..] {
             fx.package().manifest.check_inputs(&streams[..1])?;
         }
         let names: Vec<String> = first.package().manifest.inputs.iter().map(|d| d.name.clone()).collect();
-        let new = FrameIo::new(&first.program.ctx.device, &names, sizes);
-        let mut prev: Vec<wgpu::Texture> = new.inputs.clone();
+        // Drop the old textures before making new ones.
+        io.inputs.clear();
+        io.output = None;
         for fx in effects.iter_mut() {
-            fx.bind(&prev.iter().collect::<Vec<_>>(), (w, h));
+            fx.bound = None;
+        }
+        io.deep = deep;
+        io.allocations += 1;
+        io.inputs = keys.iter().zip(&names).map(|(&k, d)| InputSlot::new(device, conv, d, k, deep)).collect();
+        let mut prev: Vec<wgpu::Texture> = io.inputs.iter().map(|slot| slot.texture.clone()).collect();
+        let outputs = allocate(effects, device, (w, h), deep)?;
+        for (fx, outputs) in effects.iter_mut().zip(outputs) {
+            fx.bind(&prev.iter().collect::<Vec<_>>(), outputs, (w, h), deep)?;
             prev = vec![fx.output().clone()];
         }
-        *io = Some(new);
+        // Its bind groups read textures that are gone.
+        io.output = None;
     }
-    let io = io.as_ref().expect("just created");
-    let ctx = &effects[0].program.ctx;
-    let (device, queue) = (&ctx.device, &ctx.queue);
+    if io.output.as_ref().is_none_or(|o| o.key != (out.format, w, h)) {
+        io.output = Some(OutputSlot::new(device, out.format, w, h)?);
+    }
+    let output = io.output.as_mut().expect("just created");
+    let bypass = info.is_none();
+    if !output.is_bound(bypass) {
+        let source = if bypass { &io.inputs[0].texture } else { effects.last().expect("at least one effect").output() };
+        output.bind(device, conv, source, bypass);
+        io.allocations += 1;
+    }
+    let output = io.output.as_ref().expect("just created");
 
-    for (tex, img) in io.inputs.iter().zip(inputs) {
-        upload(queue, tex, img);
+    for (slot, f) in io.inputs.iter().zip(inputs) {
+        slot.upload(queue, &f.planes, &f.strides, &f.color);
     }
     let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gpufx") });
     {
         let mut cpass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("gpufx"), timestamp_writes: None });
-        for fx in effects.iter() {
-            fx.encode(&mut cpass, info);
+        for slot in &io.inputs[..inputs.len()] {
+            slot.encode(conv, &mut cpass);
         }
+        if let Some(info) = info {
+            for fx in effects.iter() {
+                fx.encode(&mut cpass, info);
+            }
+        }
+        output.encode(queue, conv, &mut cpass, &out.color, bypass);
     }
-    enc.copy_texture_to_buffer(
-        effects.last().expect("at least one effect").output().as_image_copy(),
-        wgpu::TexelCopyBufferInfo {
-            buffer: &io.readback,
-            layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(io.padded_row), rows_per_image: Some(h) },
-        },
-        wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-    );
+    output.copy(&mut enc);
     queue.submit([enc.finish()]);
+    output.read(device, &mut out)
+}
 
-    let slice = io.readback.slice(..);
-    let (tx, rx) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |r| {
-        let _ = tx.send(r);
-    });
-    device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| Error::Gpu(e.to_string()))?;
-    rx.recv().map_err(|e| Error::Gpu(e.to_string()))?.map_err(|e| Error::Gpu(e.to_string()))?;
-    {
-        let mapped = slice.get_mapped_range().map_err(|e| Error::Gpu(e.to_string()))?;
-        let row = (w * 4) as usize;
-        for y in 0..h as usize {
-            let src = &mapped[y * io.padded_row as usize..][..row];
-            out.data[y * out.stride as usize..][..row].copy_from_slice(src);
+/// Hands out the pass output textures of every effect of a chain from a pool: a texture
+/// goes back to the pool after the last pass that reads it, so a chain ping-pongs
+/// between a few textures instead of keeping one per pass per effect.
+fn allocate(
+    effects: &[Effect],
+    device: &wgpu::Device,
+    (w, h): (u32, u32),
+    deep: bool,
+) -> Result<Vec<HashMap<String, wgpu::Texture>>, Error> {
+    // Last pass (counted over the whole chain) that writes or reads each output.
+    let mut last: HashMap<(usize, &str), usize> = HashMap::new();
+    let mut g = 0;
+    for (k, fx) in effects.iter().enumerate() {
+        let m = &fx.program.package.manifest;
+        let passes = fx.program.passes(deep)?;
+        for pass in passes {
+            for name in &pass.inputs {
+                if passes.iter().any(|p| p.output == *name) {
+                    last.insert((k, name), g);
+                } else if k > 0 && m.inputs.iter().any(|d| d.name == *name) {
+                    // The output of the effect before is this effect's input.
+                    let prev = &effects[k - 1].program.passes(deep)?.last().expect("validated").output;
+                    last.insert((k - 1, prev), g);
+                }
+            }
+            let end = last.entry((k, &pass.output)).or_insert(g);
+            *end = (*end).max(g);
+            g += 1;
         }
     }
-    io.readback.unmap();
-    Ok(())
+    let k_last = effects.len() - 1;
+    let final_out = &effects[k_last].program.passes(deep)?.last().expect("validated").output;
+    // Read by the output conversion.
+    last.insert((k_last, final_out), usize::MAX);
+
+    let format = if deep { wgpu::TextureFormat::Rgba16Float } else { wgpu::TextureFormat::Rgba8Unorm };
+    let mut free: Vec<wgpu::Texture> = Vec::new();
+    let mut live: Vec<(usize, wgpu::Texture)> = Vec::new();
+    let mut maps = vec![HashMap::new(); effects.len()];
+    let mut g = 0;
+    for (k, fx) in effects.iter().enumerate() {
+        for pass in fx.program.passes(deep)? {
+            live.retain(|(end, tex)| {
+                if *end < g {
+                    free.push(tex.clone());
+                }
+                *end >= g
+            });
+            if !maps[k].contains_key(&pass.output) {
+                let tex = free.pop().unwrap_or_else(|| {
+                    texture_2d(
+                        device,
+                        "gpufx pass output",
+                        w,
+                        h,
+                        format,
+                        wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+                    )
+                });
+                live.push((last[&(k, pass.output.as_str())], tex.clone()));
+                maps[k].insert(pass.output.clone(), tex);
+            }
+            g += 1;
+        }
+    }
+    Ok(maps)
 }
 
 /// Effects run one after the other in one GPU submission, as if each fed the next
@@ -500,7 +607,7 @@ pub struct EffectChain {
     /// (effect, parameter) of every entry of `param_names`.
     params: Vec<(usize, usize)>,
     param_names: Vec<String>,
-    io: Option<FrameIo>,
+    io: FrameIo,
 }
 
 impl EffectChain {
@@ -555,7 +662,7 @@ impl EffectChain {
                 });
             }
         }
-        Ok(EffectChain { effects, labels, links, params, param_names, io: None })
+        Ok(EffectChain { effects, labels, links, params, param_names, io: FrameIo::default() })
     }
 
     pub fn effects(&self) -> &[Effect] {
@@ -656,34 +763,30 @@ impl EffectChain {
     /// Runs every effect on `inputs` (one per input of the first effect) and writes the
     /// RGBA result of the last one into `out`, which has the size of `inputs[0]`.
     pub fn process(&mut self, inputs: &[Image], out: ImageMut, info: &FrameInfo) -> Result<(), Error> {
-        run(&mut self.effects, &mut self.io, inputs, out, info)
+        let frames: Vec<Frame> = inputs.iter().map(|&i| i.into()).collect();
+        self.process_frames(&frames, out.into(), info)
+    }
+
+    /// [`EffectChain::process`] for frames in any [`PixelFormat`], converted on the GPU.
+    pub fn process_frames(&mut self, inputs: &[Frame], out: FrameMut, info: &FrameInfo) -> Result<(), Error> {
+        run(&mut self.effects, &mut self.io, inputs, out, Some(info))
+    }
+
+    /// How many times frame textures, buffers or bind groups were (re)made: once per new
+    /// size or format, never per frame. For tests and diagnostics.
+    pub fn allocations(&self) -> usize {
+        self.io.allocations
+    }
+
+    /// Converts `input` (in place of input 0) to the format of `out` without running the
+    /// effects, as a disabled filter passes its first input through.
+    pub fn convert(&mut self, input: &Frame, out: FrameMut) -> Result<(), Error> {
+        run(&mut self.effects, &mut self.io, std::slice::from_ref(input), out, None)
     }
 }
 
-fn create_texture(device: &wgpu::Device, label: &str, w: u32, h: u32, usage: wgpu::TextureUsages) -> wgpu::Texture {
-    device.create_texture(&wgpu::TextureDescriptor {
-        label: Some(label),
-        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format: FORMAT,
-        usage,
-        view_formats: &[],
-    })
-}
-
-fn upload(queue: &wgpu::Queue, tex: &wgpu::Texture, img: &Image) {
-    queue.write_texture(
-        tex.as_image_copy(),
-        img.data,
-        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(img.stride), rows_per_image: Some(img.height) },
-        wgpu::Extent3d { width: img.width, height: img.height, depth_or_array_layers: 1 },
-    );
-}
-
 /// WGSL declarations prepended to every pass shader.
-fn prelude(params: &ParamBlock, inputs: &[String]) -> String {
+fn prelude(params: &ParamBlock, inputs: &[String], deep: bool) -> String {
     let mut s = String::from(
         "// ---- generated by gpufx ----\n\
          struct GpufxGlobals {\n    size: vec2f,\n    time: f32,\n    frame: u32,\n    \
@@ -693,7 +796,11 @@ fn prelude(params: &ParamBlock, inputs: &[String]) -> String {
     s.push_str(
         "@group(0) @binding(0) var<uniform> globals: GpufxGlobals;\n\
          @group(0) @binding(1) var<uniform> params: GpufxParams;\n\
-         @group(0) @binding(2) var out_tex: texture_storage_2d<rgba8unorm, write>;\n\
+         @group(0) @binding(2) var out_tex: texture_storage_2d<",
+    );
+    s.push_str(if deep { "rgba16float" } else { "rgba8unorm" });
+    s.push_str(
+        ", write>;\n\
          @group(0) @binding(3) var smp: sampler;\n",
     );
     for (i, name) in inputs.iter().enumerate() {
@@ -710,7 +817,7 @@ fn prelude(params: &ParamBlock, inputs: &[String]) -> String {
 
 /// Inserts the GLSL prelude after the author's `#version` line (adding `#version 450`
 /// when there is none), so their line numbers stay readable in errors.
-fn glsl_with_prelude(params: &ParamBlock, inputs: &[String], user: &str) -> String {
+fn glsl_with_prelude(params: &ParamBlock, inputs: &[String], user: &str, deep: bool) -> String {
     let (version, body) = match user.trim_start().strip_prefix("#version") {
         Some(rest) => {
             let rest_at = user.len() - rest.len();
@@ -725,9 +832,10 @@ fn glsl_with_prelude(params: &ParamBlock, inputs: &[String], user: &str) -> Stri
          layout(set = 0, binding = 0) uniform GpufxGlobals {{ vec2 size; float time; uint frame; \
          int time_int; float time_frac; float pixel_aspect; float gpufx_reserved; }} globals;\n\
          layout(set = 0, binding = 1) uniform GpufxParams {{\n{}}} params;\n\
-         layout(set = 0, binding = 2, rgba8) uniform writeonly image2D out_tex;\n\
+         layout(set = 0, binding = 2, {}) uniform writeonly image2D out_tex;\n\
          layout(set = 0, binding = 3) uniform sampler smp;\n",
-        params.glsl_members()
+        params.glsl_members(),
+        if deep { "rgba16f" } else { "rgba8" }
     ));
     for (i, name) in inputs.iter().enumerate() {
         s.push_str(&format!("layout(set = 0, binding = {}) uniform texture2D {name};\n", FIRST_TEXTURE_BINDING + i as u32));
@@ -742,20 +850,20 @@ fn glsl_with_prelude(params: &ParamBlock, inputs: &[String], user: &str) -> Stri
     s
 }
 
-fn compile_pass(ctx: &GpuContext, pkg: &Package, params: &ParamBlock, index: usize, def: &PassDef) -> Result<Pass, Error> {
+fn compile_pass(ctx: &GpuContext, pkg: &Package, params: &ParamBlock, index: usize, def: &PassDef, deep: bool) -> Result<Pass, Error> {
     let inputs: Vec<String> = match &def.inputs {
         Some(v) => v.clone(),
         None => pkg.manifest.inputs.iter().map(|i| i.name.clone()).chain(pkg.manifest.textures.iter().map(|t| t.name.clone())).collect(),
     };
     let (module, source) = match def.language() {
         ShaderLanguage::Wgsl => {
-            let source = format!("{}{}", prelude(params, &inputs), pkg.text(&def.shader)?);
+            let source = format!("{}{}", prelude(params, &inputs, deep), pkg.text(&def.shader)?);
             let module = naga::front::wgsl::parse_str(&source)
                 .map_err(|e| Error::Shader(format!("{}: {}", def.shader, e.emit_to_string(&source))))?;
             (module, source)
         }
         ShaderLanguage::Glsl => {
-            let source = glsl_with_prelude(params, &inputs, pkg.text(&def.shader)?);
+            let source = glsl_with_prelude(params, &inputs, pkg.text(&def.shader)?, deep);
             let module = naga::front::glsl::Frontend::default()
                 .parse(&naga::front::glsl::Options::from(naga::ShaderStage::Compute), &source)
                 .map_err(|e| Error::Shader(format!("{}: {}", def.shader, e.emit_to_string(&source))))?;
@@ -790,7 +898,7 @@ fn compile_pass(ctx: &GpuContext, pkg: &Package, params: &ParamBlock, index: usi
             visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::StorageTexture {
                 access: wgpu::StorageTextureAccess::WriteOnly,
-                format: FORMAT,
+                format: if deep { wgpu::TextureFormat::Rgba16Float } else { wgpu::TextureFormat::Rgba8Unorm },
                 view_dimension: wgpu::TextureViewDimension::D2,
             },
             count: None,
