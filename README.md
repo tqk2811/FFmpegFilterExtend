@@ -61,9 +61,12 @@ so it does not care how many filters `libavfilter` contains. A command that uses
 only one that reports `No such filter`.
 
 Notes for this build:
-- Only the filters in [docker/keep-filters.txt](docker/keep-filters.txt) remain, plus `gpufx`.
-  Audio filters such as `volume` and `amix`, hw filters (`hwupload`, `scale_cuda`...), `setpts` and `fps`
-  are all gone. If you need another filter, add its name to that file and rebuild.
+- Only the filters in [docker/keep-filters.txt](docker/keep-filters.txt) remain, plus `gpufx`: plumbing
+  (`scale`, `format`, `trim`, `split`, `sendcmd`...) and filters that normalise the inputs: timing, metadata, layout,
+  deinterlacing and colour space (`fps`, `setpts`, `setsar`, `setdar`, `settb`, `setrange`, `setparams`, `pad`, `concat`,
+  `select`, `loop`, `reverse`, `yadif`, `bwdif`, `colorspace`, `showinfo`) plus basic audio (`volume`, `amix`, `adelay`, `afade`, `atempo`...).
+  Visual filters (`drawtext`, `overlay`, `gblur`...) and hw filters (`hwupload`, `scale_cuda`...) are gone.
+  If you need another filter, add its name to that file and rebuild.
 - `ffmpeg` prints `WARNING: library configuration mismatch` in the banner (or when you drop
   `-hide_banner`), because `libavfilter` is configured differently from the other libraries. The warning is harmless.
 - `lib/pkgconfig/libavfilter.pc`, the headers and the import lib still come from the prebuilt (they know nothing

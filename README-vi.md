@@ -59,9 +59,12 @@ nên không quan tâm `libavfilter` có bao nhiêu filter. Lệnh nào gọi fil
 đó báo `No such filter`.
 
 Lưu ý với bản này:
-- Chỉ còn các filter trong [docker/keep-filters.txt](docker/keep-filters.txt) cùng `gpufx`.
-  Filter audio như `volume`, `amix`, filter hw (`hwupload`, `scale_cuda`…), `setpts`, `fps`
-  đều không còn. Cần filter nào thì thêm tên vào file đó rồi build lại.
+- Chỉ còn các filter trong [docker/keep-filters.txt](docker/keep-filters.txt) cùng `gpufx`: filter nối
+  graph (`scale`, `format`, `trim`, `split`, `sendcmd`…) và filter chuẩn hoá đầu vào: thời gian, metadata,
+  bố cục, khử xen kẽ và không gian màu (`fps`, `setpts`, `setsar`, `setdar`, `settb`, `setrange`, `setparams`,
+  `pad`, `concat`, `select`, `loop`, `reverse`, `yadif`, `bwdif`, `colorspace`, `showinfo`), cùng audio cơ bản (`volume`, `amix`, `adelay`,
+  `afade`, `atempo`…). Filter hình (`drawtext`, `overlay`, `gblur`…) và filter hw (`hwupload`,
+  `scale_cuda`…) không còn. Cần filter nào thì thêm tên vào file đó rồi build lại.
 - `ffmpeg` in `WARNING: library configuration mismatch` ở banner (hoặc khi bỏ
   `-hide_banner`), vì `libavfilter` được configure khác các thư viện còn lại. Cảnh báo này vô hại.
 - `lib/pkgconfig/libavfilter.pc`, header và import lib vẫn là của bản build sẵn (không biết
