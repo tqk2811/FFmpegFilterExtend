@@ -6,7 +6,7 @@ members = ["crates/gpufx-core", "crates/gpufx-ffi", "crates/gpufx-cli"]
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/tqk2811/FFmpegFilterExtend"
+repository = "https://github.com/tqk2811/FFmpegGpuFilter"
 
 [workspace.dependencies]
 gpufx-core = { path = "crates/gpufx-core" }

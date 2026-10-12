@@ -1,6 +1,6 @@
 English: [DESIGN.md](DESIGN.md)
 
-# Thiết kế: FFmpegFilterExtend (gpufx)
+# Thiết kế: FFmpegGpuFilter (gpufx)
 
 > Mục tiêu: chạy hiệu ứng video bằng **shader trên GPU** trong `filter_graph` của FFmpeg,
 > với hiệu ứng được **nạp từ gói `.zip` bên ngoài** (kiểu CapCut). Thêm hiệu ứng mới không

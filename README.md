@@ -1,6 +1,6 @@
 Tiếng Việt: [README-vi.md](README-vi.md)
 
-# FFmpegFilterExtend (gpufx)
+# FFmpegGpuFilter (gpufx)
 
 Video effects powered by **GPU shaders** for FFmpeg, loaded from external **`.zip` packages**
 (CapCut style). FFmpeg is built once with the `gpufx` filter; a new effect is just a new zip package.

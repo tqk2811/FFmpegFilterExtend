@@ -1,6 +1,6 @@
 Tiếng Việt: [DESIGN-vi.md](DESIGN-vi.md)
 
-# Design: FFmpegFilterExtend (gpufx)
+# Design: FFmpegGpuFilter (gpufx)
 
 > Goal: run video effects as **GPU shaders** inside FFmpeg's `filter_graph`, with effects
 > **loaded from external `.zip` packages** (CapCut style). Adding a new effect does not

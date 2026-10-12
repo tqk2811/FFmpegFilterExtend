@@ -1,4 +1,4 @@
-# FFmpegFilterExtend (gpufx)
+# FFmpegGpuFilter (gpufx)
 
 Hiệu ứng video chạy bằng **shader trên GPU** cho FFmpeg, nạp từ **gói `.zip`** bên ngoài
 (kiểu CapCut). FFmpeg chỉ cần build một lần với filter `gpufx`; hiệu ứng mới là gói zip mới.
