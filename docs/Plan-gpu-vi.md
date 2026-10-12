@@ -11,7 +11,7 @@ DESIGN-vi.md mục 6).
 | A2 | Chuỗi `effect='a.zip\|b.zip'`, C API v3, thời gian chính xác, `pixel_aspect` | Xong |
 | B-chung (P1) | YUV (NV12, P010, yuv420p) ↔ RGBA trên GPU; `rgba16float` chỉ khi cần; pool texture, dùng lại buffer staging | Xong (C API v4) |
 | Đồ thị GPU | `gpufx=graph='...'`: `EffectChain` thành DAG, nhiều input/output pad, `split` không copy, texture trả pool sau lần đọc cuối | Xong (C API v5) |
-| B-Vulkan (P3) | Zero-copy `AV_PIX_FMT_VULKAN`: device wgpu từ `AVVulkanDeviceContext`, nhận/trả `VkImage`, semaphore của `AVVKFrame` | Chưa |
+| B-Vulkan (P3) | Zero-copy `AV_PIX_FMT_VULKAN`: device wgpu từ `AVVulkanDeviceContext`, nhận/trả `VkImage`, semaphore của `AVVKFrame` | Xong (C API v6); phần còn lại trong Backlog |
 | B-D3D12 (P5) | `AV_PIX_FMT_D3D12` vào backend DX12 của wgpu; chạy thử trên WARP | Chưa |
 | B-D3D11 (P5) | D3D11 qua shared NT handle sang DX12 | Chưa |
 | Cache shader | Lưu shader/pipeline đã biên dịch ra đĩa, thư mục lấy từ biến môi trường `GPUFX_SHADER_CACHE` | Xong bước 1 (Vulkan `PipelineCache`); DXIL D3D12 và `pack --precompile` trong Backlog |
@@ -31,6 +31,11 @@ DESIGN-vi.md mục 6).
 ## B-Vulkan: phạm vi
 - Test `hwupload → gpufx → split → gpufx… → hwdownload`, gpufx nhiều input đều là frame GPU, trộn
   frame CPU/GPU báo lỗi rõ ràng.
+- Đã làm (chi tiết ở DESIGN-vi.md mục 6, "Frame Vulkan"): wgpu chạy trên chính `VkDevice` của FFmpeg
+  (`wgpu-hal` `device_from_raw`, chỉ thấy extension/feature đã bật), mỗi plane một `VkImage` đọc/ghi tại chỗ,
+  một lần submit chờ/signal timeline semaphore, layout để lại `GENERAL`, khoá frame và queue của FFmpeg;
+  `GpuFrame` + `EffectGraph::encode_gpu` dùng lại được cho D3D12. Test: Rust (so từng byte với đường CPU) và
+  `test-bundle.sh` (framemd5 giống đường phần mềm trên lavapipe, trộn CPU/GPU bị từ chối).
 
 ## Cache shader: phạm vi
 - **Vì sao**: biên dịch tốn thời gian mỗi lần mở gói, nhất là D3D12 (đo trên CI: FXC 50–160 s cho shader lá

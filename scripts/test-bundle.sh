@@ -306,4 +306,82 @@ else
     fail "falling-maple: seeking draws the same frame"; cat "$CLIPS/last.log"
 fi
 
+echo "Vulkan frames:"
+# hwupload -> gpufx -> hwdownload runs on FFmpeg's own Vulkan device, frames never leave
+# the GPU in between, and must give exactly the pixels of the software path. One image per
+# plane (disable_multiplane=1) is what gpufx reads and writes.
+VKDEV="vulkan=vk:0,disable_multiplane=1"
+vk_ff() { "$FF" -hide_banner -nostdin -v error -init_hw_device "$VKDEV" -filter_hw_device vk "$@"; }
+# vk_md5 FORMAT FILTERS...: framemd5 of 3 frames of A in FORMAT, uploaded first.
+vk_md5() {
+    f=$1; shift
+    vk_ff -i "$A" -frames:v 3 -an -vf "format=$f,hwupload,$1,hwdownload,format=$f" -pix_fmt "$f" -f framemd5 - \
+        2> "$CLIPS/last.log" | grep -v '^#' | awk -F, '{print $NF}'
+}
+sw_md5() {
+    "$FF" -hide_banner -nostdin -v error -i "$A" -frames:v 3 -an -vf "format=$1,$2" -pix_fmt "$1" -f framemd5 - \
+        2> "$CLIPS/last.log" | grep -v '^#' | awk -F, '{print $NF}'
+}
+# same NAME HW_MD5 SW_MD5
+same() {
+    if [ -n "$2" ] && [ "$2" = "$3" ]; then pass "$1"; else fail "$1"; cat "$CLIPS/last.log"; fi
+}
+if ! grep -qw hwupload "$CLIPS/filters.txt"; then
+    echo "  skip  this bundle has no hwupload"
+elif ! vk_ff -i "$A" -frames:v 1 -an -vf "format=rgba,hwupload,hwdownload,format=rgba" -f null - > "$CLIPS/last.log" 2>&1; then
+    echo "  skip  no Vulkan device ($(head -n1 "$CLIPS/last.log"))"
+elif ! vk_ff -i "$A" -frames:v 1 -an -vf "format=rgba,hwupload,gpufx=effect=$FX/invert.zip,hwdownload,format=rgba" -f null - > "$CLIPS/last.log" 2>&1; then
+    # A gpufx without Vulkan frames does not take AV_PIX_FMT_VULKAN: no format in common.
+    if grep -q "Impossible to convert\|No format\|negotiat" "$CLIPS/last.log"; then echo "  skip  this gpufx is built without Vulkan frames"
+    else fail "gpufx takes Vulkan frames"; cat "$CLIPS/last.log"; fi
+else
+    same "rgba: grayscale on Vulkan frames equals the software path" \
+        "$(vk_md5 rgba "gpufx=effect=$FX/grayscale.zip")" "$(sw_md5 rgba "gpufx=effect=$FX/grayscale.zip")"
+    for f in nv12 yuv420p yuv444p p010le yuv420p10le rgba64le; do
+        same "$f: vignette on Vulkan frames equals the software path" \
+            "$(vk_md5 $f "gpufx=effect=$FX/vignette.zip:params='strength=0.7'")" \
+            "$(sw_md5 $f "gpufx=effect=$FX/vignette.zip:params='strength=0.7'")"
+    done
+    # Two gpufx in a row: the second waits on the semaphores the first signals.
+    same "invert twice on Vulkan frames restores the frame" \
+        "$(vk_md5 rgba "gpufx=effect=$FX/invert.zip,gpufx=effect=$FX/invert.zip")" "$(sw_md5 rgba "null")"
+    # A graph whose two inputs are one frame (split before gpufx): locked and waited once.
+    G="[0]split[a][b]; [a]$FX/gaussian-blur.zip[ba]; [b]$FX/grayscale.zip|$FX/vignette.zip[gb]; [ba][gb]$FX/crossfade.zip[x]; [x][1]$FX/wipe-transition.zip[out]"
+    same "graph on Vulkan frames equals the software path" \
+        "$(vk_md5 nv12 "split[p][q];[p][q]gpufx=graph='$G':params='x.progress=0.4|out.progress=0.6'")" \
+        "$(sw_md5 nv12 "split[p][q];[p][q]gpufx=graph='$G':params='x.progress=0.4|out.progress=0.6'")"
+    # Output in another format than the input (the effect may output yuv420p or rgba).
+    VK_OUT=$(vk_ff -i "$A" -frames:v 3 -an -vf "format=nv12,hwupload,gpufx=effect=$FX/sepia.zip,hwdownload,format=nv12" \
+        -pix_fmt nv12 -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | awk -F, '{print $NF}')
+    same "sepia keeps nv12 on Vulkan frames" "$VK_OUT" "$(sw_md5 nv12 "gpufx=effect=$FX/sepia.zip,format=nv12")"
+    # shellcheck disable=SC2086
+    ok "timeline enable on Vulkan frames" -init_hw_device "$VKDEV" -filter_hw_device vk -i "$A" -an \
+        -vf "format=nv12,hwupload,gpufx=effect=$FX/invert.zip:enable='gte(t\,0.5)',hwdownload,format=nv12" $NULL
+    LATE_VK=$(vk_ff -i "$A" -itsoffset 0.5 -i "$B" -an -filter_complex \
+        "[0]format=rgba,hwupload[a];[1]format=rgba,hwupload[b];[a][b]gpufx=effect=$FX/crossfade.zip:params='progress=0.5',hwdownload,format=rgba" \
+        -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | wc -l | tr -d ' ')
+    if [ "$LATE_VK" = "$MAIN_N" ]; then pass "late second input on Vulkan frames keeps all $MAIN_N frames"
+    else fail "late second input on Vulkan frames (want $MAIN_N, got $LATE_VK)"; cat "$CLIPS/last.log"; fi
+    # yuva420p: FFmpeg cannot make storage images of it, so the output falls back to rgba.
+    YUVA_VK=$(vk_ff -i "$A" -frames:v 3 -an -vf "format=yuva420p,hwupload,gpufx=effect=$FX/invert.zip,hwdownload,format=rgba" \
+        -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | awk -F, '{print $NF}')
+    same "yuva420p in, rgba Vulkan frames out" "$YUVA_VK" "$("$FF" -hide_banner -nostdin -v error -i "$A" -frames:v 3 -an -vf "format=yuva420p,gpufx=effect=$FX/invert.zip,format=rgba" \
+            -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | awk -F, '{print $NF}')"
+    # shellcheck disable=SC2086
+    rejects "Vulkan and software inputs mixed" "mix Vulkan and software frames" -init_hw_device "$VKDEV" -filter_hw_device vk \
+        -i "$A" -i "$B" -an -filter_complex "[0]format=rgba,hwupload[a];[1]format=rgba[b];[a][b]gpufx=effect=$FX/crossfade.zip" $NULL
+    # shellcheck disable=SC2086
+    rejects "Vulkan input, software output" "software frames but the inputs have Vulkan" -init_hw_device "$VKDEV" -filter_hw_device vk \
+        -i "$A" -an -vf "format=rgba,hwupload,gpufx=effect=$FX/invert.zip,format=rgba" $NULL
+    # Without disable_multiplane an nv12 frame may be one multiplane image: refused clearly
+    # (or, where the driver has no multiplane nv12, processed).
+    if "$FF" -hide_banner -nostdin -v error -init_hw_device vulkan=vk:0 -filter_hw_device vk -i "$A" -frames:v 2 -an \
+        -vf "format=nv12,hwupload,gpufx=effect=$FX/invert.zip,hwdownload,format=nv12" -f null - > "$CLIPS/last.log" 2>&1 ||
+        grep -q "multiplane images are not supported" "$CLIPS/last.log"; then
+        pass "multiplane nv12 is processed or refused clearly"
+    else
+        fail "multiplane nv12 is processed or refused clearly"; cat "$CLIPS/last.log"
+    fi
+fi
+
 [ "$fails" -eq 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }

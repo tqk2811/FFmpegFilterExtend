@@ -10,8 +10,10 @@ pub mod package;
 pub mod params;
 pub mod runtime;
 mod shader_cache;
+#[cfg(any(windows, all(unix, not(target_vendor = "apple"))))]
+pub mod vulkan;
 
-pub use frame::{ChromaLocation, ColorInfo, Frame, FrameMut, Matrix, PixelFormat, Range};
+pub use frame::{ChromaLocation, ColorInfo, Frame, FrameMut, GpuFrame, Matrix, PixelFormat, Range};
 pub use graph::{EffectChain, EffectGraph, MemoryStats, Source};
 pub use manifest::{Manifest, StreamInfo};
 pub use package::Package;

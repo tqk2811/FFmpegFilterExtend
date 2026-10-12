@@ -224,7 +224,7 @@ Chi phí chính là upload/readback và chuyển màu trên CPU. Lộ trình b�
 |-----------|----------|---------|
 | P1 (xong) | Chuyển YUV (NV12/P010/yuv420p…) ↔ RGBA trên GPU trong runtime; texture `rgba16float` khi có frame trên 8 bit | Bỏ `swscale`, hỗ trợ 10-bit/HDR |
 | P2 | Pipeline hoá: double buffer readback, không chặn chờ frame trước | Tăng throughput 2–3× trên GPU rời |
-| P3 | **Zero-copy** với `AV_PIX_FMT_VULKAN`: tạo wgpu device từ `AVVulkanDeviceContext` (`wgpu-hal` `create_device_from_hal`) và nhập `VkImage` của `AVVKFrame` | Không qua RAM khi decode/encode bằng Vulkan |
+| P3 (xong) | **Zero-copy** với `AV_PIX_FMT_VULKAN`: wgpu device tạo từ `AVVulkanDeviceContext` (`wgpu-hal` `device_from_raw`), đọc và ghi thẳng các `VkImage` của `AVVkFrame` (xem "Frame Vulkan" dưới đây) | Không qua RAM khi decode/encode bằng Vulkan |
 | P4 | Interop **CUDA** (NVDEC/NVENC): `hwmap` CUDA → Vulkan (external memory) hoặc `VK_KHR_external_memory` trực tiếp | Dùng được với `-hwaccel cuda` |
 | P5 | Interop **D3D11/D3D12** (Windows, QSV/AMF/D3D11VA) bằng shared NT handle sang DX12 của wgpu | Dùng được với `-hwaccel d3d11va` |
 | P6 | VAAPI/DRM-PRIME (Linux), VideoToolbox (`CVPixelBuffer` → `MTLTexture`) | Phủ hết hwaccel phổ biến |
@@ -272,6 +272,71 @@ Dấu nháy đơn che `;` và `[]` khỏi filter graph bên ngoài. Quy tắc:
 C API (v5, chỉ thêm): `gpufx_effect_open_graph`, `gpufx_effect_output_count`, `gpufx_effect_output_name`,
 `gpufx_effect_output_source`, `gpufx_effect_output_pad_format[_count]`, `gpufx_effect_process_graph`,
 `gpufx_effect_convert_graph`; xem `gpufx.h`.
+
+### Frame Vulkan (xong, C API v6)
+
+```sh
+ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i a.mp4 \
+  -vf "format=nv12,hwupload,gpufx=effect=vignette.zip,gpufx=effect=sepia.zip,hwdownload,format=nv12" out.mp4
+```
+
+- Mọi pad input và output nhận thêm `AV_PIX_FMT_VULKAN`. Hoặc mọi input và output của một `gpufx` đều là
+  frame Vulkan, hoặc không cái nào: trộn lẫn bị từ chối, thông báo nêu tên pad (thêm `hwupload`/`hwdownload`).
+  sw_format của từng input phải là format libgpufx chuyển được (`nv12`, `p010le`, `yuv420p`, `rgba`…) và được
+  kiểm theo quy tắc của manifest như format phần mềm. Filter có cờ `FF_FILTER_FLAG_HWFRAME_AWARE`.
+- **Một device.** `init` mở gói như thường (pad và format phải biết trước khi negotiate); khi các link được
+  configure, `gpufx_effect_use_vulkan` chuyển effect sang device của FFmpeg: libgpufx bọc các handle của
+  `AVVulkanDeviceContext` bằng `wgpu-hal` (`Instance::from_raw`, `expose_adapter`, `Adapter::device_from_raw`,
+  rồi `create_device_from_hal`), biên dịch lại gói cho device đó (dùng chung theo `VkDevice` như mọi device) và
+  chép giá trị tham số. Không thứ gì của FFmpeg bị huỷ theo (drop callback rỗng); filter giữ tham chiếu tới
+  device cho tới khi effect được giải phóng.
+- **wgpu chỉ dùng những gì device đã bật.** wgpu-hal chọn tính năng (và bỏ kiểm tra biên của chính nó khi có
+  `robustBufferAccess`) theo những gì *physical device* hỗ trợ, nhưng FFmpeg chỉ bật một phần. Vì vậy wgpu
+  nhìn device qua một `vkGetInstanceProcAddr` bọc lại: `vkEnumerateDeviceExtensionProperties` chỉ liệt kê
+  extension đã bật trên device, `vkGetPhysicalDeviceFeatures[2]` AND feature lõi với feature đã bật và mỗi
+  struct feature của extension với struct cùng loại trong chuỗi tạo device của FFmpeg (struct đã nâng lên lõi, như timeline
+  semaphore, lấy trường từ `VkPhysicalDeviceVulkan11/12/13Features` của FFmpeg). Queue tạo với cờ
+  (`VK_KHR_internally_synchronized_queues`) được lấy bằng `vkGetDeviceQueue2`.
+- **Queue.** Họ queue đầu tiên có compute, queue 0. Filter giữ `lock_queue` của FFmpeg quanh mỗi lần gọi, nên
+  lệnh submit của FFmpeg (hwupload, filter Vulkan khác) không tranh với wgpu.
+- **Frame.** Mỗi plane một `VkImage`, theo format từng plane của FFmpeg (`R8`, `R8G8`, `R8G8B8A8`, `R16`,
+  `R16G16`, `R16G16B16A16` `_UNORM`): input cần device có `disable_multiplane=1` (hoặc frame tạo theo cách đó);
+  frames context output do gpufx tạo dùng `AV_VK_FRAME_FLAG_DISABLE_MULTIPLANE` và cần usage `STORAGE`.
+  Image multiplane bị từ chối lúc configure kèm thông báo, frame input không có usage `SAMPLED` cũng vậy. FFmpeg 9.0 mặc định tạo
+  frames context `yuva420p`/`yuva444p` không có usage nào (của `hwupload` thì dùng được), nên output chuyển sang
+  format khác, ví dụ `rgba`. sw_format của output là của input nguồn nếu effect
+  được phép xuất, không thì format đầu tiên của pad output mà libgpufx chuyển được và ghi được.
+- **Mỗi frame**, CPU không chờ: filter khoá mỗi `AVVkFrame` một lần (`lock_frame`; một frame `split` phía
+  trước có thể nằm trên hai pad), libgpufx bọc mỗi image thành texture wgpu (`texture_from_raw`, bộ nhớ
+  ngoài, trạng thái đầu lấy từ layout của image; layout wgpu không có trạng thái tương ứng
+  được chuyển sang `GENERAL` bằng barrier thô trong command buffer submit trước), ghi pass chuyển đổi input
+  (plane đọc như texture unorm), các hiệu ứng và pass chuyển đổi output (plane ghi như storage texture),
+  chuyển mọi image về `GENERAL`, rồi submit một lần, chờ timeline semaphore của mọi image ở `sem_value` và
+  signal `sem_value + 1` (`add_wait_semaphore`/`add_signal_semaphore`, mỗi semaphore một lần). Sau đó filter
+  ghi `layout`, `sem_value`, `access` vào `AVVkFrame` rồi mở khoá.
+- **VRAM:** không texture upload, không storage buffer output, không buffer readback; texture pass trong pool
+  giống hệt đường phần mềm; mỗi input giữ một texture RGBA đã chuyển (như khi upload; input RGBA thẳng cũng
+  qua pass chuyển, xem Backlog), còn output chính là frame trong pool của FFmpeg.
+- Filter bị tắt (timeline) luôn chuyển frame trên GPU sang frames context của output (không đưa tham chiếu
+  như đường phần mềm, vì output có frames context riêng). Input chưa bắt đầu hiện frame đen upload một lần
+  (đục với format có alpha; đường phần mềm hiện đen trong suốt).
+- Rust: `GpuFrame` (texture từng plane trên device của effect) và `EffectGraph::encode_gpu`, ghi cả đồ thị vào
+  command encoder của người gọi mà không submit (không phụ thuộc backend, nền cho bước D3D12);
+  `GpuContext::from_vulkan` và `EffectGraph::process_vulkan` (`gpufx_core::vulkan`, Linux và Windows) thêm phần
+  dùng chung và đồng bộ Vulkan. C API (v6, chỉ thêm): `gpufx_vulkan_supported`, `gpufx_effect_use_vulkan`,
+  `gpufx_effect_process_vulkan`; xem `gpufx.h`.
+- Build: `scripts/build-prebuilt.sh` configure libavfilter với `--enable-vulkan` khi `libavutil` build sẵn có
+  Vulkan và tìm được Vulkan-Headers của Khronos (clone tag `v1.4.321`; FFmpeg cần header mới hơn bản của Ubuntu
+  noble), và giữ `hwupload`, `hwdownload`, `hwmap`. Không thì gpufx được build không có frame Vulkan và test bỏ
+  qua phần đó.
+- **Decoder:** decoder Vulkan (`-hwaccel vulkan`) xuất image multiplane nên frame của nó hiện bị từ chối (cần
+  `hwdownload,hwupload` hoặc copy trên GPU sang image từng plane; xem Backlog).
+- **Submit** trên một device dùng chung được tuần tự hoá bằng mutex trong libgpufx, giữ từ lúc đặt semaphore
+  tới `queue.submit` (ngoài `lock_queue` của FFmpeg), trong một error scope của wgpu; submit bị wgpu từ chối
+  được lấy lại semaphore và làm các frame Vulkan sau trên device đó báo lỗi rõ ràng.
+- Đã chạy trên lavapipe: test bundle so framemd5 của `hwupload,gpufx,…,hwdownload` với đường phần mềm (rgba,
+  nv12, yuv420p, yuv444p, p010le, yuv420p10le, rgba64le, đồ thị có hai input là cùng một frame split, hai filter
+  liền nhau, đổi format output): giống hệt. Test Rust so `encode_gpu` với đường CPU từng byte.
 
 ### Ngân sách VRAM (quy tắc cho mọi giai đoạn)
 

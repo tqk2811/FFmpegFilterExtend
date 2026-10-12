@@ -91,3 +91,20 @@
 - **Vị trí**: [crates/gpufx-core/src/shader_cache.rs](../crates/gpufx-core/src/shader_cache.rs), [crates/gpufx-core/src/runtime.rs](../crates/gpufx-core/src/runtime.rs) (`compile_pass`), [crates/gpufx-cli/src/main.rs](../crates/gpufx-cli/src/main.rs).
 - **Vì sao**: D3D12 là chỗ biên dịch chậm nhất (FXC/DXC trên WARP), cần gọi DXC trực tiếp và một runner Windows để kiểm; passthrough shader không được wgpu kiểm tra nên phải làm cẩn thận phần ký gói.
 - **Ngày ghi**: 2026-10-12
+
+### Frame Vulkan: các giới hạn còn lại
+- **Vấn đề**:
+  - Chỉ nhận mỗi plane một `VkImage` (`disable_multiplane=1`). Image multiplane (mặc định của FFmpeg cho nv12, p010, yuv420p… khi driver hỗ trợ) bị từ chối; muốn nhận thì cần view từng plane (wgpu có `TEXTURE_FORMAT_NV12`/`P010` cho 2 plane, chưa có cho 3 plane) hoặc tự tạo `VkImageView` theo aspect.
+  - FFmpeg 9.0 mặc định tạo frames context `yuva420p`/`yuva444p` không có usage nào (`AVVulkanFramesContext.usage` = 0): output Vulkan của gpufx không thể là các format đó (chuyển sang format khác của manifest, ví dụ `rgba`), input có frames context như vậy bị từ chối (frame của `hwupload` thì dùng được).
+  - Input RGBA thẳng vẫn qua pass chuyển đổi vào một texture làm việc (đường phần mềm đọc thẳng texture upload), vì bind group của hiệu ứng tạo một lần còn image của pool đổi mỗi frame. Có thể đọc thẳng image nếu cache bind group theo `VkImage` của pool, và cho hiệu ứng cuối ghi thẳng vào image output khi format trùng: bớt một texture mỗi input/output.
+  - Frame của decoder Vulkan (`-hwaccel vulkan`) là image multiplane nên bị từ chối lúc configure: cần copy trên GPU sang image từng plane (hoặc hỗ trợ view multiplane) mới dùng được; hiện phải `hwdownload,hwupload`. Đường barrier thô cho layout lạ có sẵn nhưng chưa có test.
+  - Struct feature chỉ có trong extension mà FFmpeg không đưa vào chuỗi tạo device đọc thành false; struct không có trong bảng của `vulkan.rs` thì giữ giá trị của driver (bảng theo wgpu-hal 30, phải cập nhật khi nâng wgpu).
+  - Submit bị wgpu từ chối làm device dùng chung không dùng được cho frame Vulkan tới hết process (an toàn, không signal giá trị cũ, nhưng không tự phục hồi).
+  - Chỉ chạy thử trên lavapipe. Chưa thử GPU thật, encoder Vulkan, `hwmap` từ CUDA/VAAPI, và Windows (build được, chưa có runner Vulkan).
+  - Effect mở trên device mặc định ở `init` (cần biết pad và format trước khi negotiate) rồi biên dịch lại trên device của FFmpeg khi configure: lúc khởi động có hai device và biên dịch gói hai lần.
+  - Dùng queue 0 của họ queue compute đầu tiên, khoá bằng `lock_queue` (đã deprecated, `FF_API_VULKAN_SYNC_QUEUES`) quanh mỗi lần gọi; khi FFmpeg bỏ API đó thì cần dựa vào `VK_KHR_internally_synchronized_queues`. Hook `vkGetInstanceProcAddr` giả định một Vulkan loader cho cả process.
+  - Filter bị tắt (timeline) trên frame Vulkan luôn chuyển frame qua GPU (output có frames context riêng), không đưa tham chiếu như đường phần mềm. Input chưa bắt đầu là frame đen đục (đường phần mềm: đen trong suốt).
+  - Build Docker đầy đủ (`build.sh`) chưa bật Vulkan: image build chưa có Vulkan-Headers ≥ 1.3.277.
+- **Vị trí**: [crates/gpufx-core/src/vulkan.rs](../crates/gpufx-core/src/vulkan.rs), [crates/gpufx-core/src/convert.rs](../crates/gpufx-core/src/convert.rs), [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`config_vulkan`, `process_vulkan`), [docker/build-in-container.sh](../docker/build-in-container.sh).
+- **Vì sao**: phạm vi B-Vulkan là đường zero-copy chạy đúng với `hwupload`/`hwdownload`; phần còn lại cần GPU thật hoặc thay đổi lớn (view multiplane, cache bind group).
+- **Ngày ghi**: 2026-10-12

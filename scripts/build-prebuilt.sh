@@ -10,6 +10,11 @@
 #   FFBUILD_TAG      release tag             Release-2026-08-10
 #   FFBUILD_VERSION  FFmpeg version string   n9.0-2-g03d9533176
 #   FFBUILD_LICENSE  lgpl | gpl | lgpl2 | gpl2   lgpl
+#   VULKAN_HEADERS   directory with include/vulkan/vulkan.h (Khronos Vulkan-Headers); by
+#                    default tag VULKAN_HEADERS_TAG (v1.4.321) is cloned into build/downloads.
+#                    gpufx takes Vulkan frames (hwupload, -hwaccel vulkan) only when the
+#                    prebuilt libavutil has Vulkan and the headers are found; otherwise the
+#                    filter is built without it (a message says so).
 # Output: dist/<target>/ (bin, lib on Linux, effects/*.zip, include/gpufx.h)
 # Needs: cargo, a C compiler, make, pkg-config, curl, patchelf (linux64), nasm (optional,
 # for SIMD); win64 also mingw-w64, the x86_64-pc-windows-gnu Rust target and unzip.
@@ -58,7 +63,7 @@ if [ "$TARGET" = linux64 ] && ! command -v patchelf >/dev/null; then
     echo "patchelf is required: libavfilter must find libgpufx.so next to it" >&2; exit 1
 fi
 
-mkdir -p "$WORK"
+mkdir -p "$WORK" "$ROOT/build/downloads"
 echo "==> prebuilt FFmpeg: $NAME"
 if [ ! -f "$WORK/$NAME.$EXT" ]; then
     curl -fL --retry 3 -o "$WORK/$NAME.$EXT.part" "$URL"
@@ -71,6 +76,34 @@ case $EXT in
     zip) unzip -q -o "$WORK/$NAME.$EXT" -d "$WORK" ;;
 esac
 cp -R "$WORK/$NAME/." "$OUT/"
+
+# Vulkan frames need Vulkan in the prebuilt libavutil (hwcontext_vulkan) and the headers
+# here: FFmpeg wants vulkan.h >= 1.3.277, newer than Ubuntu noble's libvulkan-dev.
+VULKAN=
+if [ "$TARGET" = win64 ]; then
+    VK_LIB=$(ls "$OUT"/bin/avutil-*.dll 2>/dev/null | head -n1)
+    vk_exports() { x86_64-w64-mingw32-objdump -p "$1" | grep -c av_vk_frame_alloc || true; }
+else
+    VK_LIB=$(ls "$OUT"/lib/libavutil.so.* 2>/dev/null | head -n1)
+    vk_exports() { nm -D --defined-only "$1" | grep -c av_vk_frame_alloc || true; }
+fi
+if [ -z "$VK_LIB" ] || [ "$(vk_exports "$VK_LIB")" = 0 ]; then
+    echo "    prebuilt libavutil has no Vulkan: gpufx is built without Vulkan frames"
+else
+    VK_TAG=${VULKAN_HEADERS_TAG:-v1.4.321}
+    VK_HDR=${VULKAN_HEADERS:-$ROOT/build/downloads/Vulkan-Headers-$VK_TAG}
+    if [ ! -f "$VK_HDR/include/vulkan/vulkan.h" ] && [ -z "${VULKAN_HEADERS:-}" ]; then
+        rm -rf "$VK_HDR.part"
+        git -c advice.detachedHead=false clone -q --depth 1 --branch "$VK_TAG" https://github.com/KhronosGroup/Vulkan-Headers "$VK_HDR.part" &&
+            mv "$VK_HDR.part" "$VK_HDR" || echo "    cannot fetch Vulkan-Headers $VK_TAG"
+    fi
+    if [ -f "$VK_HDR/include/vulkan/vulkan.h" ]; then
+        VULKAN="--enable-vulkan --extra-cflags=-I$VK_HDR/include"
+        echo "    Vulkan frames: on (headers $VK_HDR)"
+    else
+        echo "    no Vulkan headers: gpufx is built without Vulkan frames"
+    fi
+fi
 
 echo "==> libgpufx"
 "$ROOT/scripts/install-libgpufx.sh" "$WORK/prefix" $RUST_TARGET
@@ -92,7 +125,10 @@ PKG_CONFIG_LIBDIR="$WORK/prefix/lib/pkgconfig" ./configure \
     --disable-programs --disable-doc --disable-debug --disable-autodetect \
     --disable-avdevice --disable-avformat --disable-avcodec \
     --disable-everything --enable-filter="$FILTERS" --enable-libgpufx \
-    $CROSS > "$WORK/configure.log" || { tail -20 "$WORK/configure.log"; exit 1; }
+    $VULKAN $CROSS > "$WORK/configure.log" || { tail -20 "$WORK/configure.log"; exit 1; }
+if [ -n "$VULKAN" ] && ! grep -q '^#define CONFIG_VULKAN 1' config.h; then
+    echo "configure did not enable Vulkan; see $WORK/configure.log" >&2; exit 1
+fi
 make -j"$JOBS" > "$WORK/make.log" 2>&1 || { tail -40 "$WORK/make.log"; exit 1; }
 
 echo "==> bundle $OUT"

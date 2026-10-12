@@ -10,6 +10,11 @@
  * graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]' runs a whole effect graph in
  * one GPU submission, with one input pad per [N] and one output pad per label that no
  * statement reads.
+ * Vulkan frames with one image per plane (hwupload on a device opened with
+ * disable_multiplane=1) are processed in place on FFmpeg's own Vulkan device, without a
+ * trip through RAM: libgpufx shares the device and reads and writes the VkImages,
+ * synchronised with their timeline semaphores. Multiplane images, which the Vulkan
+ * decoders (-hwaccel vulkan) output, are refused.
  *
  * This file is part of FFmpeg.
  *
@@ -30,6 +35,7 @@
 
 #include <gpufx.h>
 
+#include "config.h"
 #include "libavutil/avassert.h"
 #include "libavutil/avstring.h"
 #include "libavutil/eval.h"
@@ -38,6 +44,11 @@
 #include "libavutil/opt.h"
 #include "libavutil/pixdesc.h"
 #include "libswscale/swscale.h"
+#include "libavutil/hwcontext.h"
+#if CONFIG_VULKAN
+#include "libavutil/hwcontext_vulkan.h"
+#include "libavutil/internal.h"
+#endif
 
 #include "avfilter.h"
 #include "filters.h"
@@ -83,6 +94,15 @@ typedef struct GpufxContext {
     int64_t frame_count;
     int warned_interlaced;
     int warned_hdr;
+    /* Vulkan frames: every input and output is AV_PIX_FMT_VULKAN. */
+    int hw;
+    AVBufferRef *hw_device; /* the device libgpufx runs on, held while it does */
+    enum AVPixelFormat *hw_in_fmt; /* sw_format of each input */
+#if CONFIG_VULKAN
+    GpufxVulkanFrame *vk_in;
+    GpufxVulkanFrame *vk_out;
+    uint32_t vk_queue_family;
+#endif
 } GpufxContext;
 
 static int gpufx_error(AVFilterContext *ctx, const char *what)
@@ -361,8 +381,15 @@ static av_cold void uninit(AVFilterContext *ctx)
     av_freep(&s->targets);
     av_freep(&s->source);
     av_freep(&s->frames);
+    av_freep(&s->hw_in_fmt);
+#if CONFIG_VULKAN
+    av_freep(&s->vk_in);
+    av_freep(&s->vk_out);
+#endif
     gpufx_effect_free(s->fx);
     s->fx = NULL;
+    /* After the effect: libgpufx runs on this device until it is freed. */
+    av_buffer_unref(&s->hw_device);
 }
 
 /* Reuses *frame when it already is a w x h frame of format fmt. */
@@ -456,19 +483,25 @@ static uint32_t gpu_chroma_location(const AVFrame *f, int full_range)
     }
 }
 
+/* fmt: the format of the pixels, f->format or the sw_format of a hardware frame. */
+static uint32_t alpha_flags_fmt(const AVFrame *f, enum AVPixelFormat fmt)
+{
+    return f->alpha_mode == AVALPHA_MODE_PREMULTIPLIED && has_alpha(fmt) ?
+           GPUFX_FRAME_PREMULTIPLIED : 0;
+}
+
 static uint32_t alpha_flags(const AVFrame *f)
 {
-    return f->alpha_mode == AVALPHA_MODE_PREMULTIPLIED && has_alpha(f->format) ?
-           GPUFX_FRAME_PREMULTIPLIED : 0;
+    return alpha_flags_fmt(f, f->format);
 }
 
 /*
  * Colour properties of f for libgpufx. Returns the format name when the GPU converts
  * f as it is, or NULL when swscale must convert it (other formats or matrices).
  */
-static const char *gpu_color(const AVFrame *f, GpufxColor *c)
+static const char *gpu_color_fmt(const AVFrame *f, enum AVPixelFormat fmt, GpufxColor *c)
 {
-    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(f->format);
+    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(fmt);
     int matrix = GPUFX_MATRIX_BT601;
 
     if (!gpufx_format_supported(desc->name))
@@ -480,8 +513,13 @@ static const char *gpu_color(const AVFrame *f, GpufxColor *c)
     c->range           = f->color_range == AVCOL_RANGE_JPEG || !strncmp(desc->name, "yuvj", 4) ?
                          GPUFX_RANGE_FULL : GPUFX_RANGE_LIMITED;
     c->chroma_location = gpu_chroma_location(f, c->range == GPUFX_RANGE_FULL);
-    c->flags           = alpha_flags(f);
+    c->flags           = alpha_flags_fmt(f, fmt);
     return desc->name;
+}
+
+static const char *gpu_color(const AVFrame *f, GpufxColor *c)
+{
+    return gpu_color_fmt(f, f->format, c);
 }
 
 /*
@@ -573,6 +611,301 @@ static int finish_output(GpufxContext *s, unsigned k, AVFrame *out, const GpufxF
     return sws_convert(&s->out_sws[k], out, s->rgba_out[k]);
 }
 
+#if CONFIG_VULKAN
+/*
+ * Vulkan frames. libgpufx runs on FFmpeg's own VkDevice (the device of the inputs'
+ * frames contexts) and reads and writes the VkImages of the AVVkFrames in place: one
+ * submission waits for each image's timeline semaphore at sem_value and signals
+ * sem_value + 1, and leaves every image in VK_IMAGE_LAYOUT_GENERAL.
+ */
+
+static int vulkan_ok(void)
+{
+    return gpufx_vulkan_supported();
+}
+
+/* Moves the effect to the Vulkan device of the inputs; once, from config_inputs(). */
+static int config_vulkan(AVFilterContext *ctx)
+{
+    GpufxContext *s = ctx->priv;
+    AVHWFramesContext *fc0 = NULL;
+    AVHWDeviceContext *dev;
+    AVVulkanDeviceContext *hwctx;
+    GpufxVulkanDevice d = { 0 };
+    int family = -1;
+
+    for (unsigned i = 0; i < s->nb_inputs; i++) {
+        FilterLink *l = ff_filter_link(ctx->inputs[i]);
+        AVHWFramesContext *fc;
+
+        if (!l->hw_frames_ctx) {
+            av_log(ctx, AV_LOG_ERROR, "Input '%s' has Vulkan frames but no frames context.\n",
+                   ctx->input_pads[i].name);
+            return AVERROR(EINVAL);
+        }
+        fc = (AVHWFramesContext *)l->hw_frames_ctx->data;
+        if (fc0 && fc->device_ref->data != fc0->device_ref->data) {
+            av_log(ctx, AV_LOG_ERROR, "Input '%s' comes from another Vulkan device than input '%s'; "
+                   "gpufx runs on one device.\n", ctx->input_pads[i].name, ctx->input_pads[0].name);
+            return AVERROR(EINVAL);
+        }
+        fc0 = fc0 ? fc0 : fc;
+        s->hw_in_fmt[i] = fc->sw_format;
+        /* One image per plane: a multiplane image (Vulkan decoders) is not read. */
+        if (av_pix_fmt_count_planes(fc->sw_format) > 1 &&
+            ((AVVulkanFramesContext *)fc->hwctx)->format[1] == VK_FORMAT_UNDEFINED) {
+            av_log(ctx, AV_LOG_ERROR, "Input '%s': multiplane images are not supported; gpufx needs "
+                   "one Vulkan image per plane (create the device with disable_multiplane=1; "
+                   "decoded frames need hwdownload,hwupload or a copy).\n", ctx->input_pads[i].name);
+            return AVERROR(ENOSYS);
+        }
+        /* FFmpeg makes some formats (yuva420p...) without usage flags: not readable. */
+        if (!(((AVVulkanFramesContext *)fc->hwctx)->usage & VK_IMAGE_USAGE_SAMPLED_BIT)) {
+            av_log(ctx, AV_LOG_ERROR, "Input '%s' has Vulkan frames of %s that cannot be sampled "
+                   "(image usage 0x%x); upload another format.\n", ctx->input_pads[i].name,
+                   av_get_pix_fmt_name(fc->sw_format), ((AVVulkanFramesContext *)fc->hwctx)->usage);
+            return AVERROR(ENOSYS);
+        }
+        if (!gpufx_format_supported(av_get_pix_fmt_name(fc->sw_format))) {
+            av_log(ctx, AV_LOG_ERROR, "Input '%s' has Vulkan frames of %s, which gpufx does not convert "
+                   "on the GPU. Convert before uploading (format=nv12, yuv420p, rgba...).\n",
+                   ctx->input_pads[i].name, av_get_pix_fmt_name(fc->sw_format));
+            return AVERROR(ENOSYS);
+        }
+    }
+    dev   = (AVHWDeviceContext *)fc0->device_ref->data;
+    hwctx = dev->hwctx;
+    for (int q = 0; q < hwctx->nb_qf && family < 0; q++)
+        if (hwctx->qf[q].flags & VK_QUEUE_COMPUTE_BIT)
+            family = hwctx->qf[q].idx;
+    if (family < 0) {
+        av_log(ctx, AV_LOG_ERROR, "The Vulkan device has no compute queue.\n");
+        return AVERROR(ENOSYS);
+    }
+    d.get_instance_proc_addr = (void *)hwctx->get_proc_addr;
+    d.instance               = hwctx->inst;
+    d.physical_device        = hwctx->phys_dev;
+    d.device                 = hwctx->act_dev;
+    d.api_version            = VK_API_VERSION_1_3; /* what hwcontext_vulkan asks for */
+    d.queue_family           = family;
+    d.queue_index            = 0;
+    d.queue_flags            = hwctx->queue_flags;
+    d.nb_instance_extensions = hwctx->nb_enabled_inst_extensions;
+    d.instance_extensions    = hwctx->enabled_inst_extensions;
+    d.nb_device_extensions   = hwctx->nb_enabled_dev_extensions;
+    d.device_extensions      = hwctx->enabled_dev_extensions;
+    d.device_features        = &hwctx->device_features;
+    if (gpufx_effect_use_vulkan(s->fx, &d) < 0)
+        return gpufx_error(ctx, "Cannot use the Vulkan device");
+    if (!(s->hw_device = av_buffer_ref(fc0->device_ref)))
+        return AVERROR(ENOMEM);
+    s->vk_queue_family = family;
+    av_log(ctx, AV_LOG_VERBOSE, "Vulkan frames on %s\n", gpufx_effect_device(s->fx));
+    return 0;
+}
+
+/*
+ * The frames context of a Vulkan output: one image per plane (libgpufx writes each plane
+ * as its own storage image), in the source input's sw_format when the effect may output
+ * it, else the first format of the output that gpufx converts on the GPU.
+ */
+static int config_vulkan_output(AVFilterLink *outlink, unsigned k)
+{
+    AVFilterContext *ctx = outlink->src;
+    GpufxContext *s = ctx->priv;
+    const enum AVPixelFormat want = s->hw_in_fmt[s->source[k]];
+    const uint32_t count = gpufx_effect_output_pad_format_count(s->fx, k);
+
+    /* Pass -1 tries the source input's format, then each format in order. */
+    for (int j = -1; j < (int)count; j++) {
+        enum AVPixelFormat fmt = j < 0 ? want : av_get_pix_fmt(gpufx_effect_output_pad_format(s->fx, k, j));
+        const char *name = av_get_pix_fmt_name(fmt);
+        int listed = 0;
+        AVBufferRef *ref;
+        AVHWFramesContext *fc;
+        AVVulkanFramesContext *vk;
+
+        for (uint32_t m = 0; m < count && !listed; m++)
+            listed = !strcmp(gpufx_effect_output_pad_format(s->fx, k, m), name);
+        if (!listed || (j >= 0 && fmt == want) || !gpufx_format_supported(name) || !av_vkfmt_from_pixfmt(fmt))
+            continue;
+        if (!(ref = av_hwframe_ctx_alloc(s->hw_device)))
+            return AVERROR(ENOMEM);
+        fc            = (AVHWFramesContext *)ref->data;
+        fc->format    = AV_PIX_FMT_VULKAN;
+        fc->sw_format = fmt;
+        fc->width     = outlink->w;
+        fc->height    = outlink->h;
+        vk            = fc->hwctx;
+        vk->flags     = AV_VK_FRAME_FLAG_DISABLE_MULTIPLANE;
+        /* Storage usage (libgpufx writes the planes) comes by default where the format has it. */
+        if (av_hwframe_ctx_init(ref) < 0 || !(vk->usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
+            av_log(ctx, AV_LOG_VERBOSE, "No storage Vulkan frames of %s for output '%s'.\n",
+                   name, ctx->output_pads[k].name);
+            av_buffer_unref(&ref);
+            continue;
+        }
+        av_buffer_unref(&ff_filter_link(outlink)->hw_frames_ctx);
+        ff_filter_link(outlink)->hw_frames_ctx = ref;
+        return 0;
+    }
+    av_log(ctx, AV_LOG_ERROR, "Output '%s': no format the effect outputs can be written into Vulkan "
+           "frames on the GPU.\n", ctx->output_pads[k].name);
+    return AVERROR(ENOSYS);
+}
+
+/* Black frame on the GPU for an input that has not started yet. */
+static int vulkan_blank(AVFilterContext *ctx, unsigned i)
+{
+    GpufxContext *s = ctx->priv;
+    AVFilterLink *link = ctx->inputs[i];
+    AVFrame *sw = NULL, *hw = NULL;
+    ptrdiff_t linesize[4];
+    int ret;
+
+    if (!(sw = av_frame_alloc()) || !(hw = av_frame_alloc())) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+    sw->format = s->hw_in_fmt[i];
+    sw->width  = link->w;
+    sw->height = link->h;
+    if ((ret = av_frame_get_buffer(sw, 0)) < 0)
+        goto end;
+    for (int p = 0; p < 4; p++)
+        linesize[p] = sw->linesize[p];
+    if ((ret = av_image_fill_black(sw->data, linesize, sw->format, AVCOL_RANGE_MPEG, sw->width, sw->height)) < 0 ||
+        (ret = av_hwframe_get_buffer(ff_filter_link(link)->hw_frames_ctx, hw, 0)) < 0 ||
+        (ret = av_hwframe_transfer_data(hw, sw, 0)) < 0)
+        goto end;
+    av_frame_free(&s->blank[i]);
+    s->blank[i] = hw;
+    hw = NULL;
+end:
+    av_frame_free(&sw);
+    av_frame_free(&hw);
+    return ret;
+}
+
+static int vk_fill(AVFilterContext *ctx, const AVFrame *f, GpufxVulkanFrame *v, const char *what)
+{
+    AVHWFramesContext *fc = (AVHWFramesContext *)f->hw_frames_ctx->data;
+    AVVulkanFramesContext *vkfc = fc->hwctx;
+    AVVkFrame *vkf = (AVVkFrame *)f->data[0];
+    const char *name = gpu_color_fmt(f, fc->sw_format, &v->color);
+
+    if (!name) {
+        av_log(ctx, AV_LOG_ERROR, "%s: Vulkan frames of %s in colorspace %s are not converted on the "
+               "GPU; set a supported matrix (BT.601, BT.709, BT.2020) before uploading.\n", what,
+               av_get_pix_fmt_name(fc->sw_format), av_color_space_name(f->colorspace));
+        return AVERROR(ENOSYS);
+    }
+    v->format    = name;
+    v->width     = f->width;
+    v->height    = f->height;
+    v->nb_images = 0;
+    for (int j = 0; j < 4 && vkf->img[j]; j++) {
+        v->image[j]        = (uint64_t)vkf->img[j];
+        v->vk_format[j]    = vkfc->format[j];
+        v->layout[j]       = vkf->layout[j];
+        v->semaphore[j]    = (uint64_t)vkf->sem[j];
+        v->sem_value[j]    = vkf->sem_value[j];
+        v->queue_family[j] = vkf->queue_family[j];
+        v->nb_images++;
+    }
+    return 0;
+}
+
+static void vk_store(const AVFrame *f, const GpufxVulkanFrame *v)
+{
+    AVVkFrame *vkf = (AVVkFrame *)f->data[0];
+
+    for (uint32_t j = 0; j < v->nb_images; j++) {
+        vkf->layout[j]    = v->layout[j];
+        vkf->sem_value[j] = v->sem_value[j];
+        vkf->access[j]    = VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT;
+    }
+}
+
+/*
+ * One event on Vulkan frames: the inputs (s->in, or the blank frame of an input that
+ * has not started) and s->out are locked, described to libgpufx, processed in one
+ * submission and updated with the semaphore values and layouts it leaves. info NULL:
+ * bypass (disabled filter).
+ */
+static int process_vulkan(AVFilterContext *ctx, const GpufxFrameInfo *info)
+{
+    GpufxContext *s = ctx->priv;
+    AVHWDeviceContext *dev = (AVHWDeviceContext *)s->hw_device->data;
+    AVVulkanDeviceContext *hwctx = dev->hwctx;
+    const unsigned total = s->nb_inputs + s->nb_outputs;
+    const AVFrame **frames = av_calloc(total, sizeof(*frames));
+    const AVFrame **locked = av_calloc(total, sizeof(*locked));
+    unsigned nb_locked = 0;
+    int ret = 0;
+
+    if (!frames || !locked) {
+        ret = AVERROR(ENOMEM);
+        goto end;
+    }
+    for (unsigned i = 0; i < s->nb_inputs; i++)
+        frames[i] = s->in[i] ? s->in[i] : s->blank[i];
+    for (unsigned k = 0; k < s->nb_outputs; k++)
+        frames[s->nb_inputs + k] = s->out[k];
+    /* Each AVVkFrame once: an input split upstream may come on two pads. */
+    for (unsigned n = 0; n < total; n++) {
+        int seen = 0;
+        for (unsigned m = 0; m < nb_locked; m++)
+            seen |= locked[m]->data[0] == frames[n]->data[0];
+        if (!seen) {
+            AVHWFramesContext *fc = (AVHWFramesContext *)frames[n]->hw_frames_ctx->data;
+            AVVulkanFramesContext *vkfc = fc->hwctx;
+            vkfc->lock_frame(fc, (AVVkFrame *)frames[n]->data[0]);
+            locked[nb_locked++] = frames[n];
+        }
+    }
+    for (unsigned i = 0; i < s->nb_inputs && ret >= 0; i++)
+        ret = vk_fill(ctx, frames[i], &s->vk_in[i], ctx->input_pads[i].name);
+    for (unsigned k = 0; k < s->nb_outputs && ret >= 0; k++)
+        ret = vk_fill(ctx, frames[s->nb_inputs + k], &s->vk_out[k], ctx->output_pads[k].name);
+    if (ret >= 0) {
+#if FF_API_VULKAN_SYNC_QUEUES
+FF_DISABLE_DEPRECATION_WARNINGS
+        hwctx->lock_queue(dev, s->vk_queue_family, 0);
+FF_ENABLE_DEPRECATION_WARNINGS
+#endif
+        ret = gpufx_effect_process_vulkan(s->fx, s->vk_in, s->nb_inputs, s->vk_out, s->nb_outputs, info);
+#if FF_API_VULKAN_SYNC_QUEUES
+FF_DISABLE_DEPRECATION_WARNINGS
+        hwctx->unlock_queue(dev, s->vk_queue_family, 0);
+FF_ENABLE_DEPRECATION_WARNINGS
+#endif
+        if (ret < 0) {
+            ret = gpufx_error(ctx, info ? "Processing failed" : "Conversion failed");
+        } else {
+            for (unsigned i = 0; i < s->nb_inputs; i++)
+                vk_store(frames[i], &s->vk_in[i]);
+            for (unsigned k = 0; k < s->nb_outputs; k++)
+                vk_store(frames[s->nb_inputs + k], &s->vk_out[k]);
+        }
+    }
+    for (unsigned m = 0; m < nb_locked; m++) {
+        AVHWFramesContext *fc = (AVHWFramesContext *)locked[m]->hw_frames_ctx->data;
+        AVVulkanFramesContext *vkfc = fc->hwctx;
+        vkfc->unlock_frame(fc, (AVVkFrame *)locked[m]->data[0]);
+    }
+end:
+    av_free(frames);
+    av_free(locked);
+    return ret;
+}
+#else
+static int vulkan_ok(void)
+{
+    return 0;
+}
+#endif
+
 /*
  * The link properties are fixed after config_output, and the buffers given to
  * libgpufx have the configured sizes. A frame that differs (a library user feeding
@@ -634,6 +967,8 @@ static int process_frame(FFFrameSync *fs)
         if (!in) {
             /* Input i > 0 has not started yet (input 0 always has a frame here). */
             const AVFrame *b = s->blank[i];
+            if (s->hw)
+                continue; /* process_vulkan() takes the blank Vulkan frame */
             s->frames[i] = (GpufxFrame){ "rgba", b->width, b->height, { b->data[0] },
                                          { b->linesize[0] } };
             continue;
@@ -655,12 +990,13 @@ static int process_frame(FFFrameSync *fs)
                    av_color_transfer_name(in->color_trc));
             s->warned_hdr = 1;
         }
-        if ((ret = input_frame(ctx, i, in)) < 0)
+        if (!s->hw && (ret = input_frame(ctx, i, in)) < 0)
             return ret;
     }
 
     /* Disabled: outputs that already have their input's format are that input. */
-    passthrough = ctx->is_disabled;
+    /* Vulkan outputs have their own frames context: their frames are always written. */
+    passthrough = ctx->is_disabled && !s->hw;
     for (unsigned k = 0; passthrough && k < s->nb_outputs; k++) {
         const AVFrame *src = s->in[s->source[k]];
         const AVFilterLink *ol = ctx->outputs[k];
@@ -695,7 +1031,7 @@ static int process_frame(FFFrameSync *fs)
                                            AV_SIDE_DATA_PROP_COLOR_DEPENDENT);
         av_frame_remove_side_data(out, AV_FRAME_DATA_MOTION_VECTORS);
         av_frame_remove_side_data(out, AV_FRAME_DATA_VIDEO_ENC_PARAMS);
-        if ((ret = output_target(s, k, out, &s->targets[k])) < 0)
+        if (!s->hw && (ret = output_target(s, k, out, &s->targets[k])) < 0)
             goto fail;
     }
 
@@ -703,6 +1039,12 @@ static int process_frame(FFFrameSync *fs)
         /* Nothing to run. */
     } else if (ctx->is_disabled) {
         /* Pass the inputs through, converted to the output formats. */
+#if CONFIG_VULKAN
+        if (s->hw) {
+            if ((ret = process_vulkan(ctx, NULL)) < 0)
+                goto fail;
+        } else
+#endif
         if (gpufx_effect_convert_graph(s->fx, s->frames, s->nb_inputs, s->targets, s->nb_outputs) < 0) {
             ret = gpufx_error(ctx, "Conversion failed");
             goto fail;
@@ -724,13 +1066,19 @@ static int process_frame(FFFrameSync *fs)
         }
 
         info = (GpufxFrameInfo){ isnan(vars[VAR_T]) ? 0.0 : vars[VAR_T], s->frame_count, vars[VAR_SAR] };
+#if CONFIG_VULKAN
+        if (s->hw) {
+            if ((ret = process_vulkan(ctx, &info)) < 0)
+                goto fail;
+        } else
+#endif
         if (gpufx_effect_process_graph(s->fx, s->frames, s->nb_inputs, s->targets, s->nb_outputs, &info) < 0) {
             ret = gpufx_error(ctx, "Processing failed");
             goto fail;
         }
         s->frame_count++;
     }
-    for (unsigned k = 0; !passthrough && k < s->nb_outputs; k++)
+    for (unsigned k = 0; !passthrough && !s->hw && k < s->nb_outputs; k++)
         if ((ret = finish_output(s, k, s->out[k], &s->targets[k])) < 0)
             goto fail;
     for (unsigned k = 0; k < s->nb_outputs; k++) {
@@ -784,6 +1132,9 @@ static int query_formats(const AVFilterContext *ctx,
                 continue;
             ret = ff_add_format(&formats, fmt);
         }
+        /* Vulkan frames are processed in place, whatever their sw_format (checked later). */
+        if (ret >= 0 && vulkan_ok())
+            ret = ff_add_format(&formats, AV_PIX_FMT_VULKAN);
         if (ret < 0 || (ret = ff_formats_ref(formats, &cfg_in[i]->formats)) < 0)
             return ret;
         /* Per input: a shared list would make a premultiplied and a straight input clash. */
@@ -797,6 +1148,8 @@ static int query_formats(const AVFilterContext *ctx,
         for (uint32_t j = 0; j < gpufx_effect_output_pad_format_count(s->fx, k); j++)
             if ((ret = ff_add_format(&formats, av_get_pix_fmt(gpufx_effect_output_pad_format(s->fx, k, j)))) < 0)
                 return ret;
+        if (vulkan_ok() && (ret = ff_add_format(&formats, AV_PIX_FMT_VULKAN)) < 0)
+            return ret;
         if ((ret = ff_formats_ref(formats, &cfg_out[k]->formats)) < 0)
             return ret;
     }
@@ -809,14 +1162,44 @@ static int config_inputs(AVFilterContext *ctx)
     GpufxContext *s = ctx->priv;
     AVFilterLink *inlink = ctx->inputs[0];
     GpufxStreamInfo *streams;
+    unsigned nb_hw = 0;
     int ret;
+
+    /* Vulkan frames in, Vulkan frames out: all of them, or none. */
+    for (unsigned i = 0; i < s->nb_inputs; i++)
+        nb_hw += ctx->inputs[i]->format == AV_PIX_FMT_VULKAN;
+    if (nb_hw && nb_hw != s->nb_inputs) {
+        av_log(ctx, AV_LOG_ERROR, "The inputs mix Vulkan and software frames; upload every input "
+               "(hwupload) or download it (hwdownload).\n");
+        return AVERROR(EINVAL);
+    }
+    s->hw = nb_hw > 0;
+    for (unsigned k = 0; k < s->nb_outputs; k++) {
+        if ((ctx->outputs[k]->format == AV_PIX_FMT_VULKAN) != s->hw) {
+            av_log(ctx, AV_LOG_ERROR, "Output '%s' has %s frames but the inputs have %s frames; "
+                   "add hwupload or hwdownload so they match.\n", ctx->output_pads[k].name,
+                   s->hw ? "software" : "Vulkan", s->hw ? "Vulkan" : "software");
+            return AVERROR(EINVAL);
+        }
+    }
+#if CONFIG_VULKAN
+    if (s->hw) {
+        s->hw_in_fmt = av_calloc(s->nb_inputs, sizeof(*s->hw_in_fmt));
+        s->vk_in     = av_calloc(s->nb_inputs, sizeof(*s->vk_in));
+        s->vk_out    = av_calloc(s->nb_outputs, sizeof(*s->vk_out));
+        if (!s->hw_in_fmt || !s->vk_in || !s->vk_out)
+            return AVERROR(ENOMEM);
+        if ((ret = config_vulkan(ctx)) < 0)
+            return ret;
+    }
+#endif
 
     /* Every input is configured by now: check them all against the manifest rules. */
     streams = av_calloc(s->nb_inputs, sizeof(*streams));
     if (!streams)
         return AVERROR(ENOMEM);
     for (unsigned i = 0; i < s->nb_inputs; i++)
-        streams[i] = (GpufxStreamInfo){ av_get_pix_fmt_name(ctx->inputs[i]->format),
+        streams[i] = (GpufxStreamInfo){ av_get_pix_fmt_name(s->hw ? s->hw_in_fmt[i] : ctx->inputs[i]->format),
                                         ctx->inputs[i]->w, ctx->inputs[i]->h };
     ret = gpufx_effect_check_inputs(s->fx, streams, s->nb_inputs);
     av_free(streams);
@@ -828,7 +1211,7 @@ static int config_inputs(AVFilterContext *ctx)
 
     for (unsigned i = 0; i < s->nb_inputs; i++) {
         const AVFilterLink *link = ctx->inputs[i];
-        const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(link->format);
+        const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(s->hw ? s->hw_in_fmt[i] : link->format);
         AVRational sar  = link->sample_aspect_ratio.num ? link->sample_aspect_ratio : (AVRational){ 1, 1 };
         AVRational sar0 = inlink->sample_aspect_ratio.num ? inlink->sample_aspect_ratio : (AVRational){ 1, 1 };
 
@@ -842,6 +1225,13 @@ static int config_inputs(AVFilterContext *ctx)
                    "precision above about 11 bits is lost.\n", ctx->input_pads[i].name, desc->name);
 
         /* Transparent black, what an input that has not started yet shows. */
+#if CONFIG_VULKAN
+        if (i > 0 && s->hw) {
+            /* Black (opaque for formats with alpha) on the GPU. */
+            if ((ret = vulkan_blank(ctx, i)) < 0)
+                return ret;
+        } else
+#endif
         if (i > 0) {
             if ((ret = alloc_frame(&s->blank[i], AV_PIX_FMT_RGBA, link->w, link->h)) < 0)
                 return ret;
@@ -898,6 +1288,10 @@ static int config_output(AVFilterLink *outlink)
     av_frame_side_data_remove_by_props(&outlink->side_data, &outlink->nb_side_data,
                                        AV_SIDE_DATA_PROP_COLOR_DEPENDENT);
     outlink->time_base = s->fs.time_base;
+#if CONFIG_VULKAN
+    if (s->hw && (ret = config_vulkan_output(outlink, FF_OUTLINK_IDX(outlink))) < 0)
+        return ret;
+#endif
     return 0;
 }
 
@@ -967,6 +1361,7 @@ const FFFilter ff_vf_gpufx = {
     .p.flags         = AVFILTER_FLAG_DYNAMIC_INPUTS | AVFILTER_FLAG_DYNAMIC_OUTPUTS |
                        AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL,
     .priv_size       = sizeof(GpufxContext),
+    .flags_internal  = FF_FILTER_FLAG_HWFRAME_AWARE,
     .init            = init,
     .uninit          = uninit,
     .activate        = activate,

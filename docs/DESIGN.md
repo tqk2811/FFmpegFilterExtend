@@ -227,7 +227,7 @@ The main costs are upload/readback and color conversion on the CPU. The roadmap 
 |-------|--------|---------|
 | P1 (done) | Convert YUV (NV12/P010/yuv420p...) ↔ RGBA on the GPU in the runtime; `rgba16float` textures when a frame is above 8 bits | Drops `swscale`, supports 10-bit/HDR |
 | P2 | Pipelining: double-buffered readback, no blocking on the previous frame | 2–3× throughput on discrete GPUs |
-| P3 | **Zero-copy** with `AV_PIX_FMT_VULKAN`: create the wgpu device from `AVVulkanDeviceContext` (`wgpu-hal` `create_device_from_hal`) and import the `VkImage` of `AVVKFrame` | No trip through RAM when decoding/encoding with Vulkan |
+| P3 (done) | **Zero-copy** with `AV_PIX_FMT_VULKAN`: the wgpu device is made from `AVVulkanDeviceContext` (`wgpu-hal` `device_from_raw`) and the `VkImage`s of `AVVkFrame` are read and written in place (see "Vulkan frames" below) | No trip through RAM when decoding/encoding with Vulkan |
 | P4 | **CUDA** interop (NVDEC/NVENC): `hwmap` CUDA → Vulkan (external memory) or `VK_KHR_external_memory` directly | Works with `-hwaccel cuda` |
 | P5 | **D3D11/D3D12** interop (Windows, QSV/AMF/D3D11VA) through a shared NT handle into wgpu's DX12 | Works with `-hwaccel d3d11va` |
 | P6 | VAAPI/DRM-PRIME (Linux), VideoToolbox (`CVPixelBuffer` → `MTLTexture`) | Covers all the common hwaccels |
@@ -275,6 +275,74 @@ The single quotes protect `;` and `[]` from the outer filter graph. Rules:
 C API (v5, additive): `gpufx_effect_open_graph`, `gpufx_effect_output_count`, `gpufx_effect_output_name`,
 `gpufx_effect_output_source`, `gpufx_effect_output_pad_format[_count]`, `gpufx_effect_process_graph`,
 `gpufx_effect_convert_graph`; see `gpufx.h`.
+
+### Vulkan frames (done, C API v6)
+
+```sh
+ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i a.mp4 \
+  -vf "format=nv12,hwupload,gpufx=effect=vignette.zip,gpufx=effect=sepia.zip,hwdownload,format=nv12" out.mp4
+```
+
+- Every input and output pad also takes `AV_PIX_FMT_VULKAN`. Either all inputs and outputs of a `gpufx`
+  are Vulkan frames or none: a mix is refused with a message naming the pad (add `hwupload`/`hwdownload`).
+  The sw_format of each input must be one libgpufx converts (`nv12`, `p010le`, `yuv420p`, `rgba`...) and is
+  checked against the manifest rules like a software format. The filter is `FF_FILTER_FLAG_HWFRAME_AWARE`.
+- **One device.** `init` opens the packages as usual (pads and formats are known before negotiation);
+  when the links are configured, `gpufx_effect_use_vulkan` moves the effect to FFmpeg's device: libgpufx
+  wraps the `AVVulkanDeviceContext` handles with `wgpu-hal` (`Instance::from_raw`, `expose_adapter`,
+  `Adapter::device_from_raw`, then `create_device_from_hal`), compiles the packages again for that device
+  (shared per `VkDevice` like any device) and copies the parameter values. Nothing of FFmpeg's is destroyed
+  with it (no-op drop callbacks); the filter holds a reference to the device until the effect is freed.
+- **wgpu only uses what the device has enabled.** wgpu-hal picks features (and drops its own bounds checks
+  when `robustBufferAccess` is supported) from what the *physical device* supports, but FFmpeg enables only
+  some of it. wgpu therefore sees the device through a wrapped `vkGetInstanceProcAddr`:
+  `vkEnumerateDeviceExtensionProperties` lists only the extensions enabled on the device,
+  `vkGetPhysicalDeviceFeatures[2]` ANDs the core features with the enabled ones and every extension
+  feature struct with the same struct of FFmpeg's creation chain (promoted structs, such as timeline
+  semaphores, take their fields from FFmpeg's `VkPhysicalDeviceVulkan11/12/13Features`). Queues created with flags
+  (`VK_KHR_internally_synchronized_queues`) are fetched with `vkGetDeviceQueue2`.
+- **Queue.** The first queue family with compute, queue 0. The filter holds FFmpeg's `lock_queue` around
+  each call, so FFmpeg's own submissions (hwupload, other Vulkan filters) never race with wgpu's.
+- **Frames.** One `VkImage` per plane, in FFmpeg's per-plane formats (`R8`, `R8G8`, `R8G8B8A8`, `R16`,
+  `R16G16`, `R16G16B16A16` `_UNORM`): inputs need `disable_multiplane=1` on the device (or frames made that
+  way); the output frames contexts gpufx makes use `AV_VK_FRAME_FLAG_DISABLE_MULTIPLANE` and need
+  `STORAGE` usage. A multiplane image is refused at configuration with a message saying so, and so are input frames without
+  `SAMPLED` usage. FFmpeg 9.0 makes `yuva420p`/`yuva444p` frames contexts without any usage by default (the
+  ones `hwupload` makes work), so outputs fall back to another format, e.g. `rgba`. The output
+  sw_format is the source input's when the effect may output it, else the first format of the output pad
+  that libgpufx converts and that FFmpeg can make storage images of.
+- **Per frame**, no CPU wait: the filter locks each `AVVkFrame` once (`lock_frame`; a frame split upstream
+  may sit on two pads), libgpufx wraps every image as a wgpu texture (`texture_from_raw`, external memory,
+  first state taken from the image layout; a layout wgpu has no state for gets a raw
+  barrier to `GENERAL` in a command buffer submitted first), records the input conversion (planes read as
+  unorm textures), the effects and the output conversion (planes written as storage textures), moves every
+  image to `GENERAL`, and submits once with a wait on every image's timeline semaphore at `sem_value` and a
+  signal at `sem_value + 1` (`add_wait_semaphore`/`add_signal_semaphore`, each semaphore once). The filter
+  then stores `layout`, `sem_value` and `access` in the `AVVkFrame`s and unlocks them.
+- **VRAM:** no upload textures, no output storage buffers, no readback buffer; the pooled pass textures are
+  the same as for software frames; each input keeps one converted RGBA texture (as for uploads; a straight
+  RGBA input is converted too, see the backlog), and the outputs are FFmpeg's pool frames themselves.
+- A disabled filter always converts the frame on the GPU into the output's frames context (no pass by
+  reference as on the software path: the output has its own frames context). An input that has not started shows a black frame uploaded once (opaque for formats with alpha, where the
+  software path shows transparent black).
+- Rust: `GpuFrame` (plane textures of the effect's device) and `EffectGraph::encode_gpu`, which records a
+  whole graph into the caller's command encoder without submitting (backend independent, the base of the
+  D3D12 step); `GpuContext::from_vulkan` and `EffectGraph::process_vulkan` (`gpufx_core::vulkan`, Linux and
+  Windows) add the Vulkan sharing and synchronisation. C API (v6, additive): `gpufx_vulkan_supported`,
+  `gpufx_effect_use_vulkan`, `gpufx_effect_process_vulkan`; see `gpufx.h`.
+- Build: `scripts/build-prebuilt.sh` configures libavfilter with `--enable-vulkan` when the prebuilt
+  `libavutil` has Vulkan and the Khronos Vulkan-Headers are found (cloned, tag `v1.4.321`; FFmpeg wants a
+  header newer than Ubuntu noble's), and keeps `hwupload`, `hwdownload`, `hwmap`. Otherwise gpufx is built
+  without Vulkan frames and the tests skip them.
+- **Decoders:** the Vulkan decoders (`-hwaccel vulkan`) output multiplane images, so their frames are refused
+  for now (`hwdownload,hwupload` or a GPU copy into per-plane images is needed; backlog).
+- **Submissions** of one shared device are serialised by a mutex in libgpufx held from staging the semaphores
+  to `queue.submit` (besides FFmpeg's `lock_queue`), inside a wgpu error scope; a submission wgpu refuses has
+  its semaphores taken back and makes later Vulkan frames on that device fail cleanly.
+- Tested on lavapipe: the bundle test compares the framemd5 of `hwupload,gpufx,...,hwdownload` with the
+  software path (rgba, nv12, yuv420p, yuv444p, p010le, yuv420p10le, rgba64le, a graph whose two inputs are one split
+  frame, two filters in a row, a changed output format); they are identical. Rust tests check
+  `encode_gpu` against the CPU path byte for byte.
 
 ### VRAM budget (rule for every phase)
 

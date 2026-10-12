@@ -49,6 +49,11 @@ impl Backend {
     }
 }
 
+/// Optional features a device asks for when the adapter has them.
+pub(crate) const GPU_FEATURES: wgpu::Features = wgpu::Features::PIPELINE_CACHE
+    .union(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM)
+    .union(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES);
+
 /// A GPU device. One context can be shared by many effects.
 pub struct GpuContext {
     pub(crate) device: wgpu::Device,
@@ -56,6 +61,14 @@ pub struct GpuContext {
     info: wgpu::AdapterInfo,
     pub(crate) conv: Converter,
     shader_cache: Option<ShaderCache>,
+    /// Queue family of a shared Vulkan device (see `vulkan.rs`), `None` for devices
+    /// gpufx made itself.
+    #[cfg_attr(not(any(windows, all(unix, not(target_vendor = "apple")))), allow(dead_code))]
+    pub(crate) vulkan_queue_family: Option<u32>,
+    /// Held while Vulkan frames stage their semaphores and submit; true once a submission
+    /// failed (the device is then no longer used for Vulkan frames).
+    #[cfg_attr(not(any(windows, all(unix, not(target_vendor = "apple")))), allow(dead_code))]
+    pub(crate) vulkan_submit: std::sync::Mutex<bool>,
 }
 
 impl GpuContext {
@@ -98,15 +111,43 @@ impl GpuContext {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("gpufx"),
             required_limits,
-            // Only Vulkan has it in wgpu 30; it costs nothing until a cache is created.
-            required_features: adapter.features() & wgpu::Features::PIPELINE_CACHE,
+            // PIPELINE_CACHE: only Vulkan has it in wgpu 30; it costs nothing until a cache
+            // is created. The format features let GPU frames have 16-bit and r8/rg8
+            // storage planes (see GpuFrame).
+            required_features: adapter.features() & GPU_FEATURES,
             ..Default::default()
         }))
         .map_err(|e| Error::Gpu(e.to_string()))?;
+        Ok(Self::from_device(device, queue, adapter.get_info(), cache_dir))
+    }
+
+    pub(crate) fn from_device(
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        info: wgpu::AdapterInfo,
+        cache_dir: Option<&std::path::Path>,
+    ) -> Arc<Self> {
         let conv = Converter::new(&device);
-        let info = adapter.get_info();
         let shader_cache = ShaderCache::new(cache_dir.map(|d| d.to_path_buf()), &device, &info);
-        Ok(Arc::new(GpuContext { device, queue, info, conv, shader_cache }))
+        Arc::new(GpuContext {
+            device,
+            queue,
+            info,
+            conv,
+            shader_cache,
+            vulkan_queue_family: None,
+            vulkan_submit: std::sync::Mutex::new(false),
+        })
+    }
+
+    /// The wgpu device, to make textures for [`crate::GpuFrame`]s and command encoders
+    /// for [`crate::EffectGraph::encode_gpu`].
+    pub fn device(&self) -> &wgpu::Device {
+        &self.device
+    }
+
+    pub fn queue(&self) -> &wgpu::Queue {
+        &self.queue
     }
 
     /// Counters of the on-disk shader cache, `None` when it is off or the backend has none.

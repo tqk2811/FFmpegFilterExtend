@@ -8,7 +8,7 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::ffi::{c_char, c_int, CStr, CString};
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::ptr;
@@ -21,7 +21,7 @@ use gpufx_core::{
 };
 
 /// Bumped when the C ABI changes incompatibly. Must match `GPUFX_API_VERSION` in gpufx.h.
-const API_VERSION: u32 = 5;
+const API_VERSION: u32 = 6;
 
 thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
@@ -95,8 +95,15 @@ fn program(path: &str, ctx: Arc<GpuContext>) -> Result<Arc<Program>, String> {
     Ok(prog)
 }
 
+/// What an effect was opened from, to open it again on another device.
+enum Spec {
+    Chain(Vec<String>),
+    Graph(String),
+}
+
 pub struct GpufxEffect {
     graph: EffectGraph,
+    spec: Spec,
     name: CString,
     device: CString,
     inputs: Vec<CString>,
@@ -304,9 +311,10 @@ unsafe fn backend_arg(backend: *const c_char) -> Result<Backend, String> {
     str_arg(backend, "backend")?.parse().map_err(|e: gpufx_core::Error| e.to_string())
 }
 
-fn wrap(graph: EffectGraph, name: String, device: CString) -> *mut GpufxEffect {
+fn wrap(graph: EffectGraph, spec: Spec, name: String, device: CString) -> *mut GpufxEffect {
     let strings = |list: &[String]| list.iter().map(|f| cstring(f)).collect::<Vec<_>>();
     let out = GpufxEffect {
+        spec,
         name: cstring(&name),
         device,
         inputs: strings(graph.input_names()),
@@ -319,32 +327,47 @@ fn wrap(graph: EffectGraph, name: String, device: CString) -> *mut GpufxEffect {
     Box::into_raw(Box::new(out))
 }
 
-unsafe fn open_chain(paths: &[&str], backend: *const c_char) -> Result<*mut GpufxEffect, String> {
+/// Opens what `spec` describes on `ctx`, with the name of the effect.
+fn open_spec(spec: &Spec, ctx: &Arc<GpuContext>) -> Result<(EffectGraph, String), String> {
+    match spec {
+        Spec::Chain(paths) => {
+            let mut effects = Vec::with_capacity(paths.len());
+            for path in paths {
+                let effect = Effect::from_program(program(path, ctx.clone())?).map_err(|e| format!("{path}: {e}"))?;
+                effects.push((label(path), effect));
+            }
+            let graph = EffectChain::new(effects).map_err(|e| e.to_string())?.into_graph();
+            let names: Vec<&str> = graph.effects().iter().map(|fx| fx.package().manifest.name.as_str()).collect();
+            let name = names.join(" | ");
+            Ok((graph, name))
+        }
+        Spec::Graph(text) => {
+            let graph = EffectGraph::parse(text, |path| {
+                let effect = Effect::from_program(program(path, ctx.clone()).map_err(gpufx_core::Error::Package)?)
+                    .map_err(|e| gpufx_core::Error::Package(format!("{path}: {e}")))?;
+                Ok((label(path), effect))
+            })
+            .map_err(|e| e.to_string())?;
+            let names: Vec<&str> = graph.effects().iter().map(|fx| fx.package().manifest.name.as_str()).collect();
+            let name = format!("graph of {}", names.join(", "));
+            Ok((graph, name))
+        }
+    }
+}
+
+unsafe fn open(spec: Spec, backend: *const c_char) -> Result<*mut GpufxEffect, String> {
     let ctx = context(backend_arg(backend)?).map_err(|e| e.to_string())?;
     let device = cstring(&ctx.description());
-    let mut effects = Vec::with_capacity(paths.len());
-    for path in paths {
-        let effect = Effect::from_program(program(path, ctx.clone())?).map_err(|e| format!("{path}: {e}"))?;
-        effects.push((label(path), effect));
-    }
-    let graph = EffectChain::new(effects).map_err(|e| e.to_string())?.into_graph();
-    let names: Vec<&str> = graph.effects().iter().map(|fx| fx.package().manifest.name.as_str()).collect();
-    let name = names.join(" | ");
-    Ok(wrap(graph, name, device))
+    let (graph, name) = open_spec(&spec, &ctx)?;
+    Ok(wrap(graph, spec, name, device))
+}
+
+unsafe fn open_chain(paths: &[&str], backend: *const c_char) -> Result<*mut GpufxEffect, String> {
+    open(Spec::Chain(paths.iter().map(|p| p.to_string()).collect()), backend)
 }
 
 unsafe fn open_graph(text: &str, backend: *const c_char) -> Result<*mut GpufxEffect, String> {
-    let ctx = context(backend_arg(backend)?).map_err(|e| e.to_string())?;
-    let device = cstring(&ctx.description());
-    let graph = EffectGraph::parse(text, |path| {
-        let effect = Effect::from_program(program(path, ctx.clone()).map_err(gpufx_core::Error::Package)?)
-            .map_err(|e| gpufx_core::Error::Package(format!("{path}: {e}")))?;
-        Ok((label(path), effect))
-    })
-    .map_err(|e| e.to_string())?;
-    let names: Vec<&str> = graph.effects().iter().map(|fx| fx.package().manifest.name.as_str()).collect();
-    let name = format!("graph of {}", names.join(", "));
-    Ok(wrap(graph, name, device))
+    open(Spec::Graph(text.to_string()), backend)
 }
 
 #[no_mangle]
@@ -656,6 +679,197 @@ pub unsafe extern "C" fn gpufx_effect_convert_graph(
         let mut outs = outs_arg(outs, nb_outputs)?;
         check_no_alias(&frames, &outs)?;
         fx.graph.convert(&frames, &mut outs).map_err(|e| e.to_string())?;
+        Ok(0)
+    })
+}
+
+// ---- Vulkan frames (since version 6) ----
+
+#[repr(C)]
+pub struct GpufxVulkanDevice {
+    pub get_instance_proc_addr: *const c_void,
+    pub instance: *mut c_void,
+    pub physical_device: *mut c_void,
+    pub device: *mut c_void,
+    pub api_version: u32,
+    pub queue_family: u32,
+    pub queue_index: u32,
+    pub queue_flags: u32,
+    pub nb_instance_extensions: u32,
+    pub instance_extensions: *const *const c_char,
+    pub nb_device_extensions: u32,
+    pub device_extensions: *const *const c_char,
+    pub device_features: *const c_void,
+}
+
+#[repr(C)]
+pub struct GpufxVulkanFrame {
+    pub format: *const c_char,
+    pub width: u32,
+    pub height: u32,
+    pub nb_images: u32,
+    pub image: [u64; 4],
+    pub vk_format: [i32; 4],
+    pub layout: [i32; 4],
+    pub semaphore: [u64; 4],
+    pub sem_value: [u64; 4],
+    pub queue_family: [u32; 4],
+    pub color: GpufxColor,
+}
+
+#[cfg(any(windows, all(unix, not(target_vendor = "apple"))))]
+mod vk {
+    use super::*;
+    use gpufx_core::vulkan::{VulkanDevice, VulkanFrame, VulkanPlane};
+
+    unsafe fn strings(list: *const *const c_char, n: u32, what: &str) -> Result<Vec<String>, String> {
+        if n == 0 {
+            return Ok(Vec::new());
+        }
+        if list.is_null() {
+            return Err(format!("{what} is NULL"));
+        }
+        std::slice::from_raw_parts(list, n as usize).iter().map(|&p| str_arg(p, what).map(str::to_string)).collect()
+    }
+
+    /// Shared Vulkan devices, by VkDevice, while an effect uses them.
+    fn vulkan_context(desc: &VulkanDevice) -> Result<Arc<GpuContext>, String> {
+        type Cache = Mutex<Vec<(usize, Weak<GpuContext>)>>;
+        static CACHE: Cache = Mutex::new(Vec::new());
+        let mut cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+        cache.retain(|(_, w)| w.strong_count() > 0);
+        if let Some(ctx) = cache.iter().find(|(d, _)| *d == desc.device as usize).and_then(|(_, w)| w.upgrade()) {
+            return Ok(ctx);
+        }
+        let ctx = unsafe { GpuContext::from_vulkan(desc) }.map_err(|e| e.to_string())?;
+        cache.push((desc.device as usize, Arc::downgrade(&ctx)));
+        Ok(ctx)
+    }
+
+    pub unsafe fn use_vulkan(fx: &mut GpufxEffect, dev: &GpufxVulkanDevice) -> Result<(), String> {
+        let desc = VulkanDevice {
+            get_instance_proc_addr: dev.get_instance_proc_addr,
+            instance: dev.instance,
+            physical_device: dev.physical_device,
+            device: dev.device,
+            api_version: dev.api_version,
+            instance_extensions: strings(dev.instance_extensions, dev.nb_instance_extensions, "instance_extensions")?,
+            device_extensions: strings(dev.device_extensions, dev.nb_device_extensions, "device_extensions")?,
+            enabled_features: dev.device_features,
+            queue_family: dev.queue_family,
+            queue_index: dev.queue_index,
+            queue_flags: dev.queue_flags,
+        };
+        let ctx = vulkan_context(&desc)?;
+        if Arc::ptr_eq(fx.graph.context(), &ctx) {
+            return Ok(());
+        }
+        let (mut graph, _) = open_spec(&fx.spec, &ctx)?;
+        graph.copy_params_from(&fx.graph).map_err(|e| e.to_string())?;
+        fx.graph = graph;
+        fx.device = cstring(&format!("{} (Vulkan device shared with the caller)", ctx.description()));
+        Ok(())
+    }
+
+    unsafe fn frame(f: &GpufxVulkanFrame, what: &str) -> Result<VulkanFrame, String> {
+        let format = pixel_format(f.format, what)?;
+        if f.width == 0 || f.height == 0 || f.width > 1 << 16 || f.height > 1 << 16 {
+            return Err(format!("{what}: bad size {}x{}", f.width, f.height));
+        }
+        if f.nb_images as usize > 4 {
+            return Err(format!("{what}: {} images", f.nb_images));
+        }
+        let planes = (0..f.nb_images as usize)
+            .map(|i| VulkanPlane {
+                image: f.image[i],
+                format: f.vk_format[i],
+                layout: f.layout[i],
+                semaphore: f.semaphore[i],
+                value: f.sem_value[i],
+                queue_family: f.queue_family[i],
+            })
+            .collect();
+        Ok(VulkanFrame { format, width: f.width, height: f.height, planes, color: color_info(&f.color)? })
+    }
+
+    unsafe fn frames(list: *mut GpufxVulkanFrame, n: u32, what: &str) -> Result<Vec<VulkanFrame>, String> {
+        if list.is_null() || n == 0 {
+            return Err(format!("{what} must not be NULL"));
+        }
+        std::slice::from_raw_parts(list, n as usize).iter().enumerate().map(|(i, f)| frame(f, &format!("{what} {i}"))).collect()
+    }
+
+    fn write_back(frames: &[VulkanFrame], raw: &mut [GpufxVulkanFrame]) {
+        for (f, r) in frames.iter().zip(raw) {
+            for (i, p) in f.planes.iter().enumerate() {
+                r.layout[i] = p.layout;
+                r.sem_value[i] = p.value;
+            }
+        }
+    }
+
+    pub unsafe fn process(
+        fx: &mut GpufxEffect,
+        inputs: *mut GpufxVulkanFrame,
+        nb_inputs: u32,
+        outs: *mut GpufxVulkanFrame,
+        nb_outputs: u32,
+        info: Option<FrameInfo>,
+    ) -> Result<(), String> {
+        let mut ins = frames(inputs, nb_inputs, "input")?;
+        let mut os = frames(outs, nb_outputs, "out")?;
+        fx.graph.process_vulkan(&mut ins, &mut os, info.as_ref()).map_err(|e| e.to_string())?;
+        write_back(&ins, std::slice::from_raw_parts_mut(inputs, nb_inputs as usize));
+        write_back(&os, std::slice::from_raw_parts_mut(outs, nb_outputs as usize));
+        Ok(())
+    }
+}
+
+#[cfg(not(any(windows, all(unix, not(target_vendor = "apple")))))]
+mod vk {
+    use super::*;
+    const MSG: &str = "this libgpufx is built without Vulkan frame support";
+    pub unsafe fn use_vulkan(_: &mut GpufxEffect, _: &GpufxVulkanDevice) -> Result<(), String> {
+        Err(MSG.into())
+    }
+    pub unsafe fn process(
+        _: &mut GpufxEffect,
+        _: *mut GpufxVulkanFrame,
+        _: u32,
+        _: *mut GpufxVulkanFrame,
+        _: u32,
+        _: Option<FrameInfo>,
+    ) -> Result<(), String> {
+        Err(MSG.into())
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn gpufx_vulkan_supported() -> c_int {
+    cfg!(any(windows, all(unix, not(target_vendor = "apple")))) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_use_vulkan(fx: *mut GpufxEffect, dev: *const GpufxVulkanDevice) -> c_int {
+    guard(-1, || {
+        let fx = fx.as_mut().ok_or("effect is NULL")?;
+        vk::use_vulkan(fx, dev.as_ref().ok_or("device is NULL")?)?;
+        Ok(0)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_process_vulkan(
+    fx: *mut GpufxEffect,
+    inputs: *mut GpufxVulkanFrame,
+    nb_inputs: u32,
+    outs: *mut GpufxVulkanFrame,
+    nb_outputs: u32,
+    info: *const GpufxFrameInfo,
+) -> c_int {
+    guard(-1, || {
+        let fx = fx.as_mut().ok_or("effect is NULL")?;
+        vk::process(fx, inputs, nb_inputs, outs, nb_outputs, info.as_ref().map(frame_info))?;
         Ok(0)
     })
 }

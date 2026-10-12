@@ -278,6 +278,78 @@ impl<'a> From<ImageMut<'a>> for FrameMut<'a> {
     }
 }
 
+/// A frame already in GPU memory, on the device of the effect that reads or writes it:
+/// one texture per plane, in the FFmpeg plane order, each of
+/// [`PixelFormat::plane_texture_format`] and [`PixelFormat::plane_texture_size`].
+/// Inputs need `TEXTURE_BINDING` usage, outputs `STORAGE_BINDING`.
+#[derive(Debug, Clone)]
+pub struct GpuFrame {
+    pub format: PixelFormat,
+    pub width: u32,
+    pub height: u32,
+    pub planes: Vec<wgpu::Texture>,
+    pub color: ColorInfo,
+}
+
+impl PixelFormat {
+    /// Texture format of plane `plane` of a [`GpuFrame`]: the unorm format holding its
+    /// samples as stored (`r8unorm`, `rg8unorm`, `rgba8unorm`, or the 16-bit versions,
+    /// which need `Features::TEXTURE_FORMAT_16BIT_NORM`). Also how FFmpeg's Vulkan frames
+    /// store each plane when every plane is its own image.
+    pub fn plane_texture_format(self, plane: usize) -> wgpu::TextureFormat {
+        use wgpu::TextureFormat as T;
+        let (_, _, channels) = self.plane_dims(plane, 1, 1);
+        match (channels, self.layout().bytes) {
+            (4, 1) => T::Rgba8Unorm,
+            (4, _) => T::Rgba16Unorm,
+            (2, 1) => T::Rg8Unorm,
+            (2, _) => T::Rg16Unorm,
+            (_, 1) => T::R8Unorm,
+            _ => T::R16Unorm,
+        }
+    }
+
+    /// Width and height in texels of plane `plane` of a `w` x `h` frame.
+    pub fn plane_texture_size(self, plane: usize, w: u32, h: u32) -> (u32, u32) {
+        let (pw, ph, _) = self.plane_dims(plane, w, h);
+        (pw, ph)
+    }
+}
+
+impl GpuFrame {
+    /// Checks the planes against the format; `output`: written by the effect.
+    pub(crate) fn check(&self, what: &str, output: bool) -> Result<(), Error> {
+        let (w, h) = (self.width, self.height);
+        if w == 0 || h == 0 {
+            return Err(Error::Frame(format!("{what}: empty {w}x{h} frame")));
+        }
+        let n = self.format.plane_count();
+        if self.planes.len() != n {
+            return Err(Error::Frame(format!(
+                "{what}: a {} frame has {n} plane(s), got {} texture(s)",
+                self.format.name(),
+                self.planes.len()
+            )));
+        }
+        let usage = if output { wgpu::TextureUsages::STORAGE_BINDING } else { wgpu::TextureUsages::TEXTURE_BINDING };
+        for (p, t) in self.planes.iter().enumerate() {
+            let (pw, ph) = self.format.plane_texture_size(p, w, h);
+            let format = self.format.plane_texture_format(p);
+            if t.width() != pw || t.height() != ph || t.format() != format || !t.usage().contains(usage) {
+                return Err(Error::Frame(format!(
+                    "{what}: plane {p} of a {w}x{h} {} frame must be a {pw}x{ph} {format:?} texture with {usage:?} usage, got {}x{} {:?} with {:?}",
+                    self.format.name(),
+                    t.width(),
+                    t.height(),
+                    t.format(),
+                    t.usage()
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Checks that every plane of a `format` frame fits its slice.
 pub(crate) fn check_planes(what: &str, format: PixelFormat, w: u32, h: u32, lens: [usize; 4], strides: [u32; 4]) -> Result<(), Error> {
     if w == 0 || h == 0 {

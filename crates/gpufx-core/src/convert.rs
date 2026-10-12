@@ -9,6 +9,8 @@
 //! On output a pass encodes each plane into a storage buffer of packed words, which is
 //! copied into a mappable buffer and from there into the caller's planes.
 
+use std::sync::OnceLock;
+
 use crate::frame::{ColorInfo, FrameMut, Layout, PixelFormat, PlaneKind};
 use crate::Error;
 
@@ -29,72 +31,134 @@ const WORKGROUP: u32 = 8;
 /// Size of the `Conv` uniform struct of convert.wgsl.
 const UNIFORM_SIZE: u64 = 112;
 
-/// Pipelines of the conversion passes, compiled once per device.
+/// Pipelines of the conversion passes, compiled once per device. Those for frames
+/// already on the GPU are compiled the first time such a frame comes.
 pub(crate) struct Converter {
-    /// Writing `rgba8unorm` and `rgba16float`.
+    device: wgpu::Device,
+    /// Integer planes uploaded from the CPU, writing `rgba8unorm` and `rgba16float`.
     to_rgba: [(wgpu::ComputePipeline, wgpu::BindGroupLayout); 2],
+    /// Unorm planes of GPU frames, writing `rgba8unorm` and `rgba16float`.
+    to_rgba_gpu: OnceLock<[(wgpu::ComputePipeline, wgpu::BindGroupLayout); 2]>,
     from_rgba: wgpu::ComputePipeline,
     from_rgba_layout: wgpu::BindGroupLayout,
+    /// Writing the planes of GPU frames, one per plane texture format.
+    to_planes: [OnceLock<(wgpu::ComputePipeline, wgpu::BindGroupLayout)>; PLANE_FORMATS.len()],
     /// Bound in place of the planes a format does not have.
     dummy: wgpu::TextureView,
+    dummy_gpu: OnceLock<wgpu::TextureView>,
+}
+
+/// Plane texture formats of GPU frames, with their WGSL storage format names.
+const PLANE_FORMATS: [(wgpu::TextureFormat, &str); 6] = [
+    (wgpu::TextureFormat::R8Unorm, "r8unorm"),
+    (wgpu::TextureFormat::Rg8Unorm, "rg8unorm"),
+    (wgpu::TextureFormat::Rgba8Unorm, "rgba8unorm"),
+    (wgpu::TextureFormat::R16Unorm, "r16unorm"),
+    (wgpu::TextureFormat::Rg16Unorm, "rg16unorm"),
+    (wgpu::TextureFormat::Rgba16Unorm, "rgba16unorm"),
+];
+
+fn entry(binding: u32, ty: wgpu::BindingType) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty, count: None }
+}
+
+const UNIFORM: wgpu::BindingType =
+    wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None };
+
+fn texture(sample_type: wgpu::TextureSampleType) -> wgpu::BindingType {
+    wgpu::BindingType::Texture { sample_type, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false }
+}
+
+fn pipeline(
+    device: &wgpu::Device,
+    label: &str,
+    body: &str,
+    entries: &[wgpu::BindGroupLayoutEntry],
+) -> (wgpu::ComputePipeline, wgpu::BindGroupLayout) {
+    let common = include_str!("convert.wgsl");
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some(label),
+        source: wgpu::ShaderSource::Wgsl(format!("{common}{body}").into()),
+    });
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some(label),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some(label),
+        layout: Some(&pipeline_layout),
+        module: &module,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    (pipeline, layout)
+}
+
+/// convert_in.wgsl with its plane bindings: integer textures (CPU uploads) or unorm
+/// textures (GPU frames), read back as the stored sample codes.
+fn convert_in_source(deep: bool, unorm: bool) -> String {
+    let mut s = String::new();
+    for i in 0..4 {
+        if unorm {
+            s.push_str(&format!(
+                "@group(0) @binding({}) var plane{i}: texture_2d<f32>;\n\
+                 fn load{i}(p: vec2i) -> vec4u {{ return vec4u(round(textureLoad(plane{i}, p, 0) * unorm_max())); }}\n",
+                2 + i
+            ));
+        } else {
+            s.push_str(&format!(
+                "@group(0) @binding({}) var plane{i}: texture_2d<u32>;\n\
+                 fn load{i}(p: vec2i) -> vec4u {{ return textureLoad(plane{i}, p, 0); }}\n",
+                2 + i
+            ));
+        }
+    }
+    if unorm {
+        s.push_str("fn unorm_max() -> f32 { return select(255.0, 65535.0, cv.depth + cv.shift > 8u); }\n");
+    }
+    let wgsl = if deep { "rgba16float" } else { "rgba8unorm" };
+    s.push_str(&include_str!("convert_in.wgsl").replace("rgba16float", wgsl));
+    s
+}
+
+fn to_rgba_pipelines(device: &wgpu::Device, unorm: bool) -> [(wgpu::ComputePipeline, wgpu::BindGroupLayout); 2] {
+    let plane = texture(if unorm { wgpu::TextureSampleType::Float { filterable: false } } else { wgpu::TextureSampleType::Uint });
+    [false, true].map(|deep| {
+        pipeline(
+            device,
+            "gpufx convert in",
+            &convert_in_source(deep, unorm),
+            &[
+                entry(0, UNIFORM),
+                entry(
+                    1,
+                    wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: deep_format(deep),
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                ),
+                entry(2, plane),
+                entry(3, plane),
+                entry(4, plane),
+                entry(5, plane),
+            ],
+        )
+    })
 }
 
 impl Converter {
     pub fn new(device: &wgpu::Device) -> Self {
-        let common = include_str!("convert.wgsl");
-        let pipeline = |label: &str, body: &str, entries: &[wgpu::BindGroupLayoutEntry]| {
-            let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(label),
-                source: wgpu::ShaderSource::Wgsl(format!("{common}{body}").into()),
-            });
-            let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries });
-            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some(label),
-                bind_group_layouts: &[Some(&layout)],
-                immediate_size: 0,
-            });
-            let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some(label),
-                layout: Some(&pipeline_layout),
-                module: &module,
-                entry_point: Some("main"),
-                compilation_options: Default::default(),
-                cache: None,
-            });
-            (pipeline, layout)
-        };
-        let entry = |binding, ty| wgpu::BindGroupLayoutEntry { binding, visibility: wgpu::ShaderStages::COMPUTE, ty, count: None };
-        let uniform = wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None };
-        let texture =
-            |sample_type| wgpu::BindingType::Texture { sample_type, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false };
-        let plane = texture(wgpu::TextureSampleType::Uint);
-        let to_rgba = [false, true].map(|deep| {
-            let wgsl = if deep { "rgba16float" } else { "rgba8unorm" };
-            pipeline(
-                "gpufx convert in",
-                &include_str!("convert_in.wgsl").replace("rgba16float", wgsl),
-                &[
-                    entry(0, uniform),
-                    entry(
-                        1,
-                        wgpu::BindingType::StorageTexture {
-                            access: wgpu::StorageTextureAccess::WriteOnly,
-                            format: deep_format(deep),
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                        },
-                    ),
-                    entry(2, plane),
-                    entry(3, plane),
-                    entry(4, plane),
-                    entry(5, plane),
-                ],
-            )
-        });
+        let to_rgba = to_rgba_pipelines(device, false);
         let (from_rgba, from_rgba_layout) = pipeline(
+            device,
             "gpufx convert out",
-            include_str!("convert_out.wgsl"),
+            &format!("{}{}", include_str!("convert_out.wgsl"), include_str!("convert_out_buffer.wgsl")),
             &[
-                entry(0, uniform),
+                entry(0, UNIFORM),
                 // textureLoad only, so rgba8unorm inputs (bypass) and rgba16float both fit.
                 entry(1, texture(wgpu::TextureSampleType::Float { filterable: false })),
                 entry(
@@ -109,7 +173,66 @@ impl Converter {
         );
         let dummy = texture_2d(device, "gpufx dummy plane", 1, 1, wgpu::TextureFormat::R8Uint, wgpu::TextureUsages::TEXTURE_BINDING)
             .create_view(&Default::default());
-        Converter { to_rgba, from_rgba, from_rgba_layout, dummy }
+        Converter {
+            device: device.clone(),
+            to_rgba,
+            to_rgba_gpu: OnceLock::new(),
+            from_rgba,
+            from_rgba_layout,
+            to_planes: Default::default(),
+            dummy,
+            dummy_gpu: OnceLock::new(),
+        }
+    }
+
+    fn to_rgba(&self, gpu: bool, deep: bool) -> &(wgpu::ComputePipeline, wgpu::BindGroupLayout) {
+        if gpu {
+            &self.to_rgba_gpu.get_or_init(|| to_rgba_pipelines(&self.device, true))[deep as usize]
+        } else {
+            &self.to_rgba[deep as usize]
+        }
+    }
+
+    fn dummy(&self, gpu: bool) -> &wgpu::TextureView {
+        if !gpu {
+            return &self.dummy;
+        }
+        self.dummy_gpu.get_or_init(|| {
+            texture_2d(&self.device, "gpufx dummy plane", 1, 1, wgpu::TextureFormat::R8Unorm, wgpu::TextureUsages::TEXTURE_BINDING)
+                .create_view(&Default::default())
+        })
+    }
+
+    /// The pass writing a plane texture of `format`.
+    fn to_plane(&self, format: wgpu::TextureFormat) -> Result<&(wgpu::ComputePipeline, wgpu::BindGroupLayout), Error> {
+        let i = PLANE_FORMATS
+            .iter()
+            .position(|&(f, _)| f == format)
+            .ok_or_else(|| Error::Frame(format!("{format:?} is not a plane format of GPU frames")))?;
+        Ok(self.to_planes[i].get_or_init(|| {
+            let body = format!(
+                "{}{}",
+                include_str!("convert_out.wgsl"),
+                include_str!("convert_out_image.wgsl").replace("STORAGE_FORMAT", PLANE_FORMATS[i].1)
+            );
+            pipeline(
+                &self.device,
+                "gpufx convert out (gpu)",
+                &body,
+                &[
+                    entry(0, UNIFORM),
+                    entry(1, texture(wgpu::TextureSampleType::Float { filterable: false })),
+                    entry(
+                        2,
+                        wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                    ),
+                ],
+            )
+        }))
     }
 }
 
@@ -211,17 +334,23 @@ pub(crate) struct InputKey {
     pub height: u32,
     /// Straight RGBA8: uploaded as `rgba8unorm` and read by effects without a pass.
     pub direct: bool,
+    /// A [`crate::GpuFrame`]: no upload, the conversion pass reads its plane textures.
+    pub gpu: bool,
 }
 
 /// Upload textures of one input and, unless direct, its conversion pass. Reused from
 /// frame to frame while the key holds.
 pub(crate) struct InputSlot {
     pub key: InputKey,
+    /// Upload textures; none for GPU frames.
     planes: Vec<wgpu::Texture>,
     /// The texture the first effect reads: the RGBA8 plane itself, or the target of the
     /// conversion pass.
     pub texture: wgpu::Texture,
-    pass: Option<(wgpu::Buffer, wgpu::BindGroup)>,
+    /// Uniforms of the conversion pass, unless direct.
+    uniform: Option<wgpu::Buffer>,
+    /// Made once for uploads, per frame for GPU frames (their textures change).
+    bind_group: Option<wgpu::BindGroup>,
     deep: bool,
 }
 
@@ -232,38 +361,52 @@ impl InputSlot {
         let copy = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
         if key.direct {
             let tex = texture_2d(device, name, w, h, wgpu::TextureFormat::Rgba8Unorm, copy);
-            return InputSlot { key, planes: vec![tex.clone()], texture: tex, pass: None, deep };
+            return InputSlot { key, planes: vec![tex.clone()], texture: tex, uniform: None, bind_group: None, deep };
         }
-        let planes: Vec<wgpu::Texture> = (0..key.format.plane_count())
-            .map(|p| {
-                let (pw, ph, _) = key.format.plane_dims(p, w, h);
-                texture_2d(device, &format!("{name} plane {p}"), pw, ph, plane_format(key.format, p), copy)
-            })
-            .collect();
+        let planes: Vec<wgpu::Texture> = if key.gpu {
+            Vec::new()
+        } else {
+            (0..key.format.plane_count())
+                .map(|p| {
+                    let (pw, ph, _) = key.format.plane_dims(p, w, h);
+                    texture_2d(device, &format!("{name} plane {p}"), pw, ph, plane_format(key.format, p), copy)
+                })
+                .collect()
+        };
         let texture =
             texture_2d(device, name, w, h, deep_format(deep), wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING);
-        let buf = uniform_buffer(device, "gpufx convert in");
-        let dst = texture.create_view(&Default::default());
+        let mut slot =
+            InputSlot { key, planes, texture, uniform: Some(uniform_buffer(device, "gpufx convert in")), bind_group: None, deep };
+        if !key.gpu {
+            let planes = slot.planes.clone();
+            slot.bind_planes(device, conv, &planes);
+        }
+        slot
+    }
+
+    /// Makes the conversion pass read `planes`.
+    fn bind_planes(&mut self, device: &wgpu::Device, conv: &Converter, planes: &[wgpu::Texture]) {
+        let buf = self.uniform.as_ref().expect("a conversion pass");
+        let dst = self.texture.create_view(&Default::default());
         let views: Vec<wgpu::TextureView> = planes.iter().map(|t| t.create_view(&Default::default())).collect();
         let mut entries = vec![
             wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&dst) },
         ];
         for i in 0..4 {
-            let view = views.get(i).unwrap_or(&conv.dummy);
+            let view = views.get(i).unwrap_or(conv.dummy(self.key.gpu));
             entries.push(wgpu::BindGroupEntry { binding: 2 + i as u32, resource: wgpu::BindingResource::TextureView(view) });
         }
-        let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("gpufx convert in"),
-            layout: &conv.to_rgba[deep as usize].1,
+            layout: &conv.to_rgba(self.key.gpu, self.deep).1,
             entries: &entries,
-        });
-        InputSlot { key, planes, texture, pass: Some((buf, bg)), deep }
+        }));
     }
 
     /// Textures this slot holds: the planes, and the converted frame unless direct.
     pub fn texture_count(&self) -> usize {
-        self.planes.len() + self.pass.is_some() as usize
+        self.planes.len() + self.uniform.is_some() as usize
     }
 
     /// Bytes of those textures.
@@ -272,7 +415,7 @@ impl InputSlot {
             let bytes = t.format().block_copy_size(None).unwrap_or(4) as u64;
             t.width() as u64 * t.height() as u64 * bytes
         };
-        self.planes.iter().map(size).sum::<u64>() + if self.pass.is_some() { size(&self.texture) } else { 0 }
+        self.planes.iter().map(size).sum::<u64>() + if self.uniform.is_some() { size(&self.texture) } else { 0 }
     }
 
     /// Uploads the planes of a frame matching the key, and its colour info.
@@ -287,17 +430,85 @@ impl InputSlot {
                 wgpu::Extent3d { width: pw, height: ph, depth_or_array_layers: 1 },
             );
         }
-        if let Some((buf, _)) = &self.pass {
+        if let Some(buf) = &self.uniform {
             queue.write_buffer(buf, 0, &uniform(self.key.format, w, h, color, None));
         }
     }
 
+    /// Points the conversion pass at the planes of a GPU frame matching the key.
+    pub fn use_gpu_frame(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        conv: &Converter,
+        planes: &[wgpu::Texture],
+        color: &ColorInfo,
+    ) {
+        self.bind_planes(device, conv, planes);
+        self.upload(queue, &[&[]; 4], &[0; 4], color);
+    }
+
     pub fn encode(&self, conv: &Converter, cpass: &mut wgpu::ComputePass) {
-        if let Some((_, bg)) = &self.pass {
-            cpass.set_pipeline(&conv.to_rgba[self.deep as usize].0);
+        if let Some(bg) = &self.bind_group {
+            cpass.set_pipeline(&conv.to_rgba(self.key.gpu, self.deep).0);
             cpass.set_bind_group(0, bg, &[]);
             cpass.dispatch_workgroups(self.key.width.div_ceil(WORKGROUP), self.key.height.div_ceil(WORKGROUP), 1);
         }
+    }
+}
+
+/// Conversion passes of one output that stays on the GPU: they write the plane textures
+/// of the [`crate::GpuFrame`] given with each frame.
+pub(crate) struct GpuOutputSlot {
+    pub key: (PixelFormat, u32, u32),
+    uniforms: Vec<wgpu::Buffer>,
+    bind_groups: Vec<wgpu::BindGroup>,
+}
+
+impl GpuOutputSlot {
+    pub fn new(device: &wgpu::Device, format: PixelFormat, w: u32, h: u32) -> Self {
+        let uniforms = (0..format.plane_count()).map(|_| uniform_buffer(device, "gpufx convert out")).collect();
+        GpuOutputSlot { key: (format, w, h), uniforms, bind_groups: Vec::new() }
+    }
+
+    /// Makes the passes read `source` and write `planes`, with the colours of `color`.
+    pub fn bind(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        conv: &Converter,
+        source: &wgpu::Texture,
+        planes: &[wgpu::Texture],
+        color: &ColorInfo,
+    ) -> Result<(), Error> {
+        let (format, w, h) = self.key;
+        let view = source.create_view(&Default::default());
+        self.bind_groups.clear();
+        for (i, (buf, plane)) in self.uniforms.iter().zip(planes).enumerate() {
+            queue.write_buffer(buf, 0, &uniform(format, w, h, color, Some(i)));
+            let dst = plane.create_view(&Default::default());
+            self.bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("gpufx convert out (gpu)"),
+                layout: &conv.to_plane(plane.format())?.1,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
+                    wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&dst) },
+                ],
+            }));
+        }
+        Ok(())
+    }
+
+    pub fn encode(&self, conv: &Converter, cpass: &mut wgpu::ComputePass) -> Result<(), Error> {
+        let (format, w, h) = self.key;
+        for (p, bg) in self.bind_groups.iter().enumerate() {
+            let (pw, ph) = format.plane_texture_size(p, w, h);
+            cpass.set_pipeline(&conv.to_plane(format.plane_texture_format(p))?.0);
+            cpass.set_bind_group(0, bg, &[]);
+            cpass.dispatch_workgroups(pw.div_ceil(WORKGROUP), ph.div_ceil(WORKGROUP), 1);
+        }
+        Ok(())
     }
 }
 

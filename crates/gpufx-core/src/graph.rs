@@ -4,8 +4,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::convert::{read_outputs, readback_buffer, texture_2d, work_format, InputKey, InputSlot, OutputSlot};
-use crate::frame::{Frame, FrameMut, PixelFormat};
+use crate::convert::{read_outputs, readback_buffer, texture_2d, work_format, GpuOutputSlot, InputKey, InputSlot, OutputSlot};
+use crate::frame::{Frame, FrameMut, GpuFrame, PixelFormat};
 use crate::manifest::StreamInfo;
 use crate::params::ParamBlock;
 use crate::runtime::{Effect, FrameInfo, Image, ImageMut};
@@ -79,6 +79,8 @@ pub(crate) struct FrameIo {
     deep: bool,
     inputs: Vec<InputSlot>,
     outputs: Vec<OutputSlot>,
+    /// Outputs written into GPU frames.
+    gpu_outputs: Vec<GpuOutputSlot>,
     readback: Option<wgpu::Buffer>,
     memory: MemoryStats,
 }
@@ -191,20 +193,26 @@ fn source_texture(effects: &[Effect], inputs: &[InputSlot], src: Source) -> wgpu
     }
 }
 
-/// Runs the effects of `topo`: every input is uploaded once, every pass goes into one
-/// command buffer in topological order and every output is read back once, through one
-/// shared buffer. Without `info` the effects are bypassed: each output is its source
-/// input pad (the pad whose size it has) converted to the output format; `inputs` may
-/// then hold only the first pads.
-pub(crate) fn run(
+/// What the engine needs to know of a frame, in CPU or GPU memory.
+#[derive(Clone, Copy)]
+struct Desc {
+    format: PixelFormat,
+    width: u32,
+    height: u32,
+    premultiplied: bool,
+}
+
+/// Checks the frame counts and output sizes of a call, and (re)makes the input slots,
+/// pooled textures and effect bind groups when the inputs changed.
+fn prepare(
     effects: &mut [Effect],
     topo: &Topology,
     io: &mut FrameIo,
-    inputs: &[Frame],
-    outs: &mut [FrameMut],
-    info: Option<&FrameInfo>,
+    inputs: &[Desc],
+    outs: &[Desc],
+    bypass: bool,
+    gpu: bool,
 ) -> Result<(), Error> {
-    let bypass = info.is_none();
     if bypass {
         if inputs.is_empty() || inputs.len() > topo.nb_inputs {
             return Err(Error::Frame(format!("bypass takes 1 to {} inputs, got {}", topo.nb_inputs, inputs.len())));
@@ -215,12 +223,8 @@ pub(crate) fn run(
     if outs.len() != topo.outputs.len() {
         return Err(Error::Frame(format!("effect writes {} outputs, got {}", topo.outputs.len(), outs.len())));
     }
-    for (i, f) in inputs.iter().enumerate() {
-        f.check(&format!("input {i}"))?;
-    }
     for (k, out) in outs.iter().enumerate() {
         let what = if outs.len() == 1 { "output".to_string() } else { format!("output {k}") };
-        out.check(&what)?;
         let pad = topo.pad_of(topo.outputs[k]);
         let Some(f) = inputs.get(pad) else {
             return Err(Error::Frame(format!("{what} has the size of input {pad}, which is not given")));
@@ -233,14 +237,15 @@ pub(crate) fn run(
     }
 
     let ctx = effects[0].program.ctx.clone();
-    let (device, queue, conv) = (&ctx.device, &ctx.queue, &ctx.conv);
+    let (device, conv) = (&ctx.device, &ctx.conv);
     let keys: Vec<InputKey> = inputs
         .iter()
         .map(|f| InputKey {
             format: f.format,
             width: f.width,
             height: f.height,
-            direct: f.format == PixelFormat::Rgba && !f.color.premultiplied,
+            direct: !gpu && f.format == PixelFormat::Rgba && !f.premultiplied,
+            gpu,
         })
         .collect();
     // A bypass call may bring only the first inputs: keep the slots of the others, and
@@ -266,6 +271,7 @@ pub(crate) fn run(
         // Drop the old textures before making new ones.
         io.inputs.clear();
         io.outputs.clear();
+        io.gpu_outputs.clear();
         io.readback = None;
         for fx in effects.iter_mut() {
             fx.bound = None;
@@ -290,6 +296,40 @@ pub(crate) fn run(
             readback_bytes: 0,
         };
     }
+    Ok(())
+}
+
+fn desc_of(f: &Frame) -> Desc {
+    Desc { format: f.format, width: f.width, height: f.height, premultiplied: f.color.premultiplied }
+}
+
+/// Runs the effects of `topo`: every input is uploaded once, every pass goes into one
+/// command buffer in topological order and every output is read back once, through one
+/// shared buffer. Without `info` the effects are bypassed: each output is its source
+/// input pad (the pad whose size it has) converted to the output format; `inputs` may
+/// then hold only the first pads.
+pub(crate) fn run(
+    effects: &mut [Effect],
+    topo: &Topology,
+    io: &mut FrameIo,
+    inputs: &[Frame],
+    outs: &mut [FrameMut],
+    info: Option<&FrameInfo>,
+) -> Result<(), Error> {
+    let bypass = info.is_none();
+    for (i, f) in inputs.iter().enumerate() {
+        f.check(&format!("input {i}"))?;
+    }
+    for (k, out) in outs.iter().enumerate() {
+        out.check(&if outs.len() == 1 { "output".to_string() } else { format!("output {k}") })?;
+    }
+    let ins: Vec<Desc> = inputs.iter().map(desc_of).collect();
+    let out_descs: Vec<Desc> =
+        outs.iter().map(|o| Desc { format: o.format, width: o.width, height: o.height, premultiplied: o.color.premultiplied }).collect();
+    prepare(effects, topo, io, &ins, &out_descs, bypass, false)?;
+
+    let ctx = effects[0].program.ctx.clone();
+    let (device, queue, conv) = (&ctx.device, &ctx.queue, &ctx.conv);
     if io.outputs.len() != outs.len() || io.outputs.iter().zip(outs.iter()).any(|(slot, o)| slot.key != (o.format, o.width, o.height)) {
         io.outputs.clear();
         io.readback = None;
@@ -337,6 +377,62 @@ pub(crate) fn run(
     }
     queue.submit([enc.finish()]);
     read_outputs(device, readback, &io.outputs, outs)
+}
+
+/// [`run`] for frames already on the GPU: the conversion passes read the input plane
+/// textures and write the output plane textures directly, and everything is recorded
+/// into `enc` without being submitted or waited for (the caller submits it, with
+/// whatever synchronisation the frames need, before the next call).
+pub(crate) fn run_gpu(
+    effects: &mut [Effect],
+    topo: &Topology,
+    io: &mut FrameIo,
+    inputs: &[GpuFrame],
+    outs: &[GpuFrame],
+    info: Option<&FrameInfo>,
+    enc: &mut wgpu::CommandEncoder,
+) -> Result<(), Error> {
+    let bypass = info.is_none();
+    for (i, f) in inputs.iter().enumerate() {
+        f.check(&format!("input {i}"), false)?;
+    }
+    for (k, out) in outs.iter().enumerate() {
+        out.check(&if outs.len() == 1 { "output".to_string() } else { format!("output {k}") }, true)?;
+    }
+    let desc = |f: &GpuFrame| Desc { format: f.format, width: f.width, height: f.height, premultiplied: f.color.premultiplied };
+    let ins: Vec<Desc> = inputs.iter().map(desc).collect();
+    let out_descs: Vec<Desc> = outs.iter().map(desc).collect();
+    prepare(effects, topo, io, &ins, &out_descs, bypass, true)?;
+
+    let ctx = effects[0].program.ctx.clone();
+    let (device, queue, conv) = (&ctx.device, &ctx.queue, &ctx.conv);
+    if io.gpu_outputs.len() != outs.len()
+        || io.gpu_outputs.iter().zip(outs.iter()).any(|(slot, o)| slot.key != (o.format, o.width, o.height))
+    {
+        io.gpu_outputs = outs.iter().map(|o| GpuOutputSlot::new(device, o.format, o.width, o.height)).collect();
+        io.allocations += 1;
+    }
+    for (slot, f) in io.inputs.iter_mut().zip(inputs) {
+        slot.use_gpu_frame(device, queue, conv, &f.planes, &f.color);
+    }
+    for (k, out) in outs.iter().enumerate() {
+        let src = if bypass { Source::Input(topo.pad_of(topo.outputs[k])) } else { topo.outputs[k] };
+        let tex = source_texture(effects, &io.inputs, src);
+        io.gpu_outputs[k].bind(device, queue, conv, &tex, &out.planes, &out.color)?;
+    }
+    let mut cpass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("gpufx"), timestamp_writes: None });
+    for slot in &io.inputs[..inputs.len()] {
+        slot.encode(conv, &mut cpass);
+    }
+    if let Some(info) = info {
+        for &k in &topo.order {
+            effects[k].encode(&mut cpass, info);
+        }
+    }
+    for slot in &io.gpu_outputs {
+        slot.encode(conv, &mut cpass)?;
+    }
+    Ok(())
 }
 
 /// One `[in]...body[out]...` statement of a graph description.
@@ -889,6 +985,41 @@ impl EffectGraph {
     /// hold only the first pads, as long as every output's pad is given.
     pub fn convert(&mut self, inputs: &[Frame], outs: &mut [FrameMut]) -> Result<(), Error> {
         run(&mut self.effects, &self.topo, &mut self.io, inputs, outs, None)
+    }
+
+    /// Runs the graph on frames already on the GPU (textures of this graph's device),
+    /// recording every pass into `enc`. Nothing is submitted: the caller submits `enc`
+    /// (and synchronises with whoever else uses the textures) before the next call, which
+    /// rewrites the uniforms. Output `k` must have the size of input
+    /// [`EffectGraph::output_pad`]`(k)`. Without `info` the effects are bypassed as in
+    /// [`EffectGraph::convert`]. Bind groups of the frame textures are made per call
+    /// (the textures of a frame pool change from frame to frame); the pooled textures
+    /// are reused as for CPU frames.
+    pub fn encode_gpu(
+        &mut self,
+        inputs: &[GpuFrame],
+        outs: &[GpuFrame],
+        info: Option<&FrameInfo>,
+        enc: &mut wgpu::CommandEncoder,
+    ) -> Result<(), Error> {
+        run_gpu(&mut self.effects, &self.topo, &mut self.io, inputs, outs, info, enc)
+    }
+
+    /// The device the graph runs on.
+    pub fn context(&self) -> &Arc<crate::GpuContext> {
+        self.effects[0].program.context()
+    }
+
+    /// Copies the parameter values of `other`, a graph opened from the same description
+    /// (on another device, say).
+    pub fn copy_params_from(&mut self, other: &EffectGraph) -> Result<(), Error> {
+        if self.effects.len() != other.effects.len() || self.param_names != other.param_names {
+            return Err(Error::Param("the graphs differ".into()));
+        }
+        for (a, b) in self.effects.iter_mut().zip(&other.effects) {
+            a.params = b.params.clone();
+        }
+        Ok(())
     }
 
     /// How many times frame textures, buffers or bind groups were (re)made: once per new

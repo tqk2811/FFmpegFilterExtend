@@ -17,6 +17,9 @@ Hiệu ứng video chạy bằng **shader trên GPU** cho FFmpeg, nạp từ **g
   picture-in-picture, đặt ảnh vào khung trên nền mờ, lá phong / lá rẻ quạt rơi (ảnh PNG trong gói), chuyển cảnh (crossfade, slide, wipe, circle, clock, collapse, expand,
   dip to black, dissolve, pixelize, zoom, blinds, bàn cờ, đẩy hộp, cuộn phim, xếp ảnh...)
 
+- **Frame Vulkan không copy**: frame của `hwupload` (`AV_PIX_FMT_VULKAN`, mỗi plane một image) được xử lý tại chỗ
+  trên chính device Vulkan của FFmpeg, đồng bộ bằng timeline semaphore của nó; giữa các filter frame không quay
+  về RAM. Frame của decoder Vulkan (`-hwaccel vulkan`) là image multiplane nên hiện bị từ chối.
 - Cache shader trên đĩa (tuỳ chọn): `GPUFX_SHADER_CACHE=<thư mục>` (Vulkan; xem [thiết kế](docs/DESIGN-vi.md)).
 
 ```sh
@@ -29,6 +32,12 @@ ffmpeg -i a.mp4 -i b.mp4 -filter_complex \
 ffmpeg -i a.mp4 -i b.mp4 -filter_complex \
   "[0:v][1:v]gpufx=graph='[0]split[a][b]; [a]gaussian-blur.zip[ba]; [b]grayscale.zip|vignette.zip[gb]; [ba][gb]crossfade.zip[x]; [x]split[x1][x2]; [x2][1]wipe-transition.zip[w]':params='x.progress=0.5|w.progress=t'[mix][wipe]" \
   -map "[mix]" mix.mp4 -map "[wipe]" wipe.mp4
+```
+
+```sh
+# Frame Vulkan: upload một lần, mọi hiệu ứng chạy trên device Vulkan của FFmpeg, download một lần
+ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i a.mp4 \
+  -vf "format=nv12,hwupload,gpufx=effect=vignette.zip,gpufx=effect=sepia.zip,hwdownload,format=nv12" out.mp4
 ```
 
 Tài liệu: [thiết kế](docs/DESIGN-vi.md) · [định dạng gói và cách viết shader](docs/EFFECT_FORMAT-vi.md) · [English](README.md)
@@ -75,8 +84,12 @@ Lưu ý với bản này:
   graph (`scale`, `format`, `trim`, `split`, `sendcmd`…) và filter chuẩn hoá đầu vào: thời gian, metadata,
   bố cục, khử xen kẽ và không gian màu (`fps`, `setpts`, `setsar`, `setdar`, `settb`, `setrange`, `setparams`,
   `pad`, `concat`, `select`, `loop`, `reverse`, `yadif`, `bwdif`, `colorspace`, `showinfo`), cùng audio cơ bản (`volume`, `amix`, `adelay`,
-  `afade`, `atempo`…). Filter hình (`drawtext`, `overlay`, `gblur`…) và filter hw (`hwupload`,
-  `scale_cuda`…) không còn. Cần filter nào thì thêm tên vào file đó rồi build lại.
+  `afade`, `atempo`…). `hwupload`, `hwdownload`, `hwmap` được giữ cho frame Vulkan. Filter hình (`drawtext`,
+  `overlay`, `gblur`…) và các filter hw khác (`scale_cuda`, `scale_vulkan`…) không còn. Cần filter nào thì thêm
+  tên vào file đó rồi build lại.
+- Frame Vulkan cần `libavutil` build sẵn có Vulkan (bản phát hành FFmpegBuild có) và Vulkan-Headers của Khronos,
+  script tự clone (tag `v1.4.321`, hoặc `VULKAN_HEADERS=<thư mục>`); thiếu thì filter được build không có frame
+  Vulkan và script báo điều đó.
 - `ffmpeg` in `WARNING: library configuration mismatch` ở banner (hoặc khi bỏ
   `-hide_banner`), vì `libavfilter` được configure khác các thư viện còn lại. Cảnh báo này vô hại.
 - `lib/pkgconfig/libavfilter.pc`, header và import lib vẫn là của bản build sẵn (không biết

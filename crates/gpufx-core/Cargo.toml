@@ -17,3 +17,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 thiserror = "2"
 naga = { version = "30", features = ["wgsl-in", "glsl-in"] }
 sha2 = "0.10"
+
+# Zero-copy Vulkan frames (src/vulkan.rs): the same ash wgpu-hal uses.
+[target.'cfg(any(windows, all(unix, not(target_vendor = "apple"))))'.dependencies]
+ash = { version = "0.38", default-features = false, features = ["std"] }

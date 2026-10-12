@@ -2,8 +2,8 @@
 # gpufx packages instead. The filters below stay because the ffmpeg CLI or gpufx needs
 # them, or because they normalise the inputs without being a visual effect.
 #   build.sh (full Docker build): this list plus every audio filter.
-#   scripts/build-prebuilt.sh:    this list only. Any other filter (hwupload, scale_cuda,
-#                                 drawtext...) gives "No such filter"; add it here to keep it.
+#   scripts/build-prebuilt.sh:    this list only. Any other filter (scale_cuda, drawtext...)
+#                                 gives "No such filter"; add it here to keep it.
 
 # Graph plumbing (buffer/buffersink are always built and need no entry)
 null
@@ -34,6 +34,12 @@ sendcmd
 
 # Feed one input to several gpufx chains: [0]split[a][b]
 split
+
+# Hardware frames: gpufx processes Vulkan frames in place (-init_hw_device vulkan,
+# hwupload,gpufx=...,hwdownload,format=...); hwmap maps frames between devices.
+hwupload
+hwdownload
+hwmap
 
 # Utility filters to normalise the inputs: timing, metadata and layout, and the few
 # picture filters that only bring a stream to a standard form (deinterlace, colour space).

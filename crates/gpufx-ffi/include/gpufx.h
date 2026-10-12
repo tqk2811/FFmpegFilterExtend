@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define GPUFX_API_VERSION 5
+#define GPUFX_API_VERSION 6
 
 typedef struct GpufxEffect GpufxEffect;
 
@@ -285,6 +285,84 @@ int gpufx_effect_convert_graph(GpufxEffect *fx, const GpufxFrame *inputs, uint32
  * the first input; out must have its size.
  */
 int gpufx_effect_convert_frame(GpufxEffect *fx, const GpufxFrame *input, const GpufxFrameOut *out);
+
+/*
+ * Since version 6: Vulkan frames without copies. The effect runs on a Vulkan device the
+ * caller made (FFmpeg's AVVulkanDeviceContext) and reads and writes its VkImages in
+ * place. Handles are passed without <vulkan/vulkan.h>: dispatchable handles as
+ * pointers, non-dispatchable ones (VkImage, VkSemaphore) as uint64_t.
+ */
+
+/* 1 when this library can share a Vulkan device (Linux, Windows), else 0. */
+int gpufx_vulkan_supported(void);
+
+typedef struct GpufxVulkanDevice {
+    void *get_instance_proc_addr; /* PFN_vkGetInstanceProcAddr of the instance's loader */
+    void *instance;               /* VkInstance */
+    void *physical_device;        /* VkPhysicalDevice */
+    void *device;                 /* VkDevice */
+    uint32_t api_version;         /* API version of the instance, at least 1.1 */
+    /*
+     * The queue gpufx submits to (a family with compute, and the queue in it), and the
+     * VkDeviceQueueCreateFlags it was created with. While gpufx_effect_process_vulkan()
+     * runs, no other thread may submit to that queue (lock it around the call).
+     */
+    uint32_t queue_family;
+    uint32_t queue_index;
+    uint32_t queue_flags;
+    /* Extensions enabled on the instance and on the device. */
+    uint32_t nb_instance_extensions;
+    const char *const *instance_extensions;
+    uint32_t nb_device_extensions;
+    const char *const *device_extensions;
+    /*
+     * VkPhysicalDeviceFeatures2 chain of the features enabled on the device: gpufx
+     * (wgpu) uses no feature or extension the device was not created with. Only read
+     * during gpufx_effect_use_vulkan().
+     */
+    const void *device_features;
+} GpufxVulkanDevice;
+
+/*
+ * Moves an open effect (and its parameter values) to the Vulkan device dev: the packages
+ * are compiled again for it, unless an effect already uses that device (shared, by
+ * VkDevice, like the packages). dev must outlive the effect. Only effects moved this way
+ * take gpufx_effect_process_vulkan().
+ */
+int gpufx_effect_use_vulkan(GpufxEffect *fx, const GpufxVulkanDevice *dev);
+
+/*
+ * A frame of Vulkan images, one VkImage per plane of format (FFmpeg: one image per plane,
+ * i.e. AVVulkanFramesContext without multiplane images), each of the per-plane formats
+ * VK_FORMAT_R8_UNORM, R8G8_UNORM, R8G8B8A8_UNORM or their R16 versions, as FFmpeg uses
+ * them. Inputs need SAMPLED usage, outputs STORAGE.
+ */
+typedef struct GpufxVulkanFrame {
+    const char *format;          /* pixel format of the planes (FFmpeg's sw_format name) */
+    uint32_t width;
+    uint32_t height;
+    uint32_t nb_images;          /* one per plane */
+    uint64_t image[4];           /* VkImage */
+    int32_t vk_format[4];        /* VkFormat of each image */
+    int32_t layout[4];           /* in: VkImageLayout; out: the layout it is left in */
+    uint64_t semaphore[4];       /* timeline VkSemaphore of each image */
+    uint64_t sem_value[4];       /* in: value to wait for; out: value signalled when done */
+    uint32_t queue_family[4];    /* owner, or VK_QUEUE_FAMILY_IGNORED (concurrent sharing) */
+    GpufxColor color;
+} GpufxVulkanFrame;
+
+/*
+ * gpufx_effect_process_graph() on Vulkan frames: one submission to the device's queue
+ * waits for every image's semaphore at sem_value, runs the conversions and effects
+ * reading and writing the images directly (no copy, no readback), and signals each
+ * semaphore at sem_value + 1. On return the work is submitted, not finished: layout and
+ * sem_value of every image are updated, and the caller stores them in its frames
+ * (AVVkFrame) while it still holds them (lock_frame). With info NULL the effects are
+ * bypassed as in gpufx_effect_convert_graph().
+ */
+int gpufx_effect_process_vulkan(GpufxEffect *fx, GpufxVulkanFrame *inputs, uint32_t nb_inputs,
+                                GpufxVulkanFrame *outs, uint32_t nb_outputs,
+                                const GpufxFrameInfo *info);
 
 #ifdef __cplusplus
 }

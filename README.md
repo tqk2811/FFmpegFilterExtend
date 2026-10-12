@@ -19,6 +19,10 @@ Video effects powered by **GPU shaders** for FFmpeg, loaded from external **`.zi
   picture-in-picture, fitting a picture over a blurred background, falling maple / ginkgo leaves (PNG images in the package), transitions (crossfade, slide, wipe, circle, clock, collapse, expand,
   dip to black, dissolve, pixelize, zoom, blinds, checkerboard, push box, film strip, photo collection...)
 
+- **Vulkan frames without copies**: `hwupload` frames (`AV_PIX_FMT_VULKAN`, one image per plane) are processed
+  in place on FFmpeg's own Vulkan device, synchronised with its timeline semaphores; frames never go back
+  to RAM between filters. Frames of the Vulkan decoders (`-hwaccel vulkan`) are multiplane images and are refused
+  for now.
 - Optional on-disk shader cache: `GPUFX_SHADER_CACHE=<dir>` (Vulkan; see [design](docs/DESIGN.md)).
 
 ```sh
@@ -31,6 +35,12 @@ ffmpeg -i a.mp4 -i b.mp4 -filter_complex \
 ffmpeg -i a.mp4 -i b.mp4 -filter_complex \
   "[0:v][1:v]gpufx=graph='[0]split[a][b]; [a]gaussian-blur.zip[ba]; [b]grayscale.zip|vignette.zip[gb]; [ba][gb]crossfade.zip[x]; [x]split[x1][x2]; [x2][1]wipe-transition.zip[w]':params='x.progress=0.5|w.progress=t'[mix][wipe]" \
   -map "[mix]" mix.mp4 -map "[wipe]" wipe.mp4
+```
+
+```sh
+# Vulkan frames: upload once, every effect on FFmpeg's Vulkan device, download once
+ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i a.mp4 \
+  -vf "format=nv12,hwupload,gpufx=effect=vignette.zip,gpufx=effect=sepia.zip,hwdownload,format=nv12" out.mp4
 ```
 
 Docs: [design](docs/DESIGN.md) · [package format and how to write shaders](docs/EFFECT_FORMAT.md)
@@ -77,8 +87,12 @@ Notes for this build:
   (`scale`, `format`, `trim`, `split`, `sendcmd`...) and filters that normalise the inputs: timing, metadata, layout,
   deinterlacing and colour space (`fps`, `setpts`, `setsar`, `setdar`, `settb`, `setrange`, `setparams`, `pad`, `concat`,
   `select`, `loop`, `reverse`, `yadif`, `bwdif`, `colorspace`, `showinfo`) plus basic audio (`volume`, `amix`, `adelay`, `afade`, `atempo`...).
-  Visual filters (`drawtext`, `overlay`, `gblur`...) and hw filters (`hwupload`, `scale_cuda`...) are gone.
-  If you need another filter, add its name to that file and rebuild.
+  `hwupload`, `hwdownload` and `hwmap` stay for Vulkan frames. Visual filters (`drawtext`, `overlay`, `gblur`...)
+  and other hw filters (`scale_cuda`, `scale_vulkan`...) are gone. If you need another filter, add its name to that
+  file and rebuild.
+- Vulkan frames need Vulkan in the prebuilt `libavutil` (the FFmpegBuild releases have it) and the Khronos
+  Vulkan-Headers, which the script clones (tag `v1.4.321`, or `VULKAN_HEADERS=<dir>`); without them the filter is
+  built without Vulkan frames and says so.
 - `ffmpeg` prints `WARNING: library configuration mismatch` in the banner (or when you drop
   `-hide_banner`), because `libavfilter` is configured differently from the other libraries. The warning is harmless.
 - `lib/pkgconfig/libavfilter.pc`, the headers and the import lib still come from the prebuilt (they know nothing

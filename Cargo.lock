@@ -335,6 +335,7 @@ dependencies = [
 name = "gpufx-core"
 version = "0.1.0"
 dependencies = [
+ "ash",
  "image",
  "naga",
  "pollster",
