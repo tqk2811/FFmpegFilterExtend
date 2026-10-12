@@ -11,7 +11,11 @@ fn examples() -> PathBuf {
 
 fn gpu() -> Option<std::sync::Arc<GpuContext>> {
     match GpuContext::new(Backend::Auto) {
-        Ok(ctx) => Some(ctx),
+        Ok(ctx) => {
+            // CI logs show which adapter ran the tests (lavapipe, WARP, Metal).
+            eprintln!("adapter: {}", ctx.description());
+            Some(ctx)
+        }
         Err(e) => {
             eprintln!("skipping: {e}");
             None
@@ -57,11 +61,16 @@ fn transitions_start_on_the_first_clip_and_end_on_the_second() {
             fx.params_mut().set_str("progress", progress).unwrap();
             let mut out = vec![0u8; (w * h * 4) as usize];
             fx.process(&inputs, &mut out, w * 4, 0.0, 0).unwrap();
+            let bad = out.chunks(4).zip(want.chunks(4)).position(|(a, b)| a != b);
             assert!(
-                &out == want,
-                "{} at progress {progress} is not the {} clip",
+                bad.is_none(),
+                "{} at progress {progress} is not the {} clip: pixel ({}, {}) is {:?}, want {:?}",
                 dir.display(),
-                if progress == "0" { "first" } else { "second" }
+                if progress == "0" { "first" } else { "second" },
+                bad.unwrap_or(0) as u32 % w,
+                bad.unwrap_or(0) as u32 / w,
+                bad.map(|i| &out[i * 4..i * 4 + 4]),
+                bad.map(|i| &want[i * 4..i * 4 + 4]),
             );
         }
         checked += 1;
