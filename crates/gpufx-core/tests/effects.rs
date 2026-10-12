@@ -9,8 +9,12 @@ fn examples() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects")
 }
 
+/// One device for every test, as in FFmpeg where all gpufx filters share one. Each test
+/// making its own D3D12 device on WARP, from parallel threads, is the suspect for the
+/// access violations of the test process on the Windows runner.
 fn gpu() -> Option<std::sync::Arc<GpuContext>> {
-    match GpuContext::new(Backend::Auto) {
+    static CTX: std::sync::OnceLock<Option<std::sync::Arc<GpuContext>>> = std::sync::OnceLock::new();
+    CTX.get_or_init(|| match GpuContext::new(Backend::Auto) {
         Ok(ctx) => {
             // CI logs show which adapter ran the tests (lavapipe, WARP, Metal).
             eprintln!("adapter: {}", ctx.description());
@@ -20,7 +24,8 @@ fn gpu() -> Option<std::sync::Arc<GpuContext>> {
             eprintln!("skipping: {e}");
             None
         }
-    }
+    })
+    .clone()
 }
 
 /// `out` as a w x h output with the given row stride.
@@ -58,11 +63,23 @@ fn transitions_start_on_the_first_clip_and_end_on_the_second() {
     for entry in std::fs::read_dir(examples()).unwrap() {
         let dir = entry.unwrap().path();
         let mut fx = Effect::new(ctx.clone(), Package::open(&dir).unwrap()).unwrap();
-        // Transitions: two inputs and a `progress` parameter.
+        // Transitions: two inputs and a `progress` parameter. photo-collection ends with
+        // the second clip lying on the first, so it only starts on the first.
         if fx.input_count() != 2 || fx.params_mut().set_str("progress", "0").is_err() {
             continue;
         }
+        let stacks = dir.ends_with("photo-collection");
         for (progress, want) in [("0", &first), ("1", &second)] {
+            if stacks && progress == "1" {
+                // The photo lies tilted in the middle: the corners still show the first clip.
+                fx.params_mut().set_str("progress", "1").unwrap();
+                let mut out = vec![0u8; (w * h * 4) as usize];
+                fx.process(&inputs, target(&mut out, w, h, w * 4), &FrameInfo::new(0.0, 0)).unwrap();
+                assert_eq!(out[..4], first[..4], "photo-collection corner");
+                let centre = ((h / 2 * w + w / 2) * 4) as usize;
+                assert_ne!(out[centre..centre + 4], first[centre..centre + 4], "photo-collection centre");
+                continue;
+            }
             fx.params_mut().set_str("progress", progress).unwrap();
             let mut out = vec![0u8; (w * h * 4) as usize];
             fx.process(&inputs, target(&mut out, w, h, w * 4), &FrameInfo::new(0.0, 0)).unwrap();
@@ -80,7 +97,7 @@ fn transitions_start_on_the_first_clip_and_end_on_the_second() {
         }
         checked += 1;
     }
-    assert!(checked >= 13, "only {checked} transitions found");
+    assert!(checked >= 17, "only {checked} transitions found");
 }
 
 #[test]
@@ -342,4 +359,34 @@ fn globals_hold_precise_time_and_pixel_aspect() {
     assert_eq!(day[1], 128);
     // Unknown aspect ratios count as square pixels.
     assert_eq!(pixel(0.0, 0.0)[2], 64);
+}
+
+#[test]
+fn fit_places_any_picture_in_the_frame() {
+    let Some(ctx) = gpu() else { return };
+    let (w, h) = (64, 36);
+    let canvas = vec![0u8; (w * h * 4) as usize];
+    let (pw, ph) = (20, 30); // portrait, smaller than the frame
+    let photo = gradient(pw, ph);
+    let inputs =
+        [Image { data: &canvas, width: w, height: h, stride: w * 4 }, Image { data: &photo, width: pw, height: ph, stride: pw * 4 }];
+    let (_, mut fx) = open(&ctx, "fit");
+    let mut run = |mode: &str| {
+        fx.params_mut().set_str("mode", mode).unwrap();
+        let mut out = vec![0u8; canvas.len()];
+        fx.process(&inputs, target(&mut out, w, h, w * 4), &FrameInfo::new(0.0, 0)).unwrap();
+        out
+    };
+    let px = |out: &[u8], x: u32, y: u32| out[((y * w + x) * 4) as usize..][..4].to_vec();
+    // Centered at its own size: black around it, the picture in the middle.
+    let center = run("0");
+    assert_eq!(px(&center, 0, 0), [0, 0, 0, 255]);
+    assert_eq!(px(&center, w / 2, h / 2)[3], 255);
+    assert_ne!(px(&center, w / 2, h / 2), [0, 0, 0, 255]);
+    // Crop and stretch fill the frame; blur fills the sides with the blurred copy.
+    for mode in ["1", "2", "3"] {
+        let out = run(mode);
+        assert_ne!(px(&out, 0, 0), [0, 0, 0, 255], "mode {mode}");
+        assert_ne!(px(&out, w - 1, h - 1), [0, 0, 0, 255], "mode {mode}");
+    }
 }
