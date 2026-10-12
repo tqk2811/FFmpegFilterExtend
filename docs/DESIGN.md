@@ -206,6 +206,42 @@ The main costs are upload/readback and color conversion on the CPU. The roadmap 
 In every phase, **the package format and shaders do not change**: authors never need to know whether a frame comes from
 the CPU or from CUDA.
 
+### GPU graph inside one filter (planned, after P1)
+
+A single `gpufx` can run a whole effect graph, so complex branching stays on the GPU on every
+backend (Vulkan, D3D12, Metal, GL), without hardware frames:
+
+```sh
+ffmpeg -i a.mp4 -i b.mp4 -filter_complex "[0:v][1:v]gpufx=graph='[0]split[a][b]; [a]gaussian-blur.zip[ba]; [b]grayscale.zip|vignette.zip[gb]; [ba][gb]crossfade.zip[x]; [x][1]wipe-transition.zip[out]'[v]" -map "[v]" out.mp4
+```
+
+`[0]`, `[1]` are the filter's input pads, `[out]` its output pad; the single quotes protect `;` and `[]` from
+the outer filter graph.
+
+- Each input pad is uploaded once, each output pad is read back once; every intermediate texture stays
+  on the GPU. The graph may have several output pads.
+- `split` costs nothing: it is two edges reading the same texture.
+- The whole graph runs in one submission, nodes in topological order. `effect='a.zip|b.zip'` is the special
+  case of a linear graph, so the `EffectChain` of A2 grows into a DAG.
+- Parameters are named after the node label, as in chains; `sendcmd` keeps working.
+- Checked at configuration: cycles, unused or undefined labels, size and format rules give a clear error.
+- Zero-copy (P3) later feeds the same graph with hardware frames; the graph does not change.
+
+### VRAM budget (rule for every phase)
+
+VRAM is limited, so GPU memory is kept as low as possible and nothing is duplicated:
+
+- No copies on the way in or out: YUV plane textures and the converted RGBA texture are reused frame to
+  frame, and the first effect reads the converted texture directly.
+- Intermediate textures (pass outputs, chain links, graph edges) come from a pool keyed by size and
+  format. Textures whose lifetimes do not overlap share memory (ping-pong); a texture goes back to the pool
+  right after its last reader. The graph check computes the peak number of live textures up front, so a
+  wide graph costs only the textures alive at the same time, not one per node.
+- `rgba16float` (twice the size of `rgba8unorm`) only where precision needs it (inputs or outputs above
+  8 bits); an all-8-bit chain stays `rgba8unorm`.
+- Staging and readback buffers are shared, not per effect. Textures are freed when the frame size changes.
+- Package textures (PNG) belong to the shared `Program` and are loaded once per device.
+
 ## 7. Effect package security
 
 A zip package is untrusted data (downloaded from an effect marketplace):

@@ -205,6 +205,44 @@ Chi phí chính là upload/readback và chuyển màu trên CPU. Lộ trình b�
 Ở mọi giai đoạn, **định dạng gói và shader không đổi**: tác giả không cần biết frame đến từ
 CPU hay CUDA.
 
+### Đồ thị GPU trong một filter (dự kiến, sau P1)
+
+Một `gpufx` chạy được cả đồ thị hiệu ứng, nên nhánh phức tạp ở lại trên GPU với mọi backend
+(Vulkan, D3D12, Metal, GL), không cần hw frame:
+
+```sh
+ffmpeg -i a.mp4 -i b.mp4 -filter_complex "[0:v][1:v]gpufx=graph='[0]split[a][b]; [a]gaussian-blur.zip[ba]; [b]grayscale.zip|vignette.zip[gb]; [ba][gb]crossfade.zip[x]; [x][1]wipe-transition.zip[out]'[v]" -map "[v]" out.mp4
+```
+
+`[0]`, `[1]` là input pad của filter, `[out]` là output pad; dấu nháy đơn che `;` và `[]` khỏi
+filter graph bên ngoài.
+
+- Mỗi input pad tải lên một lần, mỗi output pad đọc về một lần; mọi texture trung gian ở lại
+  trên GPU. Đồ thị có thể có nhiều output pad.
+- `split` không tốn gì: chỉ là hai cạnh cùng đọc một texture.
+- Cả đồ thị chạy trong một lần submit, các nút theo thứ tự topo. `effect='a.zip|b.zip'` là
+  trường hợp đồ thị thẳng, nên `EffectChain` của A2 được mở rộng thành DAG.
+- Tham số đặt tên theo nhãn của nút như chuỗi hiện nay; `sendcmd` vẫn dùng được.
+- Kiểm tra lúc configure: vòng lặp, nhãn thừa hoặc chưa định nghĩa, quy tắc kích thước/format
+  đều báo lỗi rõ ràng.
+- Zero-copy (P3) sau này đưa hw frame vào cùng đồ thị đó; đồ thị không đổi.
+
+### Ngân sách VRAM (quy tắc cho mọi giai đoạn)
+
+VRAM có hạn, nên bộ nhớ GPU giữ ở mức thấp nhất và không nhân bản:
+
+- Không chép thêm khi vào/ra: texture các plane YUV và texture RGBA sau chuyển đổi được dùng
+  lại qua các frame; hiệu ứng đầu tiên đọc thẳng texture đã chuyển đổi.
+- Texture trung gian (output của pass, chỗ nối chuỗi, cạnh của đồ thị) lấy từ pool theo kích
+  thước và format. Texture có thời gian sống không chồng nhau dùng chung bộ nhớ (ping-pong);
+  texture trả về pool ngay sau lần đọc cuối. Bước kiểm tra đồ thị tính trước số texture sống
+  cùng lúc tối đa, nên đồ thị rộng chỉ tốn số texture sống đồng thời, không phải một cái mỗi nút.
+- `rgba16float` (gấp đôi `rgba8unorm`) chỉ dùng khi cần độ chính xác (input/output trên
+  8 bit); chuỗi toàn 8 bit giữ `rgba8unorm`.
+- Buffer staging và readback dùng chung, không theo từng hiệu ứng. Texture được giải phóng khi
+  kích thước frame đổi.
+- Texture của gói (PNG) thuộc `Program` dùng chung, nạp một lần cho mỗi device.
+
 ## 7. Bảo mật gói hiệu ứng
 
 Gói zip là dữ liệu không tin cậy (tải từ chợ hiệu ứng):
