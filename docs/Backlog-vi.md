@@ -1,11 +1,5 @@
 # Việc còn treo
 
-### Line ending của file mới (CRLF hay LF)
-- **Vấn đề**: luật chung của người dùng yêu cầu file mới (trừ script shell, Dockerfile, Makefile) ghi CRLF, nhưng toàn bộ repo hiện là LF, kể cả `.ps1`, `.md`, `.json`, `.wgsl`. `.gitattributes` mới chỉ quy định `*.sh` và `*.Dockerfile`.
-- **Vị trí**: [.gitattributes](../.gitattributes), mọi file text.
-- **Vì sao**: trộn hai kiểu xuống dòng làm diff phình. Cần chốt một kiểu rồi ghi vào `.gitattributes` (vd `* text=auto eol=crlf` cùng ngoại lệ LF cho `*.sh`, `*.Dockerfile`, `Makefile`).
-- **Ngày ghi**: 2026-10-12
-
 ### Hậu tố `-vi` cho tài liệu tiếng Việt
 - **Vấn đề**: theo quy tắc đặt tên Markdown, file không phải tiếng Anh phải có hậu tố ngôn ngữ (`-vi`). Hiện `README.md`, `docs/DESIGN.md`, `docs/EFFECT_FORMAT.md` viết tiếng Việt nhưng chưa có hậu tố.
 - **Vị trí**: [README.md](../README.md), [docs/DESIGN.md](DESIGN.md), [docs/EFFECT_FORMAT.md](EFFECT_FORMAT.md).
