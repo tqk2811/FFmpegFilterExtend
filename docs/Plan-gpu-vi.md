@@ -12,8 +12,8 @@ DESIGN-vi.md mục 6).
 | B-chung (P1) | YUV (NV12, P010, yuv420p) ↔ RGBA trên GPU; `rgba16float` chỉ khi cần; pool texture, dùng lại buffer staging | Xong (C API v4) |
 | Đồ thị GPU | `gpufx=graph='...'`: `EffectChain` thành DAG, nhiều input/output pad, `split` không copy, texture trả pool sau lần đọc cuối | Xong (C API v5) |
 | B-Vulkan (P3) | Zero-copy `AV_PIX_FMT_VULKAN`: device wgpu từ `AVVulkanDeviceContext`, nhận/trả `VkImage`, semaphore của `AVVKFrame` | Xong (C API v6); phần còn lại trong Backlog |
-| B-D3D12 (P5) | `AV_PIX_FMT_D3D12` vào backend DX12 của wgpu; chạy thử trên WARP | Chưa |
-| B-D3D11 (P5) | D3D11 qua shared NT handle sang DX12 | Chưa |
+| B-D3D12 (P5) | `AV_PIX_FMT_D3D12` vào backend DX12 của wgpu; chạy thử trên WARP | Xong phần code (C API v7), cross-compile được; test chỉ chạy trên job CI Windows (WARP), chưa chạy trên GPU thật; phần còn lại trong Backlog |
+| B-D3D11 (P5) | D3D11 qua shared NT handle sang DX12 | Xong phần code (C API v7): output không copy, input khác copy một lần trên GPU; như B-D3D12, chưa chạy trên Windows thật |
 | Cache shader | Lưu shader/pipeline đã biên dịch ra đĩa, thư mục lấy từ biến môi trường `GPUFX_SHADER_CACHE` | Xong bước 1 (Vulkan `PipelineCache`); DXIL D3D12 và `pack --precompile` trong Backlog |
 
 ## B-chung: phạm vi
@@ -36,6 +36,14 @@ DESIGN-vi.md mục 6).
   một lần submit chờ/signal timeline semaphore, layout để lại `GENERAL`, khoá frame và queue của FFmpeg;
   `GpuFrame` + `EffectGraph::encode_gpu` dùng lại được cho D3D12. Test: Rust (so từng byte với đường CPU) và
   `test-bundle.sh` (framemd5 giống đường phần mềm trên lavapipe, trộn CPU/GPU bị từ chối).
+
+## B-D3D12 / B-D3D11: đã làm
+- Chi tiết ở DESIGN-vi.md mục 6, "Frame D3D12 và D3D11". D3D12: wgpu mở adapter có LUID của device FFmpeg và
+  nhận lại đúng `ID3D12Device` (singleton theo adapter, có kiểm tra), plane NV12/P010 là plane slice, barrier
+  COMMON ↔ state cần dùng do gpufx tự ghi theo subresource, fence của frame chờ/signal +1, chờ CPU lần submit
+  trước. Texture array, frame lớn hơn, output không UAV: một lần copy GPU. D3D11: texture shared NT handle mở
+  sang D3D12 không copy (output do gpufx tạo), input khác copy một lần trên immediate context, fence share.
+- Test: `test-bundle.sh` (mục "D3D12 and D3D11 frames"), job CI `ffmpeg-windows` chạy trên WARP.
 
 ## Cache shader: phạm vi
 - **Vì sao**: biên dịch tốn thời gian mỗi lần mở gói, nhất là D3D12 (đo trên CI: FXC 50–160 s cho shader lá

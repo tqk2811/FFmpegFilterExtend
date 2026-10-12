@@ -15,9 +15,13 @@
 #                    gpufx takes Vulkan frames (hwupload, -hwaccel vulkan) only when the
 #                    prebuilt libavutil has Vulkan and the headers are found; otherwise the
 #                    filter is built without it (a message says so).
+#   MINGW_HEADERS_TAG  win64: mingw-w64 tag whose d3d12*.h headers are fetched when the
+#                    installed mingw-w64 has no d3d12video.h (v12.0.0). gpufx takes D3D12
+#                    and D3D11 frames when the prebuilt libavutil has d3d12va / d3d11va.
+#   REQUIRE_D3D      win64: 1 makes building without D3D12/D3D11 frames an error (CI).
 # Output: dist/<target>/ (bin, lib on Linux, effects/*.zip, include/gpufx.h)
 # Needs: cargo, a C compiler, make, pkg-config, curl, patchelf (linux64), nasm (optional,
-# for SIMD); win64 also mingw-w64, the x86_64-pc-windows-gnu Rust target and unzip.
+# for SIMD); win64 also mingw-w64, binutils (strings), the x86_64-pc-windows-gnu Rust target and unzip.
 set -eu
 TARGET=${1:-linux64}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -105,6 +109,63 @@ else
     fi
 fi
 
+# D3D12/D3D11 frames (win64): the prebuilt libavutil must have hwcontext_d3d12va/d3d11va
+# (the names of the device types are in it). FFmpeg's d3d12va needs d3d12video.h, which
+# mingw-w64 before 12 lacks (Ubuntu noble has 11): the headers of mingw-w64 12 are fetched.
+D3D=
+# no_d3d MESSAGE: without D3D frames, or a hard error with REQUIRE_D3D=1.
+no_d3d() {
+    if [ "${REQUIRE_D3D:-0}" = 1 ]; then echo "REQUIRE_D3D=1: $1" >&2; exit 1; fi
+    echo "    $1"
+}
+if [ "$TARGET" = win64 ]; then
+    AVUTIL=$(ls "$OUT"/bin/avutil-*.dll | head -n1)
+    if strings "$AVUTIL" | grep -qx D3D11VA; then
+        D3D="--enable-d3d11va"
+        echo "    D3D11 frames: on"
+    else
+        no_d3d "prebuilt libavutil has no d3d11va: gpufx is built without D3D11 frames"
+    fi
+    if strings "$AVUTIL" | grep -qx D3D12VA; then
+        MW_TAG=${MINGW_HEADERS_TAG:-v12.0.0}
+        MW_HDR=$ROOT/build/downloads/mingw-w64-headers-$MW_TAG
+        # sha256 of the v12.0.0 headers; another tag is taken as it comes.
+        mw_sum() {
+            case $1 in
+                d3d12.h) echo 736975a5cd80870fbf129c19109270f71f084e759747370ed59692c9653bcccb ;;
+                d3d12sdklayers.h) echo 1252f39aa3a8ff99e0eb0f78011f7346c720464d396fea1c2a7af7ce25f54102 ;;
+                d3d12video.h) echo 48fa7815de28606aafef8247014b69540bd550e97f2ff3402e515a406666ef15 ;;
+            esac
+        }
+        have_d3d12video() { echo '#include <d3d12video.h>' | x86_64-w64-mingw32-gcc -x c -E - > /dev/null 2>&1; }
+        if ! have_d3d12video && [ ! -f "$MW_HDR/d3d12video.h" ]; then
+            rm -rf "$MW_HDR.part" && mkdir -p "$MW_HDR.part"
+            ok=1
+            for h in d3d12.h d3d12sdklayers.h d3d12video.h; do
+                if ! curl -fsSL --retry 3 -o "$MW_HDR.part/$h" \
+                    "https://raw.githubusercontent.com/mingw-w64/mingw-w64/$MW_TAG/mingw-w64-headers/include/$h"; then
+                    echo "    cannot fetch mingw-w64 $MW_TAG $h"; ok=0; break
+                fi
+                if [ "$MW_TAG" = v12.0.0 ] && [ "$(sha256sum "$MW_HDR.part/$h" | cut -d' ' -f1)" != "$(mw_sum "$h")" ]; then
+                    echo "    mingw-w64 $MW_TAG $h: sha256 mismatch"; ok=0; break
+                fi
+            done
+            if [ "$ok" = 1 ]; then mv "$MW_HDR.part" "$MW_HDR"; else rm -rf "$MW_HDR.part"; fi
+        fi
+        if [ -f "$MW_HDR/d3d12video.h" ]; then
+            D3D="$D3D --enable-d3d12va --extra-cflags=-I$MW_HDR"
+            echo "    D3D12 frames: on (mingw-w64 $MW_TAG headers)"
+        elif have_d3d12video; then
+            D3D="$D3D --enable-d3d12va"
+            echo "    D3D12 frames: on"
+        else
+            no_d3d "no d3d12video.h: gpufx is built without D3D12 frames"
+        fi
+    else
+        no_d3d "prebuilt libavutil has no d3d12va: gpufx is built without D3D12 frames"
+    fi
+fi
+
 echo "==> libgpufx"
 "$ROOT/scripts/install-libgpufx.sh" "$WORK/prefix" $RUST_TARGET
 
@@ -125,10 +186,15 @@ PKG_CONFIG_LIBDIR="$WORK/prefix/lib/pkgconfig" ./configure \
     --disable-programs --disable-doc --disable-debug --disable-autodetect \
     --disable-avdevice --disable-avformat --disable-avcodec \
     --disable-everything --enable-filter="$FILTERS" --enable-libgpufx \
-    $VULKAN $CROSS > "$WORK/configure.log" || { tail -20 "$WORK/configure.log"; exit 1; }
+    $VULKAN $D3D $CROSS > "$WORK/configure.log" || { tail -20 "$WORK/configure.log"; exit 1; }
 if [ -n "$VULKAN" ] && ! grep -q '^#define CONFIG_VULKAN 1' config.h; then
     echo "configure did not enable Vulkan; see $WORK/configure.log" >&2; exit 1
 fi
+for api in D3D11VA D3D12VA; do
+    case " $D3D " in *" --enable-$(echo $api | tr A-Z a-z) "*)
+        grep -q "^#define CONFIG_$api 1" config.h || { echo "configure did not enable $api; see $WORK/configure.log" >&2; exit 1; } ;;
+    esac
+done
 make -j"$JOBS" > "$WORK/make.log" 2>&1 || { tail -40 "$WORK/make.log"; exit 1; }
 
 echo "==> bundle $OUT"

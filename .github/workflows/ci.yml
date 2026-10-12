@@ -94,7 +94,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y mingw-w64 nasm ffmpeg
-      - run: scripts/build-prebuilt.sh win64
+      # Building without D3D12/D3D11 frames would make the Windows tests meaningless.
+      - run: REQUIRE_D3D=1 scripts/build-prebuilt.sh win64
       - name: Logs of the failed build
         if: failure()
         run: tail -n 100 build/prebuilt-win64/*.log || true
@@ -127,7 +128,8 @@ jobs:
           path: build/test-clips
       - name: Run effects in ffmpeg.exe
         shell: bash
-        run: scripts/test-bundle.sh dist/win64 build/test-clips
+        # WARP must run the D3D12 and D3D11 frame tests, not skip them.
+        run: REQUIRE_D3D=1 scripts/test-bundle.sh dist/win64 build/test-clips
 
   release:
     # Temporary pre-release of every green build, tagged with the commit id (7 chars).

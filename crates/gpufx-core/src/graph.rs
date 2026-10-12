@@ -537,6 +537,9 @@ pub struct EffectGraph {
     /// "chain" or "graph", in messages.
     what: &'static str,
     io: FrameIo,
+    /// Copies and the last submission of D3D12/D3D11 frames (see `d3d12.rs`).
+    #[cfg(windows)]
+    pub(crate) dx: crate::d3d12::GraphState,
 }
 
 impl EffectGraph {
@@ -797,6 +800,8 @@ impl EffectGraph {
             param_names,
             what,
             io: FrameIo::default(),
+            #[cfg(windows)]
+            dx: Default::default(),
         })
     }
 

@@ -21,7 +21,7 @@ use gpufx_core::{
 };
 
 /// Bumped when the C ABI changes incompatibly. Must match `GPUFX_API_VERSION` in gpufx.h.
-const API_VERSION: u32 = 6;
+const API_VERSION: u32 = 7;
 
 thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
@@ -103,6 +103,8 @@ enum Spec {
 
 pub struct GpufxEffect {
     graph: EffectGraph,
+    /// Only to open the effect again on a shared device (Vulkan, D3D12, D3D11).
+    #[cfg(any(windows, all(unix, not(target_vendor = "apple"))))]
     spec: Spec,
     name: CString,
     device: CString,
@@ -313,7 +315,10 @@ unsafe fn backend_arg(backend: *const c_char) -> Result<Backend, String> {
 
 fn wrap(graph: EffectGraph, spec: Spec, name: String, device: CString) -> *mut GpufxEffect {
     let strings = |list: &[String]| list.iter().map(|f| cstring(f)).collect::<Vec<_>>();
+    #[cfg(not(any(windows, all(unix, not(target_vendor = "apple")))))]
+    let _ = spec;
     let out = GpufxEffect {
+        #[cfg(any(windows, all(unix, not(target_vendor = "apple"))))]
         spec,
         name: cstring(&name),
         device,
@@ -761,13 +766,18 @@ mod vk {
             queue_flags: dev.queue_flags,
         };
         let ctx = vulkan_context(&desc)?;
-        if Arc::ptr_eq(fx.graph.context(), &ctx) {
+        move_to(fx, &ctx, "Vulkan")
+    }
+
+    /// Opens the effect again on `ctx` with its parameter values, unless it runs there.
+    pub fn move_to(fx: &mut GpufxEffect, ctx: &Arc<GpuContext>, api: &str) -> Result<(), String> {
+        if Arc::ptr_eq(fx.graph.context(), ctx) {
             return Ok(());
         }
-        let (mut graph, _) = open_spec(&fx.spec, &ctx)?;
+        let (mut graph, _) = open_spec(&fx.spec, ctx)?;
         graph.copy_params_from(&fx.graph).map_err(|e| e.to_string())?;
         fx.graph = graph;
-        fx.device = cstring(&format!("{} (Vulkan device shared with the caller)", ctx.description()));
+        fx.device = cstring(&format!("{} ({api} device shared with the caller)", ctx.description()));
         Ok(())
     }
 
@@ -870,6 +880,241 @@ pub unsafe extern "C" fn gpufx_effect_process_vulkan(
     guard(-1, || {
         let fx = fx.as_mut().ok_or("effect is NULL")?;
         vk::process(fx, inputs, nb_inputs, outs, nb_outputs, info.as_ref().map(frame_info))?;
+        Ok(0)
+    })
+}
+
+// ---- D3D12 and D3D11 frames (since version 7, Windows) ----
+
+#[repr(C)]
+pub struct GpufxD3D12Device {
+    pub device: *mut c_void,
+}
+
+#[repr(C)]
+pub struct GpufxD3D12Frame {
+    pub format: *const c_char,
+    pub width: u32,
+    pub height: u32,
+    pub resource: *mut c_void,
+    pub subresource: u32,
+    pub fence: *mut c_void,
+    pub fence_value: u64,
+    pub color: GpufxColor,
+}
+
+#[repr(C)]
+pub struct GpufxD3D11Device {
+    pub device: *mut c_void,
+    pub device_context: *mut c_void,
+}
+
+#[repr(C)]
+pub struct GpufxD3D11Frame {
+    pub format: *const c_char,
+    pub width: u32,
+    pub height: u32,
+    pub texture: *mut c_void,
+    pub array_slice: u32,
+    pub color: GpufxColor,
+}
+
+#[cfg(windows)]
+mod dx {
+    use super::*;
+    use gpufx_core::d3d12::{D3d11Frame, D3d12Frame};
+
+    /// Shared D3D12/D3D11 contexts, by caller device, while an effect uses them.
+    fn shared(key: usize, make: impl FnOnce() -> Result<Arc<GpuContext>, gpufx_core::Error>) -> Result<Arc<GpuContext>, String> {
+        type Cache = Mutex<Vec<(usize, Weak<GpuContext>)>>;
+        static CACHE: Cache = Mutex::new(Vec::new());
+        let mut cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+        cache.retain(|(_, w)| w.strong_count() > 0);
+        if let Some(ctx) = cache.iter().find(|(d, _)| *d == key).and_then(|(_, w)| w.upgrade()) {
+            return Ok(ctx);
+        }
+        let ctx = make().map_err(|e| e.to_string())?;
+        cache.push((key, Arc::downgrade(&ctx)));
+        Ok(ctx)
+    }
+
+    pub unsafe fn use_d3d12(fx: &mut GpufxEffect, dev: &GpufxD3D12Device) -> Result<(), String> {
+        let ctx = shared(dev.device as usize, || GpuContext::from_d3d12(dev.device))?;
+        vk::move_to(fx, &ctx, "D3D12")
+    }
+
+    pub unsafe fn use_d3d11(fx: &mut GpufxEffect, dev: &GpufxD3D11Device) -> Result<(), String> {
+        let ctx = shared(dev.device as usize, || GpuContext::from_d3d11(dev.device, dev.device_context))?;
+        vk::move_to(fx, &ctx, "D3D11")
+    }
+
+    unsafe fn list<'a, T>(p: *mut T, n: u32, what: &str) -> Result<&'a mut [T], String> {
+        if p.is_null() || n == 0 {
+            return Err(format!("{what} must not be NULL"));
+        }
+        Ok(std::slice::from_raw_parts_mut(p, n as usize))
+    }
+
+    fn size(w: u32, h: u32, what: &str) -> Result<(), String> {
+        if w == 0 || h == 0 || w > 1 << 16 || h > 1 << 16 {
+            return Err(format!("{what}: bad size {w}x{h}"));
+        }
+        Ok(())
+    }
+
+    unsafe fn d3d12_frames(raw: &[GpufxD3D12Frame], what: &str) -> Result<Vec<D3d12Frame>, String> {
+        raw.iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let what = format!("{what} {i}");
+                size(f.width, f.height, &what)?;
+                Ok(D3d12Frame {
+                    format: pixel_format(f.format, &what)?,
+                    width: f.width,
+                    height: f.height,
+                    resource: f.resource,
+                    subresource: f.subresource,
+                    fence: f.fence,
+                    fence_value: f.fence_value,
+                    color: color_info(&f.color)?,
+                })
+            })
+            .collect()
+    }
+
+    pub unsafe fn process_d3d12(
+        fx: &mut GpufxEffect,
+        inputs: *mut GpufxD3D12Frame,
+        nb_inputs: u32,
+        outs: *mut GpufxD3D12Frame,
+        nb_outputs: u32,
+        info: Option<FrameInfo>,
+    ) -> Result<(), String> {
+        let (ri, ro) = (list(inputs, nb_inputs, "inputs")?, list(outs, nb_outputs, "outs")?);
+        let mut ins = d3d12_frames(ri, "input")?;
+        let mut os = d3d12_frames(ro, "out")?;
+        fx.graph.process_d3d12(&mut ins, &mut os, info.as_ref()).map_err(|e| e.to_string())?;
+        for (f, r) in ins.iter().zip(ri.iter_mut()).chain(os.iter().zip(ro.iter_mut())) {
+            r.fence_value = f.fence_value;
+        }
+        Ok(())
+    }
+
+    unsafe fn d3d11_frames(raw: &[GpufxD3D11Frame], what: &str) -> Result<Vec<D3d11Frame>, String> {
+        raw.iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let what = format!("{what} {i}");
+                size(f.width, f.height, &what)?;
+                Ok(D3d11Frame {
+                    format: pixel_format(f.format, &what)?,
+                    width: f.width,
+                    height: f.height,
+                    texture: f.texture,
+                    array_slice: f.array_slice,
+                    color: color_info(&f.color)?,
+                })
+            })
+            .collect()
+    }
+
+    pub unsafe fn process_d3d11(
+        fx: &mut GpufxEffect,
+        inputs: *const GpufxD3D11Frame,
+        nb_inputs: u32,
+        outs: *const GpufxD3D11Frame,
+        nb_outputs: u32,
+        info: Option<FrameInfo>,
+    ) -> Result<(), String> {
+        let ins = d3d11_frames(list(inputs as *mut GpufxD3D11Frame, nb_inputs, "inputs")?, "input")?;
+        let os = d3d11_frames(list(outs as *mut GpufxD3D11Frame, nb_outputs, "outs")?, "out")?;
+        fx.graph.process_d3d11(&ins, &os, info.as_ref()).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(not(windows))]
+mod dx {
+    use super::*;
+    const MSG: &str = "D3D12 and D3D11 frames are only supported on Windows";
+    pub unsafe fn use_d3d12(_: &mut GpufxEffect, _: &GpufxD3D12Device) -> Result<(), String> {
+        Err(MSG.into())
+    }
+    pub unsafe fn use_d3d11(_: &mut GpufxEffect, _: &GpufxD3D11Device) -> Result<(), String> {
+        Err(MSG.into())
+    }
+    pub unsafe fn process_d3d12(
+        _: &mut GpufxEffect,
+        _: *mut GpufxD3D12Frame,
+        _: u32,
+        _: *mut GpufxD3D12Frame,
+        _: u32,
+        _: Option<FrameInfo>,
+    ) -> Result<(), String> {
+        Err(MSG.into())
+    }
+    pub unsafe fn process_d3d11(
+        _: &mut GpufxEffect,
+        _: *const GpufxD3D11Frame,
+        _: u32,
+        _: *const GpufxD3D11Frame,
+        _: u32,
+        _: Option<FrameInfo>,
+    ) -> Result<(), String> {
+        Err(MSG.into())
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn gpufx_d3d12_supported() -> c_int {
+    cfg!(windows) as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_use_d3d12(fx: *mut GpufxEffect, dev: *const GpufxD3D12Device) -> c_int {
+    guard(-1, || {
+        let fx = fx.as_mut().ok_or("effect is NULL")?;
+        dx::use_d3d12(fx, dev.as_ref().ok_or("device is NULL")?)?;
+        Ok(0)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_process_d3d12(
+    fx: *mut GpufxEffect,
+    inputs: *mut GpufxD3D12Frame,
+    nb_inputs: u32,
+    outs: *mut GpufxD3D12Frame,
+    nb_outputs: u32,
+    info: *const GpufxFrameInfo,
+) -> c_int {
+    guard(-1, || {
+        let fx = fx.as_mut().ok_or("effect is NULL")?;
+        dx::process_d3d12(fx, inputs, nb_inputs, outs, nb_outputs, info.as_ref().map(frame_info))?;
+        Ok(0)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_use_d3d11(fx: *mut GpufxEffect, dev: *const GpufxD3D11Device) -> c_int {
+    guard(-1, || {
+        let fx = fx.as_mut().ok_or("effect is NULL")?;
+        dx::use_d3d11(fx, dev.as_ref().ok_or("device is NULL")?)?;
+        Ok(0)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_process_d3d11(
+    fx: *mut GpufxEffect,
+    inputs: *const GpufxD3D11Frame,
+    nb_inputs: u32,
+    outs: *const GpufxD3D11Frame,
+    nb_outputs: u32,
+    info: *const GpufxFrameInfo,
+) -> c_int {
+    guard(-1, || {
+        let fx = fx.as_mut().ok_or("effect is NULL")?;
+        dx::process_d3d11(fx, inputs, nb_inputs, outs, nb_outputs, info.as_ref().map(frame_info))?;
         Ok(0)
     })
 }

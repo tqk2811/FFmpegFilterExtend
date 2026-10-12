@@ -23,6 +23,10 @@ Video effects powered by **GPU shaders** for FFmpeg, loaded from external **`.zi
   in place on FFmpeg's own Vulkan device, synchronised with its timeline semaphores; frames never go back
   to RAM between filters. Frames of the Vulkan decoders (`-hwaccel vulkan`) are multiplane images and are refused
   for now.
+- **D3D12 and D3D11 frames** (Windows): `AV_PIX_FMT_D3D12` frames (`-init_hw_device d3d12va`) are processed in
+  place on FFmpeg's own `ID3D12Device`, synchronised with their fences; `AV_PIX_FMT_D3D11` frames run on the D3D12
+  device of the same adapter through shared NT handles (outputs without a copy, other inputs with one GPU copy).
+  nv12 and p010le. Not yet run on GPU hardware (CI runs them on WARP).
 - Optional on-disk shader cache: `GPUFX_SHADER_CACHE=<dir>` (Vulkan; see [design](docs/DESIGN.md)).
 
 ```sh
@@ -87,12 +91,15 @@ Notes for this build:
   (`scale`, `format`, `trim`, `split`, `sendcmd`...) and filters that normalise the inputs: timing, metadata, layout,
   deinterlacing and colour space (`fps`, `setpts`, `setsar`, `setdar`, `settb`, `setrange`, `setparams`, `pad`, `concat`,
   `select`, `loop`, `reverse`, `yadif`, `bwdif`, `colorspace`, `showinfo`) plus basic audio (`volume`, `amix`, `adelay`, `afade`, `atempo`...).
-  `hwupload`, `hwdownload` and `hwmap` stay for Vulkan frames. Visual filters (`drawtext`, `overlay`, `gblur`...)
+  `hwupload`, `hwdownload` and `hwmap` stay for Vulkan, D3D12 and D3D11 frames. Visual filters (`drawtext`, `overlay`, `gblur`...)
   and other hw filters (`scale_cuda`, `scale_vulkan`...) are gone. If you need another filter, add its name to that
   file and rebuild.
 - Vulkan frames need Vulkan in the prebuilt `libavutil` (the FFmpegBuild releases have it) and the Khronos
   Vulkan-Headers, which the script clones (tag `v1.4.321`, or `VULKAN_HEADERS=<dir>`); without them the filter is
   built without Vulkan frames and says so.
+- win64: D3D12/D3D11 frames need d3d12va/d3d11va in the prebuilt `libavutil` (the FFmpegBuild releases have them);
+  libavfilter is configured with `--enable-d3d11va --enable-d3d12va`, with `d3d12video.h` of mingw-w64 v12.0.0
+  fetched when the installed mingw-w64 lacks it.
 - `ffmpeg` prints `WARNING: library configuration mismatch` in the banner (or when you drop
   `-hide_banner`), because `libavfilter` is configured differently from the other libraries. The warning is harmless.
 - `lib/pkgconfig/libavfilter.pc`, the headers and the import lib still come from the prebuilt (they know nothing

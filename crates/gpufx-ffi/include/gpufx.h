@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define GPUFX_API_VERSION 6
+#define GPUFX_API_VERSION 7
 
 typedef struct GpufxEffect GpufxEffect;
 
@@ -363,6 +363,84 @@ typedef struct GpufxVulkanFrame {
 int gpufx_effect_process_vulkan(GpufxEffect *fx, GpufxVulkanFrame *inputs, uint32_t nb_inputs,
                                 GpufxVulkanFrame *outs, uint32_t nb_outputs,
                                 const GpufxFrameInfo *info);
+
+/*
+ * Since version 7: Direct3D 12 and Direct3D 11 frames on the GPU (Windows; elsewhere the
+ * functions fail). Handles are passed as void pointers, without <d3d12.h>.
+ *
+ * D3D12: the effect runs on the caller's ID3D12Device (FFmpeg's AVD3D12VADeviceContext)
+ * and reads and writes its resources in place: NV12 and P010 resources plane by plane
+ * (plane slices), RGBA8/RGBA16 ones as they are. What cannot be used in place costs one
+ * GPU copy into a texture gpufx keeps (one frame per pad): an input that is a slice of a
+ * texture array (decoders) or larger than the frame, and an output without
+ * D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS.
+ */
+
+/* 1 when this library takes D3D12 and D3D11 frames (Windows), else 0. */
+int gpufx_d3d12_supported(void);
+
+typedef struct GpufxD3D12Device {
+    void *device; /* ID3D12Device */
+} GpufxD3D12Device;
+
+/*
+ * Moves an open effect (and its parameter values) to the D3D12 device dev, as
+ * gpufx_effect_use_vulkan() does. Fails when wgpu does not get the same ID3D12Device for
+ * the device's adapter (another adapter than wgpu lists, another D3D12 runtime).
+ */
+int gpufx_effect_use_d3d12(GpufxEffect *fx, const GpufxD3D12Device *dev);
+
+typedef struct GpufxD3D12Frame {
+    const char *format;   /* nv12, p010le, rgba or rgba64le (FFmpeg's sw_format name) */
+    uint32_t width;
+    uint32_t height;
+    void *resource;       /* ID3D12Resource (AVD3D12VAFrame.texture) */
+    uint32_t subresource; /* array slice (AVD3D12VAFrame.subresource_index) */
+    void *fence;          /* ID3D12Fence (AVD3D12VAFrame.sync_ctx.fence) */
+    uint64_t fence_value; /* in: value to wait for; out: value signalled when done */
+    GpufxColor color;
+} GpufxD3D12Frame;
+
+/*
+ * gpufx_effect_process_graph() on D3D12 frames: one submission on gpufx's queue of the
+ * device waits for every frame's fence at fence_value, runs the effects and signals each
+ * fence at fence_value + 1 (fence_value is updated; store it in the frame). Frames are in
+ * D3D12_RESOURCE_STATE_COMMON before and after. On return the work is submitted; the
+ * next call waits until it is done, since FFmpeg's uploads into a frame do not wait for
+ * its fence. With info NULL the effects are bypassed.
+ */
+int gpufx_effect_process_d3d12(GpufxEffect *fx, GpufxD3D12Frame *inputs, uint32_t nb_inputs,
+                               GpufxD3D12Frame *outs, uint32_t nb_outputs,
+                               const GpufxFrameInfo *info);
+
+/*
+ * D3D11: wgpu has no D3D11 backend, so the effect runs on wgpu's D3D12 device of the same
+ * adapter. Textures made with D3D11_RESOURCE_MISC_SHARED_NTHANDLE are opened there
+ * without a copy (outputs must be such textures); other inputs are copied once on the
+ * immediate context into a shared texture gpufx keeps (one frame per input pad). A fence
+ * shared by both devices orders the work: D3D11 work queued after the call waits for the
+ * effects on the GPU. Needs D3D11.4 (ID3D11Device5, Windows 10 1703 or later).
+ */
+typedef struct GpufxD3D11Device {
+    void *device;         /* ID3D11Device */
+    void *device_context; /* its immediate ID3D11DeviceContext */
+} GpufxD3D11Device;
+
+int gpufx_effect_use_d3d11(GpufxEffect *fx, const GpufxD3D11Device *dev);
+
+typedef struct GpufxD3D11Frame {
+    const char *format;   /* nv12, p010le, rgba or rgba64le */
+    uint32_t width;
+    uint32_t height;
+    void *texture;        /* ID3D11Texture2D (AVFrame.data[0]) */
+    uint32_t array_slice; /* (intptr_t)AVFrame.data[1] */
+    GpufxColor color;
+} GpufxD3D11Frame;
+
+/* As gpufx_effect_process_d3d12(); the caller holds the immediate context's lock. */
+int gpufx_effect_process_d3d11(GpufxEffect *fx, const GpufxD3D11Frame *inputs, uint32_t nb_inputs,
+                               const GpufxD3D11Frame *outs, uint32_t nb_outputs,
+                               const GpufxFrameInfo *info);
 
 #ifdef __cplusplus
 }

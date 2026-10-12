@@ -20,6 +20,10 @@ Hiệu ứng video chạy bằng **shader trên GPU** cho FFmpeg, nạp từ **g
 - **Frame Vulkan không copy**: frame của `hwupload` (`AV_PIX_FMT_VULKAN`, mỗi plane một image) được xử lý tại chỗ
   trên chính device Vulkan của FFmpeg, đồng bộ bằng timeline semaphore của nó; giữa các filter frame không quay
   về RAM. Frame của decoder Vulkan (`-hwaccel vulkan`) là image multiplane nên hiện bị từ chối.
+- **Frame D3D12 và D3D11** (Windows): frame `AV_PIX_FMT_D3D12` (`-init_hw_device d3d12va`) được xử lý tại chỗ trên
+  chính `ID3D12Device` của FFmpeg, đồng bộ bằng fence của frame; frame `AV_PIX_FMT_D3D11` chạy trên device D3D12 cùng
+  adapter qua shared NT handle (output không copy, input khác tốn một lần copy GPU). nv12 và p010le.
+  Chưa chạy trên GPU thật (CI chạy trên WARP).
 - Cache shader trên đĩa (tuỳ chọn): `GPUFX_SHADER_CACHE=<thư mục>` (Vulkan; xem [thiết kế](docs/DESIGN-vi.md)).
 
 ```sh
@@ -84,12 +88,15 @@ Lưu ý với bản này:
   graph (`scale`, `format`, `trim`, `split`, `sendcmd`…) và filter chuẩn hoá đầu vào: thời gian, metadata,
   bố cục, khử xen kẽ và không gian màu (`fps`, `setpts`, `setsar`, `setdar`, `settb`, `setrange`, `setparams`,
   `pad`, `concat`, `select`, `loop`, `reverse`, `yadif`, `bwdif`, `colorspace`, `showinfo`), cùng audio cơ bản (`volume`, `amix`, `adelay`,
-  `afade`, `atempo`…). `hwupload`, `hwdownload`, `hwmap` được giữ cho frame Vulkan. Filter hình (`drawtext`,
+  `afade`, `atempo`…). `hwupload`, `hwdownload`, `hwmap` được giữ cho frame Vulkan, D3D12 và D3D11. Filter hình (`drawtext`,
   `overlay`, `gblur`…) và các filter hw khác (`scale_cuda`, `scale_vulkan`…) không còn. Cần filter nào thì thêm
   tên vào file đó rồi build lại.
 - Frame Vulkan cần `libavutil` build sẵn có Vulkan (bản phát hành FFmpegBuild có) và Vulkan-Headers của Khronos,
   script tự clone (tag `v1.4.321`, hoặc `VULKAN_HEADERS=<thư mục>`); thiếu thì filter được build không có frame
   Vulkan và script báo điều đó.
+- win64: frame D3D12/D3D11 cần d3d12va/d3d11va trong `libavutil` build sẵn (bản FFmpegBuild có); libavfilter
+  được configure với `--enable-d3d11va --enable-d3d12va`, tải `d3d12video.h` của mingw-w64 v12.0.0 khi mingw-w64
+  đã cài không có.
 - `ffmpeg` in `WARNING: library configuration mismatch` ở banner (hoặc khi bỏ
   `-hide_banner`), vì `libavfilter` được configure khác các thư viện còn lại. Cảnh báo này vô hại.
 - `lib/pkgconfig/libavfilter.pc`, header và import lib vẫn là của bản build sẵn (không biết

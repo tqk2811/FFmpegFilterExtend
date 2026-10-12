@@ -226,7 +226,7 @@ Chi phí chính là upload/readback và chuyển màu trên CPU. Lộ trình b�
 | P2 | Pipeline hoá: double buffer readback, không chặn chờ frame trước | Tăng throughput 2–3× trên GPU rời |
 | P3 (xong) | **Zero-copy** với `AV_PIX_FMT_VULKAN`: wgpu device tạo từ `AVVulkanDeviceContext` (`wgpu-hal` `device_from_raw`), đọc và ghi thẳng các `VkImage` của `AVVkFrame` (xem "Frame Vulkan" dưới đây) | Không qua RAM khi decode/encode bằng Vulkan |
 | P4 | Interop **CUDA** (NVDEC/NVENC): `hwmap` CUDA → Vulkan (external memory) hoặc `VK_KHR_external_memory` trực tiếp | Dùng được với `-hwaccel cuda` |
-| P5 | Interop **D3D11/D3D12** (Windows, QSV/AMF/D3D11VA) bằng shared NT handle sang DX12 của wgpu | Dùng được với `-hwaccel d3d11va` |
+| P5 (xong, chưa chạy trên phần cứng) | Frame **D3D12** tại chỗ trên `ID3D12Device` của FFmpeg; **D3D11** qua shared NT handle sang DX12 của wgpu (xem "Frame D3D12 và D3D11" bên dưới) | Dùng được với `hwupload` trên d3d12va/d3d11va; frame decoder tốn một lần copy GPU |
 | P6 | VAAPI/DRM-PRIME (Linux), VideoToolbox (`CVPixelBuffer` → `MTLTexture`) | Phủ hết hwaccel phổ biến |
 
 Ở mọi giai đoạn, **định dạng gói và shader không đổi**: tác giả không cần biết frame đến từ
@@ -337,6 +337,71 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
 - Đã chạy trên lavapipe: test bundle so framemd5 của `hwupload,gpufx,…,hwdownload` với đường phần mềm (rgba,
   nv12, yuv420p, yuv444p, p010le, yuv420p10le, rgba64le, đồ thị có hai input là cùng một frame split, hai filter
   liền nhau, đổi format output): giống hệt. Test Rust so `encode_gpu` với đường CPU từng byte.
+
+### Frame D3D12 và D3D11 (C API v7; đã build và cross-compile, chỉ job CI Windows chạy thử)
+
+```sh
+ffmpeg -init_hw_device d3d12va=dx -filter_hw_device dx -i a.mp4 \
+  -vf "format=nv12,hwupload,gpufx=effect=vignette.zip,hwdownload,format=nv12" out.mp4
+ffmpeg -init_hw_device d3d11va=dx -filter_hw_device dx -i a.mp4 \
+  -vf "format=nv12,hwupload,gpufx=effect=vignette.zip,hwdownload,format=nv12" out.mp4
+```
+
+- Pad nhận thêm `AV_PIX_FMT_D3D12` và `AV_PIX_FMT_D3D11` (khi libavfilter build có d3d12va/d3d11va và libgpufx
+  là bản Windows). Quy tắc như Vulkan: mọi input/output là frame của cùng một API, hoặc không cái nào.
+  sw_format: thực tế là `nv12` và `p010le` (d3d12va của FFmpeg chỉ làm hai format này, và của d3d11va gpufx chỉ
+  đọc hai format này); libgpufx cũng nhận resource RGBA8/RGBA16 (`rgba`, `rgba64le`) từ chương trình khác. Format
+  khác bị từ chối lúc configure (BGRA của d3d11va cần đảo kênh: backlog). Texture có hơn một mip level bị từ chối.
+- **D3D12, một device.** wgpu-hal 30 không có `device_from_raw` cho DX12, nhưng device D3D12 là singleton theo
+  adapter trong một process: libgpufx mở adapter DX12 của wgpu có LUID trùng với device
+  (`ID3D12Device::GetAdapterLuid`) rồi kiểm tra wgpu nhận đúng `ID3D12Device` đó (so COM identity); nếu không
+  (runtime D3D12 khác như Agility SDK, adapter wgpu bỏ qua như bản "Microsoft Basic Render Driver" trùng WARP
+  khi chạy headless) thì từ chối kèm thông báo. wgpu có command queue riêng trên device đó.
+- **Frame D3D12 tại chỗ.** `AVD3D12VAFrame.texture` được bọc một lần cho mỗi plane (`texture_from_raw` +
+  `with_plane_slice`: view R8/RG8 hoặc R16/RG16 của resource NV12/P010). Frame nằm ở
+  `D3D12_RESOURCE_STATE_COMMON` (quy ước của FFmpeg); libgpufx tự ghi barrier sang state cần dùng và quay lại,
+  theo từng subresource của slice, trong command list riêng trước và sau của wgpu, và tạo wrapper ở sẵn state
+  đó nên wgpu không ghi barrier nào (wgpu sẽ chuyển cả resource một lần cho mỗi wrapper plane). Một lần submit
+  chờ `sync_ctx.fence` của mỗi frame tại `fence_value` và signal `fence_value + 1` (mỗi fence một lần); filter
+  lưu lại giá trị. Upload D3D12 của FFmpeg không chờ fence của frame trước khi ghi, nên mỗi lần gọi trước hết
+  chờ trên CPU lần submit trước (một event đang chạy).
+- **Một lần copy trên GPU khi không dùng tại chỗ được**, vào texture libgpufx giữ theo pad và plane (VRAM: một
+  frame cho mỗi pad như vậy): input là một slice của texture array (`AV_D3D12VA_FRAME_FLAG_TEXTURE_ARRAY`,
+  decoder), lớn hơn frame hoặc cấm shader đọc, và output không có `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS`.
+  Frames context output do gpufx tạo xin unordered access trước, không được thì dùng frame ghi bằng copy
+  (có thông báo verbose); mỗi frames context thử được kiểm bằng một lần `av_hwframe_get_buffer`, vì device có thể
+  nhận context nhưng không tạo được texture.
+- **D3D11.** wgpu không có backend D3D11: hiệu ứng chạy trên device D3D12 của wgpu cùng adapter với device
+  D3D11 (LUID qua `IDXGIDevice`). Texture có `D3D11_RESOURCE_MISC_SHARED_NTHANDLE` được mở sang đó bằng
+  `CreateSharedHandle`/`OpenSharedHandle`, không copy (giữ mở tối đa 64 cái, có giữ tham chiếu tới texture).
+  Frames context output gpufx tạo là loại texture này (`SHARED | SHARED_NTHANDLE`, bind
+  `SHADER_RESOURCE | UNORDERED_ACCESS`, bỏ UAV nếu device không cho: khi đó dùng copy D3D12 ở trên), nên output
+  không bị copy. Input từ `hwupload` hay decoder không share được nên được copy một lần trên immediate context
+  D3D11 (`CopySubresourceRegion`, đồng thời tách slice của array) vào texture share libgpufx giữ cho mỗi pad
+  input (VRAM: một frame cho mỗi pad input). Không dùng D3D11On12: nó bọc resource D3D12 cho D3D11, còn ở đây
+  frame do device D3D11 của FFmpeg tạo; keyed mutex cũng được nhưng cần texture `SHARED_KEYEDMUTEX` và
+  acquire/release phía CPU. Thứ tự: một fence D3D12 share với device D3D11 (`ID3D11Device5::OpenSharedFence`,
+  D3D11.4): immediate context signal `v` rồi flush, lần submit D3D12 chờ `v` và signal `v + 1`, immediate context
+  chờ `v + 1`, nên việc D3D11 sau đó của FFmpeg (`hwdownload`, encoder) chờ trên GPU, không chờ CPU. Filter giữ
+  `AVD3D11VADeviceContext.lock` trong lúc gọi.
+- Rust: `GpuContext::from_d3d12` / `from_d3d11`, `EffectGraph::process_d3d12` / `process_d3d11`
+  (`gpufx_core::d3d12`, `cfg(windows)`, dựa trên `encode_gpu`). C API (v7, chỉ thêm): `gpufx_d3d12_supported`,
+  `gpufx_effect_use_d3d12`, `gpufx_effect_process_d3d12`, `gpufx_effect_use_d3d11`,
+  `gpufx_effect_process_d3d11`; trên hệ khác các hàm này báo lỗi.
+- Build: `scripts/build-prebuilt.sh win64` thêm `--enable-d3d11va --enable-d3d12va` khi `libavutil` build sẵn có
+  chúng (có), tải `d3d12.h`, `d3d12sdklayers.h`, `d3d12video.h` của mingw-w64 v12.0.0 khi mingw-w64 đã cài
+  (Ubuntu noble: 11) không có `d3d12video.h`.
+- Test: `test-bundle.sh` chạy vignette nv12/p010le, hai filter liên tiếp, đồ thị có hai input là cùng một
+  frame split, timeline, input thứ hai đến muộn và từ chối input trộn, cho cả hai API, thử adapter 0-3, bỏ qua
+  khi không có device hoặc wgpu không share được. Job CI `ffmpeg-windows` chạy chúng trên WARP; chưa chạy trên
+  phần cứng thật. Với `REQUIRE_D3D=1` (đặt ở cả hai job CI win64), skip làm test hỏng, và build không có frame
+  D3D12/D3D11 (thiếu d3d12va/d3d11va, tải header lỗi hoặc sai sha256) làm build hỏng; test in một dòng các API đã
+  chạy và đã bỏ qua.
+- Frame đen của input chưa bắt đầu (mọi API GPU, kể cả Vulkan) lấy từ một frames context nhỏ riêng của filter,
+  tạo giống của input (device, sw_format, cờ image), không lấy từ pool của input, vì pool phía trên có thể có
+  kích thước cố định.
+- Instance DX12 dùng chung bỏ `VALIDATION`, `GPU_BASED_VALIDATION` và `DEBUG` lấy từ biến môi trường: device
+  cũng là của FFmpeg.
 
 ### Ngân sách VRAM (quy tắc cho mọi giai đoạn)
 

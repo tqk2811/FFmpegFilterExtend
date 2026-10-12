@@ -6,6 +6,7 @@
 # since the bundle has no video source filters; pass clips-dir to reuse existing ones.
 # Clips and logs default to build/test-<bundle name>, outside the bundle.
 # TEST_CLIPS_ONLY=1 only writes the clips (for a runner that has no reference ffmpeg).
+# REQUIRE_D3D=1 fails when the D3D12 or D3D11 frame tests are skipped.
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DIST=$(cd "${1:?usage: test-bundle.sh <bundle dir> [clips dir]}" && pwd)
@@ -383,5 +384,74 @@ else
         fail "multiplane nv12 is processed or refused clearly"; cat "$CLIPS/last.log"
     fi
 fi
+
+echo "D3D12 and D3D11 frames:"
+# hwupload -> gpufx -> hwdownload on FFmpeg's D3D12 device (D3D11: on the D3D12 device of
+# its adapter), same pixels as the software path. The device is tried on adapters 0-3:
+# wgpu skips the headless "Microsoft Basic Render Driver" duplicate of WARP.
+dx_md5() {
+    f=$1; shift
+    "$FF" -hide_banner -nostdin -v error -init_hw_device "$DXDEV" -filter_hw_device dx -i "$A" -frames:v 3 -an \
+        -vf "format=$f,hwupload,$1,hwdownload,format=$f" -pix_fmt "$f" -f framemd5 - \
+        2> "$CLIPS/last.log" | grep -v '^#' | awk -F, '{print $NF}'
+}
+# REQUIRE_D3D=1 (the Windows CI job): a skipped API is a failure.
+dx_ran= dx_skipped=
+dx_skip() {
+    echo "  skip  $1"; dx_skipped="$dx_skipped $API"
+    if [ "${REQUIRE_D3D:-0}" = 1 ]; then fail "REQUIRE_D3D=1: $API frames were not tested"; fi
+}
+for api in d3d12va d3d11va; do
+    API=$(echo "$api" | sed 's/va$//' | tr a-z A-Z)
+    if ! grep -qw hwupload "$CLIPS/filters.txt"; then dx_skip "$API: this bundle has no hwupload"; continue; fi
+    DXDEV= why=
+    for n in 0 1 2 3; do
+        if ! "$FF" -hide_banner -nostdin -v error -init_hw_device "$api=dx:$n" -filter_hw_device dx -i "$A" -frames:v 1 -an \
+            -vf "format=nv12,hwupload,hwdownload,format=nv12" -f null - > "$CLIPS/last.log" 2>&1; then
+            [ -n "$why" ] || why="no $API device ($(head -n1 "$CLIPS/last.log"))"
+            continue
+        fi
+        if "$FF" -hide_banner -nostdin -v error -init_hw_device "$api=dx:$n" -filter_hw_device dx -i "$A" -frames:v 1 -an \
+            -vf "format=nv12,hwupload,gpufx=effect=$FX/invert.zip,hwdownload,format=nv12" -f null - > "$CLIPS/last.log" 2>&1; then
+            DXDEV="$api=dx:$n"; break
+        fi
+        cp "$CLIPS/last.log" "$CLIPS/$api-$n.log"
+        why="gpufx on adapter $n: $(grep -m1 -i "gpufx\|error\|impossible" "$CLIPS/last.log")"
+        # A gpufx without these frames, or an adapter wgpu cannot share: try the next one.
+        grep -q "Impossible to convert\|No format\|negotiat\|only supported on Windows\|not one wgpu uses\|another ID3D12Device\|no shared fences\|has no fences" \
+            "$CLIPS/last.log" || { fail "$API: gpufx takes $API frames"; cat "$CLIPS/last.log"; why=; break; }
+    done
+    if [ -z "$DXDEV" ]; then
+        [ -n "$why" ] && dx_skip "$API: $why"
+        continue
+    fi
+    echo "  ($API on ${DXDEV#*=})"; dx_ran="$dx_ran $API"
+    for f in nv12 p010le; do
+        same "$API $f: vignette equals the software path" \
+            "$(dx_md5 $f "gpufx=effect=$FX/vignette.zip:params='strength=0.7'")" \
+            "$(sw_md5 $f "gpufx=effect=$FX/vignette.zip:params='strength=0.7'")"
+    done
+    # Two gpufx in a row: the second waits for the first (fences).
+    same "$API: invert twice equals the software path" \
+        "$(dx_md5 nv12 "gpufx=effect=$FX/invert.zip,gpufx=effect=$FX/invert.zip")" \
+        "$(sw_md5 nv12 "gpufx=effect=$FX/invert.zip,gpufx=effect=$FX/invert.zip")"
+    # One frame on two input pads (split before gpufx).
+    G="[0]split[a][b]; [a]$FX/gaussian-blur.zip[ba]; [b]$FX/grayscale.zip|$FX/vignette.zip[gb]; [ba][gb]$FX/crossfade.zip[x]; [x][1]$FX/wipe-transition.zip[out]"
+    same "$API: graph equals the software path" \
+        "$(dx_md5 nv12 "split[p][q];[p][q]gpufx=graph='$G':params='x.progress=0.4|out.progress=0.6'")" \
+        "$(sw_md5 nv12 "split[p][q];[p][q]gpufx=graph='$G':params='x.progress=0.4|out.progress=0.6'")"
+    # shellcheck disable=SC2086
+    ok "$API: timeline enable" -init_hw_device "$DXDEV" -filter_hw_device dx -i "$A" -an \
+        -vf "format=nv12,hwupload,gpufx=effect=$FX/invert.zip:enable='gte(t\,0.5)',hwdownload,format=nv12" $NULL
+    LATE_DX=$("$FF" -hide_banner -nostdin -v error -init_hw_device "$DXDEV" -filter_hw_device dx -i "$A" -itsoffset 0.5 -i "$B" -an -filter_complex \
+        "[0]format=nv12,hwupload[a];[1]format=nv12,hwupload[b];[a][b]gpufx=effect=$FX/crossfade.zip:params='progress=0.5',hwdownload,format=nv12" \
+        -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | wc -l | tr -d ' ')
+    if [ "$LATE_DX" = "$MAIN_N" ]; then pass "$API: late second input keeps all $MAIN_N frames"
+    else fail "$API: late second input (want $MAIN_N, got $LATE_DX)"; cat "$CLIPS/last.log"; fi
+    # shellcheck disable=SC2086
+    rejects "$API and software inputs mixed" "mix $API and software frames" -init_hw_device "$DXDEV" -filter_hw_device dx \
+        -i "$A" -i "$B" -an -filter_complex "[0]format=nv12,hwupload[a];[1]format=nv12[b];[a][b]gpufx=effect=$FX/crossfade.zip" $NULL
+done
+echo "  D3D frames tested:${dx_ran:- none}; skipped:${dx_skipped:- none}"
 
 [ "$fails" -eq 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }

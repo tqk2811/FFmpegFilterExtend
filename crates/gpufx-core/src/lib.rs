@@ -3,6 +3,8 @@
 //! `gpufx` filter; the C ABI lives in `gpufx-ffi`.
 
 mod convert;
+#[cfg(windows)]
+pub mod d3d12;
 pub mod frame;
 pub mod graph;
 pub mod manifest;

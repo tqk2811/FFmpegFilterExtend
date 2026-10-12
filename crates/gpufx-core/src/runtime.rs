@@ -69,6 +69,9 @@ pub struct GpuContext {
     /// failed (the device is then no longer used for Vulkan frames).
     #[cfg_attr(not(any(windows, all(unix, not(target_vendor = "apple")))), allow(dead_code))]
     pub(crate) vulkan_submit: std::sync::Mutex<bool>,
+    /// The D3D12 device shared with the caller (see `d3d12.rs`), `None` otherwise.
+    #[cfg(windows)]
+    pub(crate) d3d12: Option<crate::d3d12::Shared>,
 }
 
 impl GpuContext {
@@ -100,6 +103,11 @@ impl GpuContext {
             request(true)
                 .map_err(|fallback| Error::Gpu(format!("no GPU adapter for backend {backend:?}: {first}; software fallback: {fallback}")))
         })?;
+        Self::open_adapter(&adapter, "gpufx", cache_dir)
+    }
+
+    /// A device on `adapter` with the features and limits gpufx uses.
+    pub(crate) fn open_adapter(adapter: &wgpu::Adapter, label: &str, cache_dir: Option<&std::path::Path>) -> Result<Arc<Self>, Error> {
         // Output planes are encoded into storage buffers: allow what the adapter allows,
         // an 8K RGBA64 frame is above the 128 MiB default.
         let supported = adapter.limits();
@@ -109,7 +117,7 @@ impl GpuContext {
             ..Default::default()
         };
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some("gpufx"),
+            label: Some(label),
             required_limits,
             // PIPELINE_CACHE: only Vulkan has it in wgpu 30; it costs nothing until a cache
             // is created. The format features let GPU frames have 16-bit and r8/rg8
@@ -137,6 +145,8 @@ impl GpuContext {
             shader_cache,
             vulkan_queue_family: None,
             vulkan_submit: std::sync::Mutex::new(false),
+            #[cfg(windows)]
+            d3d12: None,
         })
     }
 

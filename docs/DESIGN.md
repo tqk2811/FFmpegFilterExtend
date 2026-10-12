@@ -229,7 +229,7 @@ The main costs are upload/readback and color conversion on the CPU. The roadmap 
 | P2 | Pipelining: double-buffered readback, no blocking on the previous frame | 2–3× throughput on discrete GPUs |
 | P3 (done) | **Zero-copy** with `AV_PIX_FMT_VULKAN`: the wgpu device is made from `AVVulkanDeviceContext` (`wgpu-hal` `device_from_raw`) and the `VkImage`s of `AVVkFrame` are read and written in place (see "Vulkan frames" below) | No trip through RAM when decoding/encoding with Vulkan |
 | P4 | **CUDA** interop (NVDEC/NVENC): `hwmap` CUDA → Vulkan (external memory) or `VK_KHR_external_memory` directly | Works with `-hwaccel cuda` |
-| P5 | **D3D11/D3D12** interop (Windows, QSV/AMF/D3D11VA) through a shared NT handle into wgpu's DX12 | Works with `-hwaccel d3d11va` |
+| P5 (done, untested on hardware) | **D3D12** frames in place on FFmpeg's `ID3D12Device`; **D3D11** through shared NT handles into wgpu's DX12 (see "D3D12 and D3D11 frames" below) | Works with `hwupload` on d3d12va/d3d11va; decoder frames with one GPU copy |
 | P6 | VAAPI/DRM-PRIME (Linux), VideoToolbox (`CVPixelBuffer` → `MTLTexture`) | Covers all the common hwaccels |
 
 In every phase, **the package format and shaders do not change**: authors never need to know whether a frame comes from
@@ -343,6 +343,75 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   software path (rgba, nv12, yuv420p, yuv444p, p010le, yuv420p10le, rgba64le, a graph whose two inputs are one split
   frame, two filters in a row, a changed output format); they are identical. Rust tests check
   `encode_gpu` against the CPU path byte for byte.
+
+### D3D12 and D3D11 frames (C API v7; built and cross-compiled, run only by the Windows CI job)
+
+```sh
+ffmpeg -init_hw_device d3d12va=dx -filter_hw_device dx -i a.mp4 \
+  -vf "format=nv12,hwupload,gpufx=effect=vignette.zip,hwdownload,format=nv12" out.mp4
+ffmpeg -init_hw_device d3d11va=dx -filter_hw_device dx -i a.mp4 \
+  -vf "format=nv12,hwupload,gpufx=effect=vignette.zip,hwdownload,format=nv12" out.mp4
+```
+
+- Pads also take `AV_PIX_FMT_D3D12` and `AV_PIX_FMT_D3D11` (when libavfilter is built with d3d12va/d3d11va and
+  libgpufx is a Windows build). Same rule as Vulkan: all inputs and outputs are frames of one API, or none.
+  sw_formats: `nv12` and `p010le` in practice (the only ones FFmpeg's d3d12va makes, and the only ones of
+  d3d11va that gpufx reads); libgpufx also takes RGBA8/RGBA16 resources (`rgba`, `rgba64le`) from other callers.
+  Others are refused at configuration (d3d11va's BGRA would need a swizzle: backlog). Textures with more than
+  one mip level are refused.
+- **D3D12, one device.** wgpu-hal 30 has no `device_from_raw` for DX12, but D3D12 devices are singletons per
+  adapter and process: libgpufx opens the wgpu DX12 adapter whose LUID is the device's
+  (`ID3D12Device::GetAdapterLuid`) and checks that wgpu got the very same `ID3D12Device` (COM identity);
+  otherwise (another D3D12 runtime such as an Agility SDK, an adapter wgpu filters out like the headless
+  "Microsoft Basic Render Driver" duplicate of WARP) it refuses with a message. wgpu has its own command
+  queue on that device.
+- **D3D12 frames in place.** `AVD3D12VAFrame.texture` is wrapped once per plane (`texture_from_raw` +
+  `with_plane_slice`: R8/RG8 or R16/RG16 views of the NV12/P010 resource). Frames rest in
+  `D3D12_RESOURCE_STATE_COMMON` (FFmpeg's convention); libgpufx records the transitions to the state of each
+  use and back itself, per subresource of the frame's slice, in command lists of its own before and after
+  wgpu's, and creates the wrappers in that state, so wgpu records no barrier (it would transition the whole
+  resource once per plane wrapper). One submission waits for each frame's `sync_ctx.fence` at `fence_value`
+  and signals `fence_value + 1` (each fence once); the filter stores the value. FFmpeg's D3D12 upload does not
+  wait for a frame's fence before writing it, so a call first waits on the CPU for the previous call's
+  submission (one event in flight).
+- **One GPU copy when in place is impossible**, into a texture libgpufx keeps per pad and plane (VRAM: one
+  frame per such pad): an input that is a slice of a texture array (`AV_D3D12VA_FRAME_FLAG_TEXTURE_ARRAY`,
+  decoders) or larger than the frame or denied to shaders, and an output without
+  `D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS`. The output frames contexts gpufx makes ask for unordered
+  access first and fall back to frames written by a copy (verbose message); each candidate context is probed
+  with one `av_hwframe_get_buffer`, since a device may accept the context but fail to create its textures.
+- **D3D11.** wgpu has no D3D11 backend: the effect runs on wgpu's D3D12 device of the D3D11 device's adapter
+  (LUID through `IDXGIDevice`). Textures with `D3D11_RESOURCE_MISC_SHARED_NTHANDLE` are opened there with
+  `CreateSharedHandle`/`OpenSharedHandle` without a copy (kept open, up to 64, holding a reference to the
+  texture). The output frames contexts gpufx makes are such textures (`SHARED | SHARED_NTHANDLE`, bind
+  `SHADER_RESOURCE | UNORDERED_ACCESS`, without UAV if the device refuses it: then the D3D12 copy above), so
+  outputs are not copied. Inputs from `hwupload` or decoders are not shareable and are copied once on the
+  D3D11 immediate context (`CopySubresourceRegion`, also resolving array slices) into a shared texture
+  libgpufx keeps per input pad (VRAM: one frame per input pad). D3D11On12 was not used: it wraps D3D12
+  resources for D3D11, while the frames here are made by FFmpeg's D3D11 device; keyed mutexes would also work
+  but need `SHARED_KEYEDMUTEX` textures and CPU-side acquire/release. Order: a D3D12 fence shared with the
+  D3D11 device (`ID3D11Device5::OpenSharedFence`, D3D11.4): the immediate context signals `v` and is
+  flushed, the D3D12 submission waits `v` and signals `v + 1`, the immediate context waits `v + 1`, so
+  FFmpeg's later D3D11 work (`hwdownload`, encoders) waits on the GPU, no CPU wait. The filter holds
+  `AVD3D11VADeviceContext.lock` during the call.
+- Rust: `GpuContext::from_d3d12` / `from_d3d11`, `EffectGraph::process_d3d12` / `process_d3d11`
+  (`gpufx_core::d3d12`, `cfg(windows)`, built on `encode_gpu`). C API (v7, additive): `gpufx_d3d12_supported`,
+  `gpufx_effect_use_d3d12`, `gpufx_effect_process_d3d12`, `gpufx_effect_use_d3d11`,
+  `gpufx_effect_process_d3d11`; on other systems they fail with a message.
+- Build: `scripts/build-prebuilt.sh win64` adds `--enable-d3d11va --enable-d3d12va` when the prebuilt
+  `libavutil` has them (it does), fetching `d3d12.h`, `d3d12sdklayers.h`, `d3d12video.h` of mingw-w64 v12.0.0
+  when the installed mingw-w64 (Ubuntu noble: 11) has no `d3d12video.h`.
+- Tests: `test-bundle.sh` runs nv12/p010le vignette, two filters in a row, a graph whose two inputs are one
+  split frame, the timeline, a late second input and a mixed-input rejection for both APIs, on adapters 0-3,
+  and skips when there is no device or wgpu cannot share it. The CI job `ffmpeg-windows` runs them on WARP;
+  they have not been run on hardware. With `REQUIRE_D3D=1` (set in both win64 CI jobs) a skip fails the test
+  and a build without D3D12/D3D11 frames (no d3d12va/d3d11va, header fetch or sha256 failure) fails the build;
+  the test prints a line of the APIs tested and skipped.
+- The blank frame of an input that has not started (all GPU APIs, Vulkan included) comes from a small frames
+  context of the filter's own, made like the input's (device, sw_format, image flags), not from the input's
+  pool, which may have a fixed size upstream.
+- The shared DX12 instance ignores `VALIDATION`, `GPU_BASED_VALIDATION` and `DEBUG` from the environment: the
+  device is FFmpeg's too.
 
 ### VRAM budget (rule for every phase)
 

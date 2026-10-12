@@ -108,3 +108,16 @@
 - **Vị trí**: [crates/gpufx-core/src/vulkan.rs](../crates/gpufx-core/src/vulkan.rs), [crates/gpufx-core/src/convert.rs](../crates/gpufx-core/src/convert.rs), [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`config_vulkan`, `process_vulkan`), [docker/build-in-container.sh](../docker/build-in-container.sh).
 - **Vì sao**: phạm vi B-Vulkan là đường zero-copy chạy đúng với `hwupload`/`hwdownload`; phần còn lại cần GPU thật hoặc thay đổi lớn (view multiplane, cache bind group).
 - **Ngày ghi**: 2026-10-12
+
+### B-D3D12 / B-D3D11: chưa chạy trên Windows, các giới hạn còn lại
+- **Vấn đề**:
+  - Code chỉ được build và cross-compile trên Linux (`cargo clippy --target x86_64-pc-windows-gnu`, `build-prebuilt.sh win64`). Lần chạy đầu là job CI `ffmpeg-windows` trên WARP; test bỏ qua (skip) khi wgpu không share được device (adapter bị wgpu lọc, không có `ID3D11Device5`), nên CI xanh chưa chắc là đã chạy. Chưa thử trên GPU thật (NVIDIA/AMD/Intel), chưa thử decoder (`-hwaccel d3d12va`/`d3d11va`).
+  - Dựa vào việc D3D12 trả cùng một device cho cùng adapter trong một process; với Agility SDK hoặc runtime D3D12 khác thì bị từ chối (có thông báo). wgpu-hal có `device_from_raw` cho DX12 thì nên chuyển sang.
+  - D3D12: mỗi lần gọi chờ CPU lần submit trước, vì upload D3D12 của FFmpeg ghi vào frame mà không chờ fence của nó (an toàn nhưng mất pipelining một frame).
+  - Texture array (decoder), frame lớn hơn kích thước, output không UAV: tốn một lần copy GPU (một frame VRAM mỗi pad). D3D11 input không share được (hwupload, decoder): một lần copy trên immediate context. `GpuFrame` nhận view theo layer thì bỏ được copy của texture array D3D12.
+  - Qua FFmpeg chỉ có nv12, p010le (libgpufx còn nhận rgba, rgba64le). BGRA (d3d11va) cần đảo kênh; p016/y210/AYUV... chưa có trong `PixelFormat`.
+  - D3D11: cache texture đã mở giữ tối đa 64 tham chiếu tới texture pool của FFmpeg cho tới khi effect bị giải phóng (VRAM của pool sống lâu hơn nếu pool bị huỷ sớm, ví dụ khi reinit).
+  - Một submission D3D12 thất bại làm device chia sẻ ngừng dùng (giống Vulkan), chưa có cách phục hồi.
+- **Vị trí**: [crates/gpufx-core/src/d3d12.rs](../crates/gpufx-core/src/d3d12.rs), [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`config_d3d`, `process_d3d12`, `process_d3d11`), [scripts/test-bundle.sh](../scripts/test-bundle.sh), [scripts/build-prebuilt.sh](../scripts/build-prebuilt.sh).
+- **Vì sao**: không có máy Windows khi làm; cần đọc log job `ffmpeg-windows` và chạy thử trên GPU thật.
+- **Ngày ghi**: 2026-10-12
