@@ -103,3 +103,54 @@ fn shader_errors_point_at_the_author_file() {
         other => panic!("unexpected error {other}"),
     }
 }
+
+#[test]
+fn falling_leaves_depend_only_on_time() {
+    let Some(ctx) = gpu() else { return };
+    let (w, h) = (160, 90);
+    let src = gradient(w, h);
+    let inputs = [Image { data: &src, width: w, height: h, stride: w * 4 }];
+    for name in ["falling-maple", "falling-ginkgo"] {
+        let run = |fx: &mut Effect, t: f64, frame: u64| {
+            let mut out = vec![0u8; (w * h * 4) as usize];
+            fx.process(&inputs, &mut out, w * 4, t, frame).unwrap();
+            out
+        };
+        let open = || Effect::new(ctx.clone(), Package::open(examples().join(name)).unwrap()).unwrap();
+        let mut played = open();
+        let mut frames = Vec::new();
+        for k in 0..=12u64 {
+            frames.push(run(&mut played, k as f64 * 0.25, k));
+        }
+        // A fresh effect seeking straight to t = 3 draws what playing up to it drew,
+        // whatever the frame counter says.
+        let mut seeked = open();
+        assert_eq!(run(&mut seeked, 3.0, 0), frames[12], "{name}: seek");
+        assert_ne!(frames[0], frames[1], "{name}: leaves must move");
+        assert!(frames.iter().all(|f| f != &src), "{name}: leaves must be visible");
+        // Deep into the clip the sky is still full: leaves respawn.
+        assert_ne!(run(&mut seeked, 3600.0, 0), src, "{name}: respawn");
+        let tumble = run(&mut seeked, 1.0, 0);
+        for mode in ["1", "2", "3"] {
+            seeked.params_mut().set_str("mode", mode).unwrap();
+            let frame = run(&mut seeked, 1.0, 0);
+            assert!(frame != src && frame != tumble, "{name}: mode {mode} must draw its own motion");
+        }
+        seeked.params_mut().set_str("mode", "0").unwrap();
+        // Before t = 0 (offset, or slightly negative pts) the sky is already full.
+        assert_ne!(run(&mut seeked, -50.0, 0), src, "{name}: negative time");
+        seeked.params_mut().set_str("count", "0").unwrap();
+        assert_eq!(run(&mut seeked, 1.0, 0), src, "{name}: no leaves leaves the frame untouched");
+        // Transparent input keeps its colour where no leaf is drawn.
+        let clear: Vec<u8> = src.chunks(4).flat_map(|p| [p[0], p[1], p[2], 0]).collect();
+        let mut out = vec![0u8; clear.len()];
+        seeked.process(&[Image { data: &clear, width: w, height: h, stride: w * 4 }], &mut out, w * 4, 1.0, 0).unwrap();
+        assert_eq!(out, clear, "{name}: transparent pixels pass through");
+    }
+}
+
+#[test]
+fn falling_leaves_packages_share_one_shader() {
+    let read = |name: &str| std::fs::read(examples().join(name).join("shaders/leaves.wgsl")).unwrap();
+    assert!(read("falling-maple") == read("falling-ginkgo"), "keep the two copies of leaves.wgsl identical");
+}

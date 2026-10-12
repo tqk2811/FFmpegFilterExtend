@@ -8,8 +8,8 @@ Hiệu ứng video chạy bằng **shader trên GPU** cho FFmpeg, nạp từ **g
 - Tham số là literal hoặc biểu thức theo thời gian; đổi lúc chạy bằng `sendcmd`.
 - Gói khai báo **quy tắc input/output** (pixel format, kích thước, cùng kích thước giữa
   các input); stream không khớp thì báo lỗi rõ ràng thay vì chuyển đổi ngầm.
-- 29 hiệu ứng mẫu: chỉnh màu, đen trắng, sepia, sharpen, pixelate, chroma key,
-  picture-in-picture, chuyển cảnh (crossfade, slide, wipe, circle, clock, collapse, expand,
+- 31 hiệu ứng mẫu: chỉnh màu, đen trắng, sepia, sharpen, pixelate, chroma key,
+  picture-in-picture, lá phong / lá rẻ quạt rơi (ảnh PNG trong gói), chuyển cảnh (crossfade, slide, wipe, circle, clock, collapse, expand,
   dip to black, dissolve, pixelize, zoom, blinds...)
 
 ```sh
@@ -117,5 +117,5 @@ make -j"$(nproc)"
 | `ffmpeg/` | Filter `vf_gpufx.c` và script tích hợp |
 | `external/FFmpeg` | Submodule mã nguồn FFmpeg |
 | `docker/`, `build.sh`, `build.ps1` | Build FFmpeg + gpufx một lệnh trong Docker |
-| `examples/effects/` | 29 hiệu ứng mẫu |
+| `examples/effects/` | 31 hiệu ứng mẫu |
 | `scripts/` | `build-prebuilt.sh` (build nhanh trên FFmpeg build sẵn), `test-bundle.sh`, `install-libgpufx.sh`, `pack-effects.sh`/`.ps1` (đóng gói zip) |

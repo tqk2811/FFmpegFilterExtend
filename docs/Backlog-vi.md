@@ -58,3 +58,9 @@
 - **Vị trí**: [crates/gpufx-core/src/runtime.rs](../crates/gpufx-core/src/runtime.rs) (`Program::new`).
 - **Vì sao**: phát hiện khi nghiên cứu kế hoạch sprite ([Plan-sprites-vi.md](Plan-sprites-vi.md), G4); sẽ sửa ở bước 2 của kế hoạch đó.
 - **Ngày ghi**: 2026-10-12
+
+### `globals.time` là f32: chuyển động giật khi timestamp rất lớn
+- **Vấn đề**: runtime ép thời gian về `f32` trước khi gửi lên shader. Với hiệu ứng lá rơi ở 30 fps: t = 3600 s sai số 0,03 px (không thấy), t = 86400 s (1 ngày) bước thời gian mỗi frame lệch ±17 %, vị trí lệch khoảng 1 px; t = 360000 s lệch khoảng 6 px. Ảnh hưởng mọi hiệu ứng dùng `globals.time`, kể cả khi dùng `offset` lớn.
+- **Vị trí**: [crates/gpufx-core/src/runtime.rs](../crates/gpufx-core/src/runtime.rs) (`process`, `time as f32`), `examples/effects/falling-*/shaders/leaves.wgsl`.
+- **Vì sao**: cần đổi globals (thêm giây nguyên `u32` + phần lẻ `f32`, hoặc `time_ms: u32`), tức là đổi định dạng prelude; làm cùng A2 (API v3).
+- **Ngày ghi**: 2026-10-12

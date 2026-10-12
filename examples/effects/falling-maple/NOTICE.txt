@@ -1,0 +1,4 @@
+textures/leaves.png is a modified version (recoloured and resized) of the maple leaf
+emoji U+1F341 from Noto Emoji, Copyright Google Inc., licensed under the Apache License,
+Version 2.0 (see LICENSE-Apache-2.0.txt in this package).
+Source: https://github.com/googlefonts/noto-emoji

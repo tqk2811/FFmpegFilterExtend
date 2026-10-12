@@ -1,0 +1,108 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.falling-maple",
+  "name": "Falling Maple Leaves",
+  "version": "1.0.0",
+  "description": "Red maple leaves falling over the video, spinning down on the wind.",
+  "inputs": [
+    {
+      "name": "src"
+    }
+  ],
+  "params": [
+    {
+      "name": "mode",
+      "type": "int",
+      "default": 0,
+      "min": 0,
+      "max": 3,
+      "description": "Motion: 0 tumble (spin round, carried by the wind), 1 pendulum swing, 2 spiral, 3 no swing (wind still drifts)"
+    },
+    {
+      "name": "count",
+      "type": "int",
+      "default": 50,
+      "min": 0,
+      "max": 256,
+      "description": "Number of leaf slots; strong wind carries part of them outside the frame"
+    },
+    {
+      "name": "seed",
+      "type": "int",
+      "default": 1,
+      "min": 0,
+      "max": 100000,
+      "description": "Changes which leaves fall where"
+    },
+    {
+      "name": "speed",
+      "type": "float",
+      "default": 0.18,
+      "min": 0.01,
+      "max": 5,
+      "description": "Fall speed, frame heights per second"
+    },
+    {
+      "name": "wind",
+      "type": "float",
+      "default": 0.12,
+      "min": -2,
+      "max": 2,
+      "description": "Sideways drift, frame heights per second (negative blows left)"
+    },
+    {
+      "name": "sway",
+      "type": "float",
+      "default": 0.04,
+      "min": 0,
+      "max": 1,
+      "description": "Side-to-side swing, in frame heights"
+    },
+    {
+      "name": "spin",
+      "type": "float",
+      "default": 2.5,
+      "min": 0,
+      "max": 20,
+      "description": "Rotation speed, radians per second"
+    },
+    {
+      "name": "size",
+      "type": "vec2",
+      "default": [
+        0.05,
+        0.11
+      ],
+      "min": 0.005,
+      "max": 1,
+      "description": "Smallest and largest leaf, in frame heights"
+    },
+    {
+      "name": "opacity",
+      "type": "float",
+      "default": 1,
+      "min": 0,
+      "max": 1,
+      "description": "Leaf opacity"
+    },
+    {
+      "name": "offset",
+      "type": "float",
+      "default": 0,
+      "min": -100000,
+      "max": 100000,
+      "description": "Seconds added to the time (e.g. to keep the leaves in place after -ss)"
+    }
+  ],
+  "textures": [
+    {
+      "name": "atlas",
+      "path": "textures/leaves.png"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/leaves.wgsl"
+    }
+  ]
+}
