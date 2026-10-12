@@ -52,3 +52,9 @@
 - **Vị trí**: [crates/gpufx-ffi/src/lib.rs](../crates/gpufx-ffi/src/lib.rs) (`program`).
 - **Vì sao**: chưa cần cho FFmpeg; đổi sang khoá theo từng gói khi có app dùng nhiều thread.
 - **Ngày ghi**: 2026-10-12
+
+### Ảnh PNG trong gói không bị giới hạn kích thước
+- **Vấn đề**: PNG trong `textures` không được kiểm tra kích thước khi nạp. Ảnh lớn hơn giới hạn của device (thường 8192) gây wgpu uncaptured error, mặc định là panic và có thể làm sập process FFmpeg. Cũng không có giới hạn kích thước sau khi giải nén, nên một PNG nhỏ có thể giải ra ảnh rất lớn.
+- **Vị trí**: [crates/gpufx-core/src/runtime.rs](../crates/gpufx-core/src/runtime.rs) (`Program::new`).
+- **Vì sao**: phát hiện khi nghiên cứu kế hoạch sprite ([Plan-sprites-vi.md](Plan-sprites-vi.md), G4); sẽ sửa ở bước 2 của kế hoạch đó.
+- **Ngày ghi**: 2026-10-12
