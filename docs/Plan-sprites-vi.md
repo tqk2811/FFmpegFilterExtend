@@ -1,6 +1,8 @@
 # Kế hoạch: ảnh sprite trong gói hiệu ứng (ví dụ lá rơi)
 
-> Trạng thái: kế hoạch, chưa triển khai. Ngày: 2026-10-12.
+> Trạng thái: bước 1 đã xong (2026-10-12): hai gói `falling-maple` (lá phong đỏ) và
+> `falling-ginkgo` (lá rẻ quạt vàng) thay cho gói `falling-leaves` dự kiến, có tham số `mode`
+> chọn kiểu chuyển động. Các bước 2–5 và phương trình tùy chỉnh (mục 13) chưa làm.
 
 ## 1. Câu hỏi và trả lời ngắn
 
@@ -367,3 +369,20 @@ Engine (bước 2–3):
 Bundle (`scripts/test-bundle.sh`): vòng lặp hiệu ứng 1 input tự chạy `falling-leaves.zip`. Thêm
 một ca so md5: frame tại `t=2` lấy từ lần chạy đầy đủ (`select`) phải bằng frame lấy bằng
 `-ss 2 -copyts` (chứng minh seek-safe qua FFmpeg thật).
+
+## 13. Phương trình quỹ đạo tùy chỉnh (làm sau)
+
+Người dùng muốn truyền phương trình từ dòng lệnh, ví dụ
+`params='path_x=x0 + 0.05*sin(6.28*u*f + r1*6.28)|path_y=-0.1 + 1.2*p|angle=r2*360 + 90*u'`.
+
+- Biểu thức FFmpeg hiện có tính trên CPU, mỗi frame một số chung cho mọi lá, nên không dùng được.
+- Cách làm: kiểu tham số mới `expr`. Rust parse biểu thức thành AST (chỉ phép toán, hằng, biến và
+  hàm toán học `sin cos tan abs min max clamp mix pow sqrt exp log floor fract`; giới hạn độ dài
+  và độ sâu, không vòng lặp), rồi **sinh WGSL từ AST** (không chèn chuỗi thô) thành hàm
+  `gpufx_expr_<name>(...)` trong prelude và biên dịch pipeline. Đổi bằng `sendcmd` thì biên dịch
+  lại (vài ms), không nên đổi mỗi frame.
+- Biến: `t` (thời gian), `u` (giây từ lúc lá xuất hiện), `p` (tiến độ đời lá 0..1), `i` (slot),
+  `r0..r3` (ngẫu nhiên của lá), `x0`, `w`, `h`.
+- Lá ra khỏi khung: tuổi thọ cố định theo tham số `life`. Ra sớm thì ẩn đến khi sinh lại; hết
+  đời mà còn trong khung thì mờ dần. Viết theo `p` thì lá ra khỏi khung đúng lúc hết đời.
+- Ước lượng: 300–400 dòng Rust + test; dùng được cho mọi hiệu ứng, không chỉ lá rơi.

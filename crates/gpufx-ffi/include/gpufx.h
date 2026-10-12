@@ -1,5 +1,6 @@
 /*
  * gpufx: run GPU effect packages (zip with manifest.json + WGSL shaders).
+ * SPDX-License-Identifier: MIT
  *
  * Error convention: functions returning int return 0 on success and a negative
  * value on failure; functions returning pointers return NULL on failure.

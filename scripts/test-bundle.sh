@@ -201,4 +201,18 @@ else
     fail "second input starting at 0.5 s keeps all main frames (want $MAIN_N, got $LATE_N)"; cat "$CLIPS/last.log"
 fi
 
+echo "falling leaves:"
+# Leaves are a function of the frame time only: seeking must draw the same last frame.
+last_md5() {
+    "$FF" -hide_banner -nostdin -v error "$@" -an -vf "gpufx=effect=$FX/falling-maple.zip" -pix_fmt rgba \
+        -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | tail -n 1 | awk -F, '{print $NF}'
+}
+FULL_MD5=$(last_md5 -i "$A")
+SEEK_MD5=$(last_md5 -ss 0.6 -copyts -i "$A")
+if [ -n "$FULL_MD5" ] && [ "$FULL_MD5" = "$SEEK_MD5" ]; then
+    pass "falling-maple: seeking draws the same frame"
+else
+    fail "falling-maple: seeking draws the same frame"; cat "$CLIPS/last.log"
+fi
+
 [ "$fails" -eq 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }

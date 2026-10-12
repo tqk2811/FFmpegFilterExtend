@@ -8,8 +8,8 @@ Hiệu ứng video chạy bằng **shader trên GPU** cho FFmpeg, nạp từ **g
 - Tham số là literal hoặc biểu thức theo thời gian; đổi lúc chạy bằng `sendcmd`.
 - Gói khai báo **quy tắc input/output** (pixel format, kích thước, cùng kích thước giữa
   các input); stream không khớp thì báo lỗi rõ ràng thay vì chuyển đổi ngầm.
-- 29 hiệu ứng mẫu: chỉnh màu, đen trắng, sepia, sharpen, pixelate, chroma key,
-  picture-in-picture, chuyển cảnh (crossfade, slide, wipe, circle, clock, collapse, expand,
+- 31 hiệu ứng mẫu: chỉnh màu, đen trắng, sepia, sharpen, pixelate, chroma key,
+  picture-in-picture, lá phong / lá rẻ quạt rơi (ảnh PNG trong gói), chuyển cảnh (crossfade, slide, wipe, circle, clock, collapse, expand,
   dip to black, dissolve, pixelize, zoom, blinds...)
 
 ```sh
@@ -117,5 +117,28 @@ make -j"$(nproc)"
 | `ffmpeg/` | Filter `vf_gpufx.c` và script tích hợp |
 | `external/FFmpeg` | Submodule mã nguồn FFmpeg |
 | `docker/`, `build.sh`, `build.ps1` | Build FFmpeg + gpufx một lệnh trong Docker |
-| `examples/effects/` | 29 hiệu ứng mẫu |
+| `examples/effects/` | 31 hiệu ứng mẫu |
 | `scripts/` | `build-prebuilt.sh` (build nhanh trên FFmpeg build sẵn), `test-bundle.sh`, `install-libgpufx.sh`, `pack-effects.sh`/`.ps1` (đóng gói zip) |
+
+## Giấy phép
+
+Mã nguồn của repo dùng giấy phép [MIT](LICENSE), trừ các phần sau:
+
+| Phần | Giấy phép |
+|------|-----------|
+| `ffmpeg/vf_gpufx.c` (filter, được build vào `libavfilter`) | LGPL 2.1 trở lên, giống FFmpeg |
+| `external/FFmpeg` (submodule) và thư viện FFmpeg trong bản build | Giấy phép của FFmpeg: `scripts/build-prebuilt.sh` mặc định LGPL v3 (`lgpl`), `lgpl2` là LGPL 2.1; bản build Docker (`build.sh`) là LGPL 2.1 trở lên; bản `gpl`/`gpl2` dùng GPL. Giấy phép thực tế là file `LICENSE.txt`/`FFMPEG-LICENSE.txt` đi kèm bản build |
+| Ảnh lá của `falling-maple` | Apache 2.0 (Noto Emoji, Google) |
+| Ảnh lá của `falling-ginkgo` | CC BY 3.0 (game-icons.net, Delapouite) |
+
+Nguồn và giấy phép của ảnh lá ở [assets/leaves/README.md](assets/leaves/README.md).
+
+Thư viện `libgpufx` và các hiệu ứng mẫu dùng được trong phần mềm đóng nguồn, nhưng phải kèm
+thông báo bản quyền: MIT của repo, Apache 2.0 / CC BY 3.0 nếu dùng hai hiệu ứng lá, và giấy
+phép của các crate Rust mà `libgpufx` liên kết.
+
+Khi phân phối bản build kèm FFmpeg, bạn phải tuân theo giấy phép của FFmpeg: kèm nội dung giấy
+phép và thông báo bản quyền, để người dùng thay được thư viện (bản build là shared library), và
+cung cấp mã nguồn FFmpeg đã dùng, gồm cả `vf_gpufx.c` và `ffmpeg/integrate.sh`. Bản `gpl`/`gpl2`
+thì toàn bộ FFmpeg trong bản build là GPL. Xem thêm https://ffmpeg.org/legal.html (đây không
+phải tư vấn pháp lý).
