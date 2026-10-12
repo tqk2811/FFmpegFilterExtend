@@ -82,7 +82,7 @@ for dir in "$SRC"/examples/effects/*/; do
     name=$(basename "$dir")
     (cd "$dir" && zip -qr "$OUT/effects/$name.zip" .)
 done
-cp "$SRC/README.md" "$OUT/"
+cp "$SRC/README.md" "$SRC/README-vi.md" "$OUT/"
 cp "$SRC/LICENSE" "$OUT/LICENSE-gpufx.txt"
 cp "$WORK/ffmpeg/COPYING.LGPLv2.1" "$OUT/FFMPEG-LICENSE.txt"
 

@@ -1,11 +1,5 @@
 # Việc còn treo
 
-### Hậu tố `-vi` cho tài liệu tiếng Việt
-- **Vấn đề**: theo quy tắc đặt tên Markdown, file không phải tiếng Anh phải có hậu tố ngôn ngữ (`-vi`). Hiện `README.md`, `docs/DESIGN.md`, `docs/EFFECT_FORMAT.md` viết tiếng Việt nhưng chưa có hậu tố.
-- **Vị trí**: [README.md](../README.md), [docs/DESIGN.md](DESIGN.md), [docs/EFFECT_FORMAT.md](EFFECT_FORMAT.md).
-- **Vì sao**: đổi tên `README.md` thì GitHub không còn tự hiển thị README. Cần chọn: giữ `README.md` tiếng Anh ngắn và trỏ sang `README-vi.md`, hoặc chỉ đổi tên hai file trong `docs/`. Đổi tên xong phải sửa mọi link trỏ tới.
-- **Ngày ghi**: 2026-10-12
-
 ### Build Docker đầy đủ chưa chạy lại trên FFmpeg 9.0
 - **Vấn đề**: submodule `external/FFmpeg` đã chuyển từ master (9.1-dev) về `n9.0-2-g03d9533176`. `build.sh` và job CI `ffmpeg-docker` (chỉ chạy khi bấm tay `workflow_dispatch`) chưa được chạy lại trên commit này.
 - **Vị trí**: [build.sh](../build.sh), [docker/build-in-container.sh](../docker/build-in-container.sh), [.github/workflows/ci.yml](../.github/workflows/ci.yml).

@@ -19,7 +19,7 @@ ffmpeg -i a.mp4 -i b.mp4 -filter_complex \
   "[0][1]gpufx=effect=wipe-transition.zip:params='progress=clip((t-1)/1.5\,0\,1)|angle=45'" out.mp4
 ```
 
-Tài liệu: [thiết kế](docs/DESIGN.md) · [định dạng gói và cách viết shader](docs/EFFECT_FORMAT.md)
+Tài liệu: [thiết kế](docs/DESIGN-vi.md) · [định dạng gói và cách viết shader](docs/EFFECT_FORMAT-vi.md) · [English](README.md)
 
 ## Build
 
@@ -132,6 +132,7 @@ Mã nguồn của repo dùng giấy phép [MIT](LICENSE), trừ các phần sau:
 | `external/FFmpeg` (submodule) và thư viện FFmpeg trong bản build | Giấy phép của FFmpeg: `scripts/build-prebuilt.sh` mặc định LGPL v3 (`lgpl`), `lgpl2` là LGPL 2.1; bản build Docker (`build.sh`) là LGPL 2.1 trở lên; bản `gpl`/`gpl2` dùng GPL. Giấy phép thực tế là file `LICENSE.txt`/`FFMPEG-LICENSE.txt` đi kèm bản build |
 | Ảnh lá của `falling-maple` | Apache 2.0 (Noto Emoji, Google) |
 | Ảnh lá của `falling-ginkgo` | CC BY 3.0 (game-icons.net, Delapouite) |
+| `bin/dxcompiler.dll` trong bản win64 (DirectX Shader Compiler, Microsoft) | LLVM (University of Illinois/NCSA), MIT và điều khoản DXC của Microsoft: `bin/LICENSE-dxcompiler-*.txt`. Là DLL riêng, wgpu nạp lúc chạy; xoá nó thì dùng FXC |
 
 Nguồn và giấy phép của ảnh lá ở [assets/leaves/README.md](assets/leaves/README.md).
 

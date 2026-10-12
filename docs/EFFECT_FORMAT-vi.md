@@ -1,3 +1,5 @@
+English: [EFFECT_FORMAT.md](EFFECT_FORMAT.md)
+
 # Định dạng gói hiệu ứng và cách viết shader (api 1)
 
 ## Cấu trúc gói

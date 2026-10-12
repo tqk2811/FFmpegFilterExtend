@@ -1,3 +1,5 @@
+English: [DESIGN.md](DESIGN.md)
+
 # Thiết kế: FFmpegFilterExtend (gpufx)
 
 > Mục tiêu: chạy hiệu ứng video bằng **shader trên GPU** trong `filter_graph` của FFmpeg,
@@ -65,7 +67,7 @@ vignette.zip
 └── textures/*.png       tuỳ chọn (LUT, mask, overlay)
 ```
 
-Chi tiết định dạng và cách viết shader: [EFFECT_FORMAT.md](EFFECT_FORMAT.md).
+Chi tiết định dạng và cách viết shader: [EFFECT_FORMAT-vi.md](EFFECT_FORMAT-vi.md).
 
 Tóm tắt `manifest.json`:
 
@@ -249,6 +251,10 @@ submodule với `--disable-everything` + `docker/keep-filters.txt` + gpufx, rồ
   `avcodec`/`avformat`/`avdevice`. Có `nasm` thì bật SIMD.
 - win64: `avfilter-12.dll` dùng `msvcrt.dll` còn bản build sẵn dùng UCRT (xem
   [Backlog-vi.md](Backlog-vi.md)).
+- win64: `bin/` có `dxcompiler.dll` (DXC, tải từ NuGet bằng `scripts/fetch-dxc.sh`, kiểm
+  sha256). wgpu tìm nó cạnh `ffmpeg.exe` để biên dịch shader cho D3D12; thiếu nó thì wgpu
+  dùng FXC cũ, chậm tới vài phút với shader nhiều vòng lặp (lá rơi). `WGPU_DX12_COMPILER=fxc`
+  ép dùng FXC.
 
 `scripts/test-bundle.sh dist/<target>` chạy mọi hiệu ứng, biểu thức, `sendcmd`, timeline và
 các ca quy tắc phải báo lỗi qua `ffmpeg` của gói. CI chạy nó cho linux64 (lavapipe) và cho

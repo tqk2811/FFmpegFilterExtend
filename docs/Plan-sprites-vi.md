@@ -338,10 +338,10 @@ Không phải gap: tỉ lệ khung (`globals.size`), kích thước texture (`te
 
 | Bước | Nội dung | Ước lượng |
 |------|----------|-----------|
-| 1 | Gói mẫu `falling-leaves` **trên api 1** (atlas 2×2, `sample_cell`, workgroup cache), 4 ảnh lá tự vẽ hoặc giấy phép CC0. Thêm vào bảng ví dụ trong `EFFECT_FORMAT.md`. Không sửa Rust | ~130 dòng WGSL + manifest + PNG (<100 KB) |
+| 1 | Gói mẫu `falling-leaves` **trên api 1** (atlas 2×2, `sample_cell`, workgroup cache), 4 ảnh lá tự vẽ hoặc giấy phép CC0. Thêm vào bảng ví dụ trong `EFFECT_FORMAT-vi.md`. Không sửa Rust | ~130 dòng WGSL + manifest + PNG (<100 KB) |
 | 2 | Manifest: `layers`, `grid`, `count`, `api 2`, kiểm tra quy tắc và giới hạn (G4). Runtime: tạo texture array, `write_texture` từng layer, `TextureKind` cho mỗi binding, prelude WGSL/GLSL (`texture_2d_array`/`texture2DArray`), view có `dimension` | ~200–250 dòng Rust + test manifest |
 | 3 | `mipmaps` (sinh mip trên CPU, `mipmap_filter: Linear`), `premultiply` | ~100–150 dòng Rust |
-| 4 | Chuyển `falling-leaves` lên api 2 (`layers`, mip, premultiplied, LOD tự tính), bỏ `sample_cell`. Tài liệu: mục "Sprite và hạt" trong `EFFECT_FORMAT.md` (mẫu stateless, barrier, LOD, alpha, cảnh báo biểu thức), cập nhật lộ trình trong `DESIGN.md` | ~60 dòng WGSL thay đổi, ~80 dòng tài liệu |
+| 4 | Chuyển `falling-leaves` lên api 2 (`layers`, mip, premultiplied, LOD tự tính), bỏ `sample_cell`. Tài liệu: mục "Sprite và hạt" trong `EFFECT_FORMAT-vi.md` (mẫu stateless, barrier, LOD, alpha, cảnh báo biểu thức), cập nhật lộ trình trong `DESIGN-vi.md` | ~60 dòng WGSL thay đổi, ~80 dòng tài liệu |
 | 5 | Test (mục 12) và chạy `scripts/test-bundle.sh` | ~120 dòng |
 | Sau | Stateful buffers; pass ghi buffer hạt; lọc theo tile; thư viện `#include` có `gpufx_hash`; `colorspace` | Kế hoạch riêng |
 
