@@ -32,7 +32,7 @@ jobs:
       - name: Check every example shader
         if: runner.os == 'Linux'
         shell: bash
-        run: for e in examples/effects/*/; do ./target/release/gpufx check "$e"; done
+        run: scripts/pack-effects.sh --check
 
   ffmpeg:
     name: FFmpeg + gpufx (${{ matrix.target }}, Docker)
@@ -64,6 +64,15 @@ jobs:
             -filter_complex "[0][1]gpufx=effect=$FX/wipe-transition.zip:params='progress=t'" -f null -
           "$FF" -hide_banner -i a.mkv \
             -vf "gpufx=effect=$FX/gaussian-blur.zip,sendcmd=c='0.5 gpufx@g params intensity=0.2',gpufx@g=effect=$FX/gradient-map.zip,gpufx=effect=$FX/rgb-split.zip" -f null -
+          # Manifest rules: accepted formats pass through, mismatches must fail.
+          "$FF" -hide_banner -i a.mkv -vf "format=yuv420p,gpufx=effect=$FX/chroma-key.zip,format=yuva420p" -f null -
+          if "$FF" -hide_banner -v error -i a.mkv -vf "format=gray,gpufx=effect=$FX/chroma-key.zip" -f null -; then
+            echo "chroma-key accepted gray input"; exit 1
+          fi
+          ffmpeg -v error -f lavfi -i smptebars=s=300x180:d=1 -c:v ffv1 c.mkv
+          if "$FF" -hide_banner -v error -i a.mkv -i c.mkv -filter_complex "[0][1]gpufx=effect=$FX/crossfade.zip" -f null -; then
+            echo "crossfade accepted inputs of different sizes"; exit 1
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: ffmpeg-gpufx-${{ matrix.target }}

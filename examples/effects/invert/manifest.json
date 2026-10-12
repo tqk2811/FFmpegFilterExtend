@@ -1,0 +1,27 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.invert",
+  "name": "Invert",
+  "version": "1.0.0",
+  "description": "Negative image.",
+  "inputs": [
+    {
+      "name": "src"
+    }
+  ],
+  "params": [
+    {
+      "name": "amount",
+      "type": "float",
+      "default": 1,
+      "min": 0,
+      "max": 1,
+      "description": "Mix with the original"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/invert.wgsl"
+    }
+  ]
+}

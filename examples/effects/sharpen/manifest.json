@@ -1,0 +1,27 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.sharpen",
+  "name": "Sharpen",
+  "version": "1.0.0",
+  "description": "Unsharp mask over a 3x3 neighbourhood.",
+  "inputs": [
+    {
+      "name": "src"
+    }
+  ],
+  "params": [
+    {
+      "name": "amount",
+      "type": "float",
+      "default": 0.8,
+      "min": 0,
+      "max": 5,
+      "description": "Sharpening strength"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/sharpen.wgsl"
+    }
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.sepia",
+  "name": "Sepia",
+  "version": "1.0.0",
+  "description": "Warm old-photo tone.",
+  "inputs": [
+    {
+      "name": "src"
+    }
+  ],
+  "params": [
+    {
+      "name": "amount",
+      "type": "float",
+      "default": 1,
+      "min": 0,
+      "max": 1,
+      "description": "Mix with the original"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/sepia.wgsl"
+    }
+  ]
+}

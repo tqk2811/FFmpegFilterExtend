@@ -1,0 +1,33 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.fade",
+  "name": "Fade",
+  "version": "1.0.0",
+  "description": "Fade to or from a color. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "src"
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0,
+      "min": 0,
+      "max": 1,
+      "description": "0 = video, 1 = color"
+    },
+    {
+      "name": "color",
+      "type": "color",
+      "default": "#000000",
+      "description": "Target color"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/fade.wgsl"
+    }
+  ]
+}

@@ -155,7 +155,9 @@ ffmpeg -i in.mp4 -vf "gpufx=effect=gaussian-blur.zip,gpufx=effect=gradient-map.z
 ## 6. Đường đi của frame và hiệu năng
 
 **Prototype (đã chạy):** frame RGBA trong RAM → upload texture → các pass compute → copy về
-RAM. FFmpeg tự chèn `scale`/`format` để chuyển YUV ↔ RGBA. Các filter `gpufx` trong cùng
+RAM. Input không khai báo `formats` thì FFmpeg tự chèn `scale`/`format` để chuyển YUV ↔ RGBA;
+input có `formats` (và output khác RGBA) thì filter nhận nguyên frame, kiểm tra theo quy tắc
+của manifest rồi tự chuyển bằng `swscale`. Các filter `gpufx` trong cùng
 process dùng chung một GPU device.
 
 Chi phí chính là upload/readback và chuyển màu trên CPU. Lộ trình bỏ dần:
@@ -189,9 +191,9 @@ crates/gpufx-cli    lệnh `gpufx`: info, check, pack, run (test hiệu ứng kh
 ffmpeg/             vf_gpufx.c và integrate.sh (thêm filter vào cây nguồn FFmpeg)
 external/FFmpeg     submodule FFmpeg (master = 9.1-dev, chuyển sang n9.1 khi phát hành)
 docker/, build.sh   build FFmpeg + gpufx một lệnh trong Docker (linux64, win64)
-examples/effects    vignette, gaussian-blur (2 pass), wipe-transition (2 input),
-                    gradient-map (texture PNG), rgb-split (GLSL, nhiễu theo frame)
-scripts/            install-libgpufx.sh (build + cài .pc cho pkg-config)
+examples/effects    20 hiệu ứng: chỉnh màu, blur, sharpen, chroma key, overlay, chuyển cảnh...
+scripts/            install-libgpufx.sh (build + cài .pc cho pkg-config),
+                    pack-effects.sh/.ps1 (chỉ đóng gói hiệu ứng thành zip)
 ```
 
 ## 9. Bản build phân phối

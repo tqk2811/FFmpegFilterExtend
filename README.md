@@ -6,6 +6,10 @@ Hiệu ứng video chạy bằng **shader trên GPU** cho FFmpeg, nạp từ **g
 - Shader **WGSL** hoặc **GLSL**, nhiều pass, nhiều input, texture đi kèm, tham số tự sinh.
 - Chạy trên **Vulkan, DirectX 12, Metal, OpenGL** (qua [wgpu](https://wgpu.rs)), Windows/Linux/macOS.
 - Tham số là literal hoặc biểu thức theo thời gian; đổi lúc chạy bằng `sendcmd`.
+- Gói khai báo **quy tắc input/output** (pixel format, kích thước, cùng kích thước giữa
+  các input); stream không khớp thì báo lỗi rõ ràng thay vì chuyển đổi ngầm.
+- 20 hiệu ứng mẫu: chỉnh màu, đen trắng, sepia, sharpen, pixelate, chroma key,
+  picture-in-picture, chuyển cảnh (crossfade, slide, wipe, circle)...
 
 ```sh
 ffmpeg -i a.mp4 -i b.mp4 -filter_complex \
@@ -22,7 +26,11 @@ Cần Rust (stable) và một driver GPU (Linux không có GPU có thể dùng `
 cargo build --release
 cargo test --release                       # chạy các hiệu ứng mẫu trên GPU hiện có
 ./target/release/gpufx run examples/effects/vignette -i in.png -o out.png -p strength=0.9
+scripts/pack-effects.sh                    # chỉ đóng gói hiệu ứng: examples/effects -> dist/effects/*.zip
 ```
+
+Thêm hoặc sửa hiệu ứng **không cần build lại FFmpeg**: chạy `scripts/pack-effects.sh`
+(Windows: `scripts\pack-effects.ps1`) rồi dùng file `.zip` mới.
 
 ### Build FFmpeg kèm gpufx bằng một lệnh (Docker)
 
@@ -74,4 +82,5 @@ make -j"$(nproc)"
 | `ffmpeg/` | Filter `vf_gpufx.c` và script tích hợp |
 | `external/FFmpeg` | Submodule mã nguồn FFmpeg |
 | `docker/`, `build.sh`, `build.ps1` | Build FFmpeg + gpufx một lệnh trong Docker |
-| `examples/effects/` | 5 hiệu ứng mẫu |
+| `examples/effects/` | 20 hiệu ứng mẫu |
+| `scripts/` | `install-libgpufx.sh`, `pack-effects.sh`/`.ps1` (đóng gói zip) |

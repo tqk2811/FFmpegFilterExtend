@@ -1,0 +1,27 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.grayscale",
+  "name": "Grayscale",
+  "version": "1.0.0",
+  "description": "Black and white (Rec.709 luma).",
+  "inputs": [
+    {
+      "name": "src"
+    }
+  ],
+  "params": [
+    {
+      "name": "amount",
+      "type": "float",
+      "default": 1,
+      "min": 0,
+      "max": 1,
+      "description": "Mix with the original"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/grayscale.wgsl"
+    }
+  ]
+}

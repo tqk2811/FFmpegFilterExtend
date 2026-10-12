@@ -1,0 +1,70 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.overlay",
+  "name": "Picture in Picture",
+  "version": "1.0.0",
+  "description": "Draws the second input over the first, scaled and positioned, honouring its alpha.",
+  "inputs": [
+    {
+      "name": "base",
+      "description": "Background video"
+    },
+    {
+      "name": "top",
+      "description": "Video drawn on top (alpha is honoured)"
+    }
+  ],
+  "params": [
+    {
+      "name": "x",
+      "type": "float",
+      "default": 0.65,
+      "min": -1,
+      "max": 2,
+      "description": "Left edge of the overlay, 0..1 of the frame width"
+    },
+    {
+      "name": "y",
+      "type": "float",
+      "default": 0.05,
+      "min": -1,
+      "max": 2,
+      "description": "Top edge of the overlay, 0..1 of the frame height"
+    },
+    {
+      "name": "scale",
+      "type": "float",
+      "default": 0.3,
+      "min": 0.01,
+      "max": 1,
+      "description": "Overlay width relative to the frame width"
+    },
+    {
+      "name": "opacity",
+      "type": "float",
+      "default": 1,
+      "min": 0,
+      "max": 1,
+      "description": "Overlay opacity"
+    },
+    {
+      "name": "border",
+      "type": "float",
+      "default": 0,
+      "min": 0,
+      "max": 50,
+      "description": "Border width in pixels"
+    },
+    {
+      "name": "border_color",
+      "type": "color",
+      "default": "#ffffff",
+      "description": "Border color"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/overlay.wgsl"
+    }
+  ]
+}
