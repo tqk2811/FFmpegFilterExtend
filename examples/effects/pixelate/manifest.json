@@ -1,0 +1,27 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.pixelate",
+  "name": "Pixelate",
+  "version": "1.0.0",
+  "description": "Mosaic of square blocks.",
+  "inputs": [
+    {
+      "name": "src"
+    }
+  ],
+  "params": [
+    {
+      "name": "block",
+      "type": "float",
+      "default": 16,
+      "min": 1,
+      "max": 512,
+      "description": "Block size in pixels"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/pixelate.wgsl"
+    }
+  ]
+}

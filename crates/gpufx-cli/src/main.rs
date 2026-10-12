@@ -4,7 +4,8 @@ use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
-use gpufx_core::{Backend, Effect, GpuContext, Image, Package};
+use gpufx_core::manifest::SizeRule;
+use gpufx_core::{Backend, Effect, GpuContext, Image, Package, StreamInfo};
 
 const USAGE: &str = "\
 usage:
@@ -42,7 +43,19 @@ fn info(path: &str) -> Result<(), String> {
     println!("inputs:");
     for i in &m.inputs {
         println!("  {} {}", i.name, i.description);
+        if !i.formats.is_empty() {
+            println!("    formats: {}", i.formats.join(", "));
+        }
+        for (what, rule) in [("width", &i.width), ("height", &i.height)] {
+            if let Some(r) = rule {
+                println!("    {what}: {}", describe(r));
+            }
+        }
+        if i.same_size {
+            println!("    same size as the first input");
+        }
     }
+    println!("output formats: {}", m.output.formats.join(", "));
     println!("params:");
     for p in &m.params {
         let default = p.default.as_ref().map(|d| d.to_string()).unwrap_or_else(|| "0".into());
@@ -54,6 +67,36 @@ fn info(path: &str) -> Result<(), String> {
     }
     println!("passes: {}", m.passes.len());
     Ok(())
+}
+
+fn describe(r: &SizeRule) -> String {
+    let mut parts = Vec::new();
+    if let Some(v) = r.min {
+        parts.push(format!(">= {v}"));
+    }
+    if let Some(v) = r.max {
+        parts.push(format!("<= {v}"));
+    }
+    if let Some(v) = r.multiple_of {
+        parts.push(format!("multiple of {v}"));
+    }
+    parts.join(", ")
+}
+
+/// FFmpeg name of the pixel format a decoded image has, for the manifest input rules.
+fn pix_fmt(img: &image::DynamicImage) -> Option<&'static str> {
+    use image::ColorType::*;
+    Some(match img.color() {
+        L8 => "gray",
+        La8 => "ya8",
+        Rgb8 => "rgb24",
+        Rgba8 => "rgba",
+        L16 => "gray16be",
+        La16 => "ya16be",
+        Rgb16 => "rgb48be",
+        Rgba16 => "rgba64be",
+        _ => return None,
+    })
 }
 
 fn check(path: &str, args: &[String]) -> Result<(), String> {
@@ -128,8 +171,12 @@ fn run(path: &str, args: &[String]) -> Result<(), String> {
         let (k, v) = p.split_once('=').ok_or_else(|| format!("-p expects name=value, got `{p}`"))?;
         fx.params_mut().set_str(k, v).map_err(|e| e.to_string())?;
     }
-    let images: Vec<image::RgbaImage> =
-        inputs.iter().map(|p| image::open(p).map(|i| i.to_rgba8()).map_err(|e| format!("{p}: {e}"))).collect::<Result<_, _>>()?;
+    let decoded: Vec<image::DynamicImage> =
+        inputs.iter().map(|p| image::open(p).map_err(|e| format!("{p}: {e}"))).collect::<Result<_, _>>()?;
+    let streams: Vec<StreamInfo> =
+        decoded.iter().map(|i| StreamInfo { format: pix_fmt(i), width: i.width(), height: i.height() }).collect();
+    fx.package().manifest.check_inputs(&streams).map_err(|e| e.to_string())?;
+    let images: Vec<image::RgbaImage> = decoded.iter().map(|i| i.to_rgba8()).collect();
     let views: Vec<Image> =
         images.iter().map(|i| Image { data: i.as_raw(), width: i.width(), height: i.height(), stride: i.width() * 4 }).collect();
     let (w, h) = views.first().map(|v| (v.width, v.height)).ok_or("need at least one -i")?;

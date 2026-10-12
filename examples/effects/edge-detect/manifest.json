@@ -1,0 +1,41 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.edge-detect",
+  "name": "Edge Detect",
+  "version": "1.0.0",
+  "description": "Sobel edges, optionally drawn over the original.",
+  "inputs": [
+    {
+      "name": "src"
+    }
+  ],
+  "params": [
+    {
+      "name": "strength",
+      "type": "float",
+      "default": 1,
+      "min": 0,
+      "max": 10,
+      "description": "Edge gain"
+    },
+    {
+      "name": "blend",
+      "type": "float",
+      "default": 1,
+      "min": 0,
+      "max": 1,
+      "description": "0 = original, 1 = edges only"
+    },
+    {
+      "name": "color",
+      "type": "color",
+      "default": "#ffffff",
+      "description": "Edge color"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/edge_detect.wgsl"
+    }
+  ]
+}

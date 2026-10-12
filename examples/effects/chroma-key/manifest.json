@@ -1,0 +1,67 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.chroma-key",
+  "name": "Chroma Key",
+  "version": "1.0.0",
+  "description": "Removes a key color (green screen) into alpha. Use a format with alpha after it, or overlay it.",
+  "inputs": [
+    {
+      "name": "src",
+      "formats": [
+        "yuv420p",
+        "yuv422p",
+        "yuv444p",
+        "yuvj420p",
+        "nv12",
+        "rgb24",
+        "bgr24",
+        "rgba",
+        "bgra"
+      ]
+    }
+  ],
+  "output": {
+    "formats": [
+      "rgba",
+      "yuva420p",
+      "yuva444p"
+    ]
+  },
+  "params": [
+    {
+      "name": "key",
+      "type": "color",
+      "default": "#00ff00",
+      "description": "Color to remove"
+    },
+    {
+      "name": "similarity",
+      "type": "float",
+      "default": 0.25,
+      "min": 0,
+      "max": 1,
+      "description": "How close to the key a color must be to become transparent"
+    },
+    {
+      "name": "smoothness",
+      "type": "float",
+      "default": 0.08,
+      "min": 0,
+      "max": 1,
+      "description": "Width of the soft edge"
+    },
+    {
+      "name": "spill",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "Removes the key tint from the remaining edges"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/chroma_key.wgsl"
+    }
+  ]
+}

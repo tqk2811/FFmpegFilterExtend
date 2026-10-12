@@ -13,10 +13,10 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::ptr;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use gpufx_core::{Backend, Effect, GpuContext, Image, Package};
+use gpufx_core::{Backend, Effect, GpuContext, Image, Package, StreamInfo};
 
 /// Bumped when the C ABI changes incompatibly. Must match `GPUFX_API_VERSION` in gpufx.h.
-const API_VERSION: u32 = 1;
+const API_VERSION: u32 = 2;
 
 thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
@@ -67,6 +67,8 @@ pub struct GpufxEffect {
     name: CString,
     device: CString,
     inputs: Vec<CString>,
+    input_formats: Vec<Vec<CString>>,
+    output_formats: Vec<CString>,
     params: Vec<CString>,
 }
 
@@ -76,6 +78,13 @@ pub struct GpufxImage {
     pub width: u32,
     pub height: u32,
     pub stride: u32,
+}
+
+#[repr(C)]
+pub struct GpufxStreamInfo {
+    pub format: *const c_char,
+    pub width: u32,
+    pub height: u32,
 }
 
 fn cstring(s: &str) -> CString {
@@ -110,6 +119,8 @@ pub unsafe extern "C" fn gpufx_effect_open(path: *const c_char, backend: *const 
             name: cstring(&m.name),
             device,
             inputs: m.inputs.iter().map(|i| cstring(&i.name)).collect(),
+            input_formats: m.inputs.iter().map(|i| i.formats.iter().map(|f| cstring(f)).collect()).collect(),
+            output_formats: m.output.formats.iter().map(|f| cstring(f)).collect(),
             params: m.params.iter().map(|p| cstring(&p.name)).collect(),
             effect,
         };
@@ -142,6 +153,44 @@ pub unsafe extern "C" fn gpufx_effect_input_count(fx: *const GpufxEffect) -> u32
 #[no_mangle]
 pub unsafe extern "C" fn gpufx_effect_input_name(fx: *const GpufxEffect, index: u32) -> *const c_char {
     fx.as_ref().and_then(|fx| fx.inputs.get(index as usize)).map_or(ptr::null(), |s| s.as_ptr())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_input_format_count(fx: *const GpufxEffect, input: u32) -> u32 {
+    fx.as_ref().and_then(|fx| fx.input_formats.get(input as usize)).map_or(0, |f| f.len() as u32)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_input_format(fx: *const GpufxEffect, input: u32, index: u32) -> *const c_char {
+    fx.as_ref().and_then(|fx| fx.input_formats.get(input as usize)).and_then(|f| f.get(index as usize)).map_or(ptr::null(), |s| s.as_ptr())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_output_format_count(fx: *const GpufxEffect) -> u32 {
+    fx.as_ref().map_or(0, |fx| fx.output_formats.len() as u32)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_output_format(fx: *const GpufxEffect, index: u32) -> *const c_char {
+    fx.as_ref().and_then(|fx| fx.output_formats.get(index as usize)).map_or(ptr::null(), |s| s.as_ptr())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_check_inputs(fx: *const GpufxEffect, streams: *const GpufxStreamInfo, count: u32) -> c_int {
+    guard(-1, || {
+        let fx = fx.as_ref().ok_or("effect is NULL")?;
+        if streams.is_null() || count == 0 {
+            return Err("streams must not be NULL".into());
+        }
+        let raw = std::slice::from_raw_parts(streams, count as usize);
+        let mut infos = Vec::with_capacity(raw.len());
+        for (i, s) in raw.iter().enumerate() {
+            let format = if s.format.is_null() { None } else { Some(str_arg(s.format, &format!("stream {i} format"))?) };
+            infos.push(StreamInfo { format, width: s.width, height: s.height });
+        }
+        fx.effect.package().manifest.check_inputs(&infos).map_err(|e| e.to_string())?;
+        Ok(0)
+    })
 }
 
 #[no_mangle]

@@ -1,0 +1,41 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.slide-transition",
+  "name": "Slide",
+  "version": "1.0.0",
+  "description": "The second clip pushes the first out of the frame. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    },
+    {
+      "name": "direction",
+      "type": "int",
+      "default": 0,
+      "min": 0,
+      "max": 3,
+      "description": "0 = left, 1 = right, 2 = up, 3 = down"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/slide_transition.wgsl"
+    }
+  ]
+}

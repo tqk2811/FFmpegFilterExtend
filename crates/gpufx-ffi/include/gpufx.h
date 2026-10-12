@@ -17,7 +17,7 @@
 extern "C" {
 #endif
 
-#define GPUFX_API_VERSION 1
+#define GPUFX_API_VERSION 2
 
 typedef struct GpufxEffect GpufxEffect;
 
@@ -28,6 +28,13 @@ typedef struct GpufxImage {
     uint32_t height;
     uint32_t stride;
 } GpufxImage;
+
+/* Properties of one input stream, checked against the manifest rules. */
+typedef struct GpufxStreamInfo {
+    const char *format; /* FFmpeg pixel format name ("yuv420p"), or NULL if unknown */
+    uint32_t width;
+    uint32_t height;
+} GpufxStreamInfo;
 
 /* Returns GPUFX_API_VERSION of the loaded library. */
 uint32_t gpufx_version(void);
@@ -50,6 +57,23 @@ const char *gpufx_effect_device(const GpufxEffect *fx);
 uint32_t gpufx_effect_input_count(const GpufxEffect *fx);
 const char *gpufx_effect_input_name(const GpufxEffect *fx, uint32_t index);
 
+/*
+ * Pixel formats an input accepts (FFmpeg names). A count of 0 means any format.
+ * Formats outside the list are rejected by gpufx_effect_check_inputs().
+ */
+uint32_t gpufx_effect_input_format_count(const GpufxEffect *fx, uint32_t input);
+const char *gpufx_effect_input_format(const GpufxEffect *fx, uint32_t input, uint32_t index);
+
+/* Pixel formats the effect may output, in order of preference (at least one). */
+uint32_t gpufx_effect_output_format_count(const GpufxEffect *fx);
+const char *gpufx_effect_output_format(const GpufxEffect *fx, uint32_t index);
+
+/*
+ * Checks one stream per input against the manifest rules (pixel format, size limits,
+ * same_size). Returns a negative value and sets gpufx_last_error() on a mismatch.
+ */
+int gpufx_effect_check_inputs(const GpufxEffect *fx, const GpufxStreamInfo *streams, uint32_t count);
+
 uint32_t gpufx_effect_param_count(const GpufxEffect *fx);
 const char *gpufx_effect_param_name(const GpufxEffect *fx, uint32_t index);
 
@@ -63,6 +87,7 @@ int gpufx_effect_set_param_values(GpufxEffect *fx, const char *name,
  * Runs the effect. inputs holds one image per package input, in order. The output
  * has the size of inputs[0] and is written to out with row stride out_stride.
  * time is in seconds, frame is the frame index; both are exposed to shaders.
+ * Fails when the input sizes break the manifest rules.
  */
 int gpufx_effect_process(GpufxEffect *fx, const GpufxImage *inputs, uint32_t nb_inputs,
                          uint8_t *out, uint32_t out_stride, double time, uint64_t frame);

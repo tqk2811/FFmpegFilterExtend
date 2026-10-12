@@ -7,7 +7,7 @@ pub mod package;
 pub mod params;
 pub mod runtime;
 
-pub use manifest::Manifest;
+pub use manifest::{Manifest, StreamInfo};
 pub use package::Package;
 pub use runtime::{Backend, Effect, GpuContext, Image};
 
@@ -25,6 +25,9 @@ pub enum Error {
     Shader(String),
     #[error("gpu: {0}")]
     Gpu(String),
+    /// An input or output does not satisfy the rules of the manifest.
+    #[error("unsupported: {0}")]
+    Unsupported(String),
     #[error("frame: {0}")]
     Frame(String),
 }

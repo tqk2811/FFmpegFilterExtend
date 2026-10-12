@@ -1,0 +1,48 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.transform",
+  "name": "Transform",
+  "version": "1.0.0",
+  "description": "Zoom, rotate and pan (Ken Burns style when driven by expressions).",
+  "inputs": [
+    {
+      "name": "src"
+    }
+  ],
+  "params": [
+    {
+      "name": "zoom",
+      "type": "float",
+      "default": 1,
+      "min": 0.01,
+      "max": 100,
+      "description": "1 = unchanged, 2 = twice as big"
+    },
+    {
+      "name": "angle",
+      "type": "float",
+      "default": 0,
+      "description": "Rotation in degrees, clockwise"
+    },
+    {
+      "name": "center",
+      "type": "vec2",
+      "default": [
+        0.5,
+        0.5
+      ],
+      "description": "Point of the source shown at the frame center (0..1)"
+    },
+    {
+      "name": "background",
+      "type": "color",
+      "default": "#000000",
+      "description": "Fill outside the source"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/transform.wgsl"
+    }
+  ]
+}

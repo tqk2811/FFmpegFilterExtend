@@ -24,7 +24,7 @@ sed -i.bak \
     -e 's/^\(    libplacebo\)$/\1\
     libgpufx/' \
     -e 's/^\(libplacebo_filter_deps=.*\)$/\1\
-gpufx_filter_deps="libgpufx"/' \
+gpufx_filter_deps="libgpufx swscale"/' \
     -e 's/^\(enabled libplacebo .*\)$/\1\
 enabled libgpufx          \&\& require_pkg_config libgpufx "gpufx >= 0.1.0" gpufx.h gpufx_version/' \
     configure

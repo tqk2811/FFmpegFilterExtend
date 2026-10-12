@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::manifest::{PassDef, ShaderLanguage};
+use crate::manifest::{PassDef, ShaderLanguage, StreamInfo};
 use crate::package::Package;
 use crate::params::ParamBlock;
 use crate::Error;
@@ -205,6 +205,7 @@ impl Effect {
 
     /// Runs every pass on `inputs` (one per manifest input) and writes the RGBA result,
     /// sized like `inputs[0]`, into `out` with row stride `out_stride`.
+    /// Fails with [`Error::Unsupported`] when the input sizes break the manifest rules.
     pub fn process(&mut self, inputs: &[Image], out: &mut [u8], out_stride: u32, time: f64, frame: u64) -> Result<(), Error> {
         if inputs.len() != self.input_count() {
             return Err(Error::Frame(format!("effect expects {} inputs, got {}", self.input_count(), inputs.len())));
@@ -217,6 +218,9 @@ impl Effect {
 
         let sizes: Vec<(u32, u32)> = inputs.iter().map(|i| (i.width, i.height)).collect();
         if self.targets.as_ref().is_none_or(|t| t.sizes != sizes) {
+            // Size rules of the manifest; pixel formats are the caller's to check.
+            let streams: Vec<StreamInfo> = sizes.iter().map(|&(width, height)| StreamInfo { format: None, width, height }).collect();
+            self.package.manifest.check_inputs(&streams)?;
             self.targets = Some(self.create_targets(sizes));
         }
         let targets = self.targets.as_ref().expect("just created");

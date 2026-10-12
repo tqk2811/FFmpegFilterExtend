@@ -1,0 +1,27 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.mirror",
+  "name": "Mirror",
+  "version": "1.0.0",
+  "description": "Flip horizontally, vertically or both.",
+  "inputs": [
+    {
+      "name": "src"
+    }
+  ],
+  "params": [
+    {
+      "name": "mode",
+      "type": "int",
+      "default": 0,
+      "min": 0,
+      "max": 2,
+      "description": "0 = horizontal, 1 = vertical, 2 = both"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/mirror.wgsl"
+    }
+  ]
+}

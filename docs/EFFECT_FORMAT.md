@@ -20,6 +20,14 @@ gpufx run my-effect -i in.png -o out.png -p strength=0.8
 gpufx pack my-effect my-effect.zip
 ```
 
+Đóng gói nhiều hiệu ứng một lúc (không cần build FFmpeg hay Docker):
+
+```sh
+scripts/pack-effects.sh                         # mọi thư mục trong examples/effects -> dist/effects/*.zip
+scripts/pack-effects.sh --check -o out my-fx    # biên dịch shader trên GPU trước, ghi vào out/
+.\scripts\pack-effects.ps1 -Check                # Windows
+```
+
 ## manifest.json
 
 | Trường | Kiểu | Bắt buộc | Ý nghĩa |
@@ -28,10 +36,55 @@ gpufx pack my-effect my-effect.zip
 | `id` | chuỗi | có | Định danh dạng reverse-DNS |
 | `name` | chuỗi | có | Tên hiển thị |
 | `version`, `description` | chuỗi | không | |
-| `inputs` | mảng `{name, description?}` | không (`[{"name":"src"}]`) | Các video input, theo thứ tự pad của filter |
+| `inputs` | mảng | không (`[{"name":"src"}]`) | Các video input, theo thứ tự pad của filter, kèm quy tắc (xem bên dưới) |
+| `output` | `{formats}` | không (`{"formats":["rgba"]}`) | Pixel format output được phép |
 | `params` | mảng | không | Tham số, xem bên dưới |
 | `textures` | mảng `{name, path}` | không | Ảnh PNG đi kèm (LUT, mask) |
 | `passes` | mảng | có | Các pass compute, chạy theo thứ tự |
+
+## Quy tắc input/output
+
+Gói có thể khai báo input nhận format/kích thước nào và output ra format nào. Stream
+không khớp sẽ **bị báo lỗi** (filter không tự chuyển đổi ngầm), lỗi nêu rõ input và quy tắc:
+
+```
+unsupported: input `src` of `Chroma Key`: pixel format `gray` is not supported (accepted: yuv420p, rgba)
+unsupported: input `second` of `Crossfade`: size 300x180 must equal the first input (320x180)
+```
+
+Mỗi phần tử `inputs`:
+
+| Trường | Mặc định | Ý nghĩa |
+|--------|----------|---------|
+| `name` | | Tên input, cũng là tên texture trong shader |
+| `description` | | Mô tả |
+| `formats` | `[]` (mọi format) | Pixel format nhận (tên của FFmpeg: `yuv420p`, `nv12`, `rgba`, `rgb24`...) |
+| `width`, `height` | không giới hạn | `{ "min": 16, "max": 4096, "multiple_of": 2 }`, mỗi trường đều tuỳ chọn |
+| `same_size` | `false` | Kích thước phải bằng input đầu tiên (không dùng cho input đầu) |
+
+`output.formats`: danh sách pixel format output được phép, theo thứ tự ưu tiên. FFmpeg
+chọn một format trong danh sách khi nối filter; filter phía sau đòi format ngoài danh sách
+thì FFmpeg tự chèn bộ chuyển đổi sau `gpufx`.
+
+```json
+"inputs": [
+  { "name": "src", "formats": ["yuv420p", "nv12", "rgba"],
+    "width": { "min": 64, "multiple_of": 2 }, "height": { "min": 64, "multiple_of": 2 } },
+  { "name": "matte", "formats": ["gray"], "same_size": true }
+],
+"output": { "formats": ["yuva420p", "rgba"] }
+```
+
+Cách áp dụng:
+
+- **FFmpeg:** input không có `formats` vẫn như cũ (FFmpeg tự đổi sang RGBA). Input có
+  `formats` nhận nguyên format của stream; khác danh sách thì lỗi khi cấu hình filter graph.
+  Muốn chạy thì đổi format trước bằng `format=yuv420p,gpufx=...`. Kích thước được kiểm tra
+  khi cấu hình và mỗi khi kích thước frame đổi. Tên format sai chính tả cũng là lỗi.
+- **`gpufx run`:** format lấy từ PNG (`rgba`, `rgb24`, `gray`, `ya8`, bản 16-bit là
+  `rgba64be`, `rgb48be`, `gray16be`, `ya16be`). CLI luôn ghi PNG RGBA nên không kiểm tra
+  `output.formats`.
+- Shader luôn thấy RGBA 8-bit, dù format vào/ra là gì: chuyển đổi nằm ngoài shader.
 
 Mỗi phần tử `params`:
 
@@ -119,3 +172,14 @@ void main() {
 | `examples/effects/wipe-transition` | 2 input (`first`, `second`), tham số `progress` |
 | `examples/effects/gradient-map` | Texture PNG đi kèm làm LUT |
 | `examples/effects/rgb-split` | GLSL, dùng `globals.frame` làm nhiễu động |
+| `examples/effects/color-adjust` | Độ sáng, tương phản, bão hoà, gamma, hue, nhiệt độ màu |
+| `examples/effects/grayscale`, `sepia`, `invert` | Lọc màu cơ bản, tham số `amount` |
+| `examples/effects/sharpen` | Unsharp mask 3×3 bằng `textureLoad` |
+| `examples/effects/edge-detect` | Sobel |
+| `examples/effects/pixelate` | Khảm theo khối |
+| `examples/effects/mirror` | Lật ngang/dọc, tham số `int` |
+| `examples/effects/transform` | Zoom, xoay, pan (Ken Burns), tham số `vec2` |
+| `examples/effects/fade` | Fade về một màu |
+| `examples/effects/chroma-key` | Phông xanh → alpha; **quy tắc** `formats` input, output `rgba`/`yuva420p`/`yuva444p` |
+| `examples/effects/overlay` | Picture-in-picture 2 input, có viền |
+| `examples/effects/crossfade`, `slide-transition`, `circle-reveal` | Chuyển cảnh 2 input; **quy tắc** `same_size` |
