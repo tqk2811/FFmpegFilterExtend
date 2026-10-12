@@ -1,0 +1,33 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.fade-grays",
+  "name": "Fade Through Gray",
+  "version": "1.0.0",
+  "description": "The first clip loses its color, crossfades in gray to the second, which regains color. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/fade_grays.wgsl"
+    }
+  ]
+}

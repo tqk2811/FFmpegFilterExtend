@@ -183,3 +183,8 @@ void main() {
 | `examples/effects/chroma-key` | Phông xanh → alpha; **quy tắc** `formats` input, output `rgba`/`yuva420p`/`yuva444p` |
 | `examples/effects/overlay` | Picture-in-picture 2 input, có viền |
 | `examples/effects/crossfade`, `slide-transition`, `circle-reveal` | Chuyển cảnh 2 input; **quy tắc** `same_size` |
+| `examples/effects/clock-wipe` | Chuyển cảnh kim đồng hồ, tham số `bool` `reverse` |
+| `examples/effects/collapse`, `expand` | Clip đầu thu vào giữa / clip sau nở ra từ giữa: theo chiều ngang, chiều dọc, hộp, hình tròn (`mode`) |
+| `examples/effects/dip-to-color` | Tối dần về một màu (mặc định đen) rồi hiện clip sau |
+| `examples/effects/dissolve` | Hạt ngẫu nhiên (hash số nguyên, giống nhau trên mọi GPU) |
+| `examples/effects/pixelize-transition`, `zoom-transition`, `fade-grays`, `blinds` | Chuyển cảnh kiểu `xfade`: vỡ điểm ảnh, zoom, qua ảnh xám, rèm |

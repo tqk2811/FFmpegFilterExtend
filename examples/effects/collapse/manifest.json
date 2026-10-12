@@ -1,0 +1,49 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.collapse",
+  "name": "Collapse",
+  "version": "1.0.0",
+  "description": "The first clip shrinks into the center and uncovers the second. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    },
+    {
+      "name": "mode",
+      "type": "int",
+      "default": 0,
+      "min": 0,
+      "max": 3,
+      "description": "0 = horizontal (closes/opens from the left and right edges), 1 = vertical (top and bottom), 2 = both (box), 3 = circle"
+    },
+    {
+      "name": "softness",
+      "type": "float",
+      "default": 0.005,
+      "min": 0,
+      "max": 0.25,
+      "description": "Edge width"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/collapse.wgsl"
+    }
+  ]
+}

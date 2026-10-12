@@ -1,0 +1,41 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.pixelize-transition",
+  "name": "Pixelize Transition",
+  "version": "1.0.0",
+  "description": "Pixels grow, the clips blend at the coarsest point, then pixels shrink back. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    },
+    {
+      "name": "max_size",
+      "type": "float",
+      "default": 48,
+      "min": 1,
+      "max": 256,
+      "description": "Pixel size in the middle of the transition"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/pixelize_transition.wgsl"
+    }
+  ]
+}

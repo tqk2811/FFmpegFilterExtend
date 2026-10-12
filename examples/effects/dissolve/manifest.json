@@ -1,0 +1,49 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.dissolve",
+  "name": "Dissolve",
+  "version": "1.0.0",
+  "description": "Random pixels (or blocks) switch from the first clip to the second. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    },
+    {
+      "name": "block",
+      "type": "float",
+      "default": 1,
+      "min": 1,
+      "max": 64,
+      "description": "Size of the switching blocks in pixels"
+    },
+    {
+      "name": "seed",
+      "type": "float",
+      "default": 0,
+      "description": "Changes the random pattern",
+      "min": 0,
+      "max": 1000
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/dissolve.wgsl"
+    }
+  ]
+}
