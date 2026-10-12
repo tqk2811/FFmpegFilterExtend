@@ -187,12 +187,31 @@ crates/gpufx-core   engine Rust: package, manifest, params, runtime (wgpu)
 crates/gpufx-ffi    libgpufx (.so/.dll/.dylib + .a) và include/gpufx.h
 crates/gpufx-cli    lệnh `gpufx`: info, check, pack, run (test hiệu ứng không cần FFmpeg)
 ffmpeg/             vf_gpufx.c và integrate.sh (thêm filter vào cây nguồn FFmpeg)
+external/FFmpeg     submodule FFmpeg (master = 9.1-dev, chuyển sang n9.1 khi phát hành)
+docker/, build.sh   build FFmpeg + gpufx một lệnh trong Docker (linux64, win64)
 examples/effects    vignette, gaussian-blur (2 pass), wipe-transition (2 input),
                     gradient-map (texture PNG), rgb-split (GLSL, nhiễu theo frame)
 scripts/            install-libgpufx.sh (build + cài .pc cho pkg-config)
 ```
 
-## 9. Lộ trình
+## 9. Bản build phân phối
+
+`./build.sh [linux64|win64|all]` (hoặc `build.ps1` trên Windows) dựng image Docker, build
+`libgpufx` bằng Rust, chép submodule `external/FFmpeg` ra thư mục tạm (submodule giữ
+nguyên), chạy `integrate.sh`, rồi configure FFmpeg với:
+
+- `--disable-filters` rồi bật lại **mọi filter audio** cùng danh sách tối thiểu trong
+  `docker/keep-filters.txt` (`null`, `format`, `scale`, `trim`, `crop`, `hflip`, `vflip`,
+  `transpose`, `rotate`, `sendcmd`, `split`, `gpufx`). Các filter video còn giữ là hạ tầng
+  mà ffmpeg CLI tự chèn (trim cho `-ss/-t`, xoay theo metadata) hoặc gpufx cần (đổi
+  YUV ↔ RGBA). Khi gpufx tự chuyển màu trên GPU (P1), có thể bỏ thêm `scale`.
+- `libgpufx` được link động: Linux dùng `rpath=$ORIGIN` để tìm `libgpufx.so` cạnh `ffmpeg`,
+  Windows đặt `gpufx.dll` cạnh `ffmpeg.exe`. DLL chỉ phụ thuộc DLL hệ thống
+  (đã kiểm tra bằng `objdump`).
+- win64 cross-compile bằng mingw-w64 như BtbN/FFmpeg-Builds. macOS chưa có (cần build
+  native trên máy Mac).
+
+## 10. Lộ trình
 
 1. **M0 – Prototype (PR này):** gói zip, WGSL + GLSL, nhiều pass, nhiều input, texture,
    tham số + biểu thức, filter FFmpeg 9.0, CLI, 5 hiệu ứng mẫu, test tự động.

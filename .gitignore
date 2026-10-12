@@ -2,3 +2,4 @@
 *.zip
 !examples/**/*.zip
 /out
+/dist

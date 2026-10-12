@@ -1,5 +1,6 @@
 #!/bin/sh
-# Adds the gpufx filter to an FFmpeg source tree (tested with n9.0.2).
+# Adds the gpufx filter to an FFmpeg source tree (tested with n9.0.2 and the
+# external/FFmpeg submodule, 9.1-dev). build.sh runs this for you inside Docker.
 #   ffmpeg/integrate.sh /path/to/FFmpeg
 # Then: ./configure --enable-libgpufx ... (libgpufx must be found by pkg-config)
 # This is a one-time step: new effects are packages, not FFmpeg rebuilds.
