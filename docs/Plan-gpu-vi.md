@@ -59,4 +59,17 @@ DESIGN-vi.md mục 6).
   của wgpu/driver. Giới hạn tổng dung lượng (xoá file cũ nhất theo thời gian truy cập).
 - **Test**: lần mở thứ hai trong process mới đọc được file cache (gpufx tự đếm số file nạp, wgpu không có bộ đếm hit), output giống hệt;
   file hỏng không làm sập; thư mục không ghi được chỉ cảnh báo.
+- **Biên dịch sẵn lúc pack** (tuỳ chọn, `gpufx pack --precompile`): gói kèm thư mục `compiled/` với
+  bytecode theo từng backend, tên file là hash như trên (không có phần adapter/driver):
+  - DXIL cho D3D12: naga → HLSL → DXC (có bản Linux, ký sẵn từ 1.8.2505), không phụ thuộc GPU.
+    Đây là chỗ có lợi nhất vì bỏ được bước HLSL → DXIL chậm.
+  - SPIR-V cho Vulkan: naga sinh rất nhanh, lợi ít; chỉ thêm nếu đo thấy đáng.
+  - Metal: `metallib` cần công cụ Apple (`xcrun metal`), chỉ làm được khi pack trên macOS; nếu không có
+    thì bỏ qua, runtime tự biên dịch MSL.
+  - Mã máy của GPU (pipeline state, ISA của driver) không thể biên dịch sẵn; phần đó vẫn do cache
+    `GPUFX_SHADER_CACHE` ở trên lo.
+  - **An toàn**: gói là dữ liệu không tin cậy, còn passthrough shader thì wgpu không kiểm tra, nên
+    bytecode lạ có thể làm sập driver. Vì vậy chỉ dùng `compiled/` khi gói đã được ký (`signature`,
+    DESIGN mục 7) hoặc người dùng bật `GPUFX_TRUST_PRECOMPILED=1`; ngược lại bỏ qua và biên dịch từ nguồn.
+    Gói luôn giữ nguồn shader; bytecode không khớp hash của nguồn hiện tại thì bỏ qua.
 - Tài liệu: biến môi trường trong README, DESIGN (cả hai thứ tiếng).
