@@ -15,10 +15,10 @@ use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use gpufx_core::{Backend, Effect, GpuContext, Image, Package, Program, StreamInfo};
+use gpufx_core::{Backend, Effect, EffectChain, FrameInfo, GpuContext, Image, ImageMut, Package, Program, StreamInfo};
 
 /// Bumped when the C ABI changes incompatibly. Must match `GPUFX_API_VERSION` in gpufx.h.
-const API_VERSION: u32 = 2;
+const API_VERSION: u32 = 3;
 
 thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
@@ -93,7 +93,7 @@ fn program(path: &str, ctx: Arc<GpuContext>) -> Result<Arc<Program>, String> {
 }
 
 pub struct GpufxEffect {
-    effect: Effect,
+    chain: EffectChain,
     name: CString,
     device: CString,
     inputs: Vec<CString>,
@@ -108,6 +108,21 @@ pub struct GpufxImage {
     pub width: u32,
     pub height: u32,
     pub stride: u32,
+}
+
+#[repr(C)]
+pub struct GpufxOutput {
+    pub data: *mut u8,
+    pub width: u32,
+    pub height: u32,
+    pub stride: u32,
+}
+
+#[repr(C)]
+pub struct GpufxFrameInfo {
+    pub time: f64,
+    pub frame: u64,
+    pub pixel_aspect: f64,
 }
 
 #[repr(C)]
@@ -131,29 +146,58 @@ pub extern "C" fn gpufx_last_error() -> *const c_char {
     LAST_ERROR.with(|e| e.borrow().as_ptr())
 }
 
+/// Label of a package in parameter names: its file name without `.zip`.
+fn label(path: &str) -> String {
+    let p = std::path::Path::new(path);
+    let name = p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.to_string());
+    name.strip_suffix(".zip").or_else(|| name.strip_suffix(".ZIP")).unwrap_or(&name).to_string()
+}
+
+unsafe fn open_chain(paths: &[&str], backend: *const c_char) -> Result<*mut GpufxEffect, String> {
+    let backend: Backend = if backend.is_null() {
+        Backend::Auto
+    } else {
+        str_arg(backend, "backend")?.parse().map_err(|e: gpufx_core::Error| e.to_string())?
+    };
+    let ctx = context(backend).map_err(|e| e.to_string())?;
+    let device = cstring(&ctx.description());
+    let mut effects = Vec::with_capacity(paths.len());
+    for path in paths {
+        let effect = Effect::from_program(program(path, ctx.clone())?).map_err(|e| format!("{path}: {e}"))?;
+        effects.push((label(path), effect));
+    }
+    let chain = EffectChain::new(effects).map_err(|e| e.to_string())?;
+    let first = &chain.first().package().manifest;
+    let names: Vec<&str> = chain.effects().iter().map(|fx| fx.package().manifest.name.as_str()).collect();
+    let out = GpufxEffect {
+        name: cstring(&names.join(" | ")),
+        device,
+        inputs: first.inputs.iter().map(|i| cstring(&i.name)).collect(),
+        input_formats: first.inputs.iter().map(|i| i.formats.iter().map(|f| cstring(f)).collect()).collect(),
+        output_formats: chain.last().package().manifest.output.formats.iter().map(|f| cstring(f)).collect(),
+        params: chain.param_names().iter().map(|p| cstring(p)).collect(),
+        chain,
+    };
+    Ok(Box::into_raw(Box::new(out)))
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn gpufx_effect_open(path: *const c_char, backend: *const c_char) -> *mut GpufxEffect {
+    guard(ptr::null_mut(), || open_chain(&[str_arg(path, "path")?], backend))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_open_chain(paths: *const *const c_char, count: u32, backend: *const c_char) -> *mut GpufxEffect {
     guard(ptr::null_mut(), || {
-        let path = str_arg(path, "path")?;
-        let backend: Backend = if backend.is_null() {
-            Backend::Auto
-        } else {
-            str_arg(backend, "backend")?.parse().map_err(|e: gpufx_core::Error| e.to_string())?
-        };
-        let ctx = context(backend).map_err(|e| e.to_string())?;
-        let device = cstring(&ctx.description());
-        let effect = Effect::from_program(program(path, ctx)?).map_err(|e| format!("{path}: {e}"))?;
-        let m = &effect.package().manifest;
-        let out = GpufxEffect {
-            name: cstring(&m.name),
-            device,
-            inputs: m.inputs.iter().map(|i| cstring(&i.name)).collect(),
-            input_formats: m.inputs.iter().map(|i| i.formats.iter().map(|f| cstring(f)).collect()).collect(),
-            output_formats: m.output.formats.iter().map(|f| cstring(f)).collect(),
-            params: m.params.iter().map(|p| cstring(&p.name)).collect(),
-            effect,
-        };
-        Ok(Box::into_raw(Box::new(out)))
+        if paths.is_null() || count == 0 {
+            return Err("paths must hold at least one path".into());
+        }
+        let raw = std::slice::from_raw_parts(paths, count as usize);
+        let mut list = Vec::with_capacity(raw.len());
+        for (i, &p) in raw.iter().enumerate() {
+            list.push(str_arg(p, &format!("path {i}"))?);
+        }
+        open_chain(&list, backend)
     })
 }
 
@@ -217,7 +261,7 @@ pub unsafe extern "C" fn gpufx_effect_check_inputs(fx: *const GpufxEffect, strea
             let format = if s.format.is_null() { None } else { Some(str_arg(s.format, &format!("stream {i} format"))?) };
             infos.push(StreamInfo { format, width: s.width, height: s.height });
         }
-        fx.effect.package().manifest.check_inputs(&infos).map_err(|e| e.to_string())?;
+        fx.chain.check_inputs(&infos).map_err(|e| e.to_string())?;
         Ok(0)
     })
 }
@@ -233,11 +277,20 @@ pub unsafe extern "C" fn gpufx_effect_param_name(fx: *const GpufxEffect, index: 
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_find_param(fx: *const GpufxEffect, name: *const c_char) -> c_int {
+    guard(-1, || {
+        let fx = fx.as_ref().ok_or("effect is NULL")?;
+        let i = fx.chain.find_param(str_arg(name, "name")?).map_err(|e| e.to_string())?;
+        Ok(i as c_int)
+    })
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn gpufx_effect_set_param(fx: *mut GpufxEffect, name: *const c_char, value: *const c_char) -> c_int {
     guard(-1, || {
         let fx = fx.as_mut().ok_or("effect is NULL")?;
         let (name, value) = (str_arg(name, "name")?, str_arg(value, "value")?);
-        fx.effect.params_mut().set_str(name, value).map_err(|e| e.to_string())?;
+        fx.chain.set_param_str(name, value).map_err(|e| e.to_string())?;
         Ok(0)
     })
 }
@@ -251,7 +304,7 @@ pub unsafe extern "C" fn gpufx_effect_set_param_values(fx: *mut GpufxEffect, nam
             return Err("values must hold 1 to 4 numbers".into());
         }
         let values = std::slice::from_raw_parts(values, count as usize);
-        fx.effect.params_mut().set(name, values).map_err(|e| e.to_string())?;
+        fx.chain.set_param(name, values).map_err(|e| e.to_string())?;
         Ok(0)
     })
 }
@@ -261,15 +314,17 @@ pub unsafe extern "C" fn gpufx_effect_process(
     fx: *mut GpufxEffect,
     inputs: *const GpufxImage,
     nb_inputs: u32,
-    out: *mut u8,
-    out_stride: u32,
-    time: f64,
-    frame: u64,
+    out: *const GpufxOutput,
+    info: *const GpufxFrameInfo,
 ) -> c_int {
     guard(-1, || {
         let fx = fx.as_mut().ok_or("effect is NULL")?;
-        if inputs.is_null() || out.is_null() || nb_inputs == 0 {
+        let (out, info) = (out.as_ref().ok_or("out is NULL")?, info.as_ref().ok_or("info is NULL")?);
+        if inputs.is_null() || nb_inputs == 0 || out.data.is_null() {
             return Err("inputs and out must not be NULL".into());
+        }
+        if out.height == 0 {
+            return Err("out has no rows".into());
         }
         let raw = std::slice::from_raw_parts(inputs, nb_inputs as usize);
         let mut images = Vec::with_capacity(raw.len());
@@ -285,10 +340,11 @@ pub unsafe extern "C" fn gpufx_effect_process(
                 stride: img.stride,
             });
         }
-        let (w, h) = (images[0].width as usize, images[0].height as usize);
-        let out_len = (h - 1) * out_stride as usize + w * 4;
-        let out = std::slice::from_raw_parts_mut(out, out_len);
-        fx.effect.process(&images, out, out_stride, time, frame).map_err(|e| e.to_string())?;
+        let out_len = (out.height as usize - 1) * out.stride as usize + out.width as usize * 4;
+        let target =
+            ImageMut { data: std::slice::from_raw_parts_mut(out.data, out_len), width: out.width, height: out.height, stride: out.stride };
+        let info = FrameInfo { time: info.time, frame: info.frame, pixel_aspect: info.pixel_aspect };
+        fx.chain.process(&images, target, &info).map_err(|e| e.to_string())?;
         Ok(0)
     })
 }
@@ -302,10 +358,17 @@ mod tests {
         unsafe { gpufx_effect_open(path.as_ptr(), ptr::null()) }
     }
 
-    // Counts loads in a process-wide counter: other tests in this crate that open effects
-    // would make the exact counts below racy, so keep them in this test.
+    /// Tests that open effects take this lock: the load counter is process-wide, so the
+    /// exact counts of the cache test would be racy otherwise.
+    static SERIAL: Mutex<()> = Mutex::new(());
+
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
     #[test]
     fn a_package_is_loaded_once_while_it_is_in_use() {
+        let _serial = serial();
         if GpuContext::new(Backend::Auto).is_err() {
             eprintln!("skipping: no GPU adapter");
             return;
@@ -326,7 +389,7 @@ mod tests {
         // Parameters stay per effect.
         let (name, value) = (CString::new("amount").unwrap(), CString::new("0.25").unwrap());
         assert_eq!(unsafe { gpufx_effect_set_param(a, name.as_ptr(), value.as_ptr()) }, 0);
-        let (pa, pb) = unsafe { ((*a).effect.params().bytes(), (*b).effect.params().bytes()) };
+        let (pa, pb) = unsafe { ((*a).chain.first().params().bytes(), (*b).chain.first().params().bytes()) };
         assert_ne!(pa, pb);
 
         let other = open(&examples.join("vignette"));
@@ -343,5 +406,42 @@ mod tests {
         assert!(!c.is_null());
         assert_eq!(loads(), start + 3);
         unsafe { gpufx_effect_free(c) };
+    }
+
+    #[test]
+    fn a_chain_lists_and_finds_qualified_parameters() {
+        let _serial = serial();
+        if GpuContext::new(Backend::Auto).is_err() {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        }
+        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects");
+        let paths: Vec<CString> =
+            ["invert", "vignette"].iter().map(|n| CString::new(examples.join(n).to_str().unwrap()).unwrap()).collect();
+        let ptrs: Vec<*const c_char> = paths.iter().map(|p| p.as_ptr()).collect();
+        let fx = unsafe { gpufx_effect_open_chain(ptrs.as_ptr(), 2, ptr::null()) };
+        assert!(!fx.is_null(), "{:?}", unsafe { CStr::from_ptr(gpufx_last_error()) });
+        let name = |i| unsafe { CStr::from_ptr(gpufx_effect_param_name(fx, i)) }.to_str().unwrap().to_string();
+        let find = |n: &str| unsafe { gpufx_effect_find_param(fx, CString::new(n).unwrap().as_ptr()) };
+        assert_eq!(name(0), "invert.amount");
+        assert_eq!(name(find("strength") as u32), "vignette.strength");
+        assert_eq!(find("1.strength"), find("strength"));
+        assert!(find("nothing") < 0);
+        assert!(unsafe { CStr::from_ptr(gpufx_last_error()) }.to_str().unwrap().contains("nothing"));
+        assert_eq!(unsafe { CStr::from_ptr(gpufx_effect_name(fx)) }.to_str().unwrap(), "Invert | Vignette");
+
+        let src = [200u8; 4 * 4 * 4];
+        let mut out = vec![0u8; src.len()];
+        let input = GpufxImage { data: src.as_ptr(), width: 4, height: 4, stride: 16 };
+        let target = GpufxOutput { data: out.as_mut_ptr(), width: 4, height: 4, stride: 16 };
+        let info = GpufxFrameInfo { time: 0.0, frame: 0, pixel_aspect: 1.0 };
+        let v = CString::new("0").unwrap();
+        assert_eq!(unsafe { gpufx_effect_set_param(fx, CString::new("strength").unwrap().as_ptr(), v.as_ptr()) }, 0);
+        assert_eq!(unsafe { gpufx_effect_process(fx, &input, 1, &target, &info) }, 0);
+        assert_eq!(out[..4], [55, 55, 55, 200]);
+        // An output of another size is refused instead of overflowing.
+        let small = GpufxOutput { data: out.as_mut_ptr(), width: 2, height: 2, stride: 8 };
+        assert!(unsafe { gpufx_effect_process(fx, &input, 1, &small, &info) } < 0);
+        unsafe { gpufx_effect_free(fx) };
     }
 }

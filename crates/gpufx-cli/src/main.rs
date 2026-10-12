@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use gpufx_core::manifest::SizeRule;
-use gpufx_core::{Backend, Effect, GpuContext, Image, Package, StreamInfo};
+use gpufx_core::{Backend, Effect, FrameInfo, GpuContext, Image, ImageMut, Package, StreamInfo};
 
 const USAGE: &str = "\
 usage:
@@ -182,7 +182,8 @@ fn run(path: &str, args: &[String]) -> Result<(), String> {
     let (w, h) = views.first().map(|v| (v.width, v.height)).ok_or("need at least one -i")?;
     let mut out = vec![0u8; (w * h * 4) as usize];
     let start = std::time::Instant::now();
-    fx.process(&views, &mut out, w * 4, time, 0).map_err(|e| e.to_string())?;
+    fx.process(&views, ImageMut { data: &mut out, width: w, height: h, stride: w * 4 }, &FrameInfo::new(time, 0))
+        .map_err(|e| e.to_string())?;
     eprintln!("processed {w}x{h} in {:.1} ms", start.elapsed().as_secs_f64() * 1e3);
     image::RgbaImage::from_raw(w, h, out).expect("sized above").save(&output).map_err(|e| e.to_string())?;
     Ok(())

@@ -26,6 +26,7 @@
 
 #include <gpufx.h>
 
+#include "libavutil/avassert.h"
 #include "libavutil/avstring.h"
 #include "libavutil/eval.h"
 #include "libavutil/imgutils.h"
@@ -103,14 +104,6 @@ static void free_expr(ParamExpr *e)
     e->expr = NULL;
 }
 
-static int has_param(GpufxContext *s, const char *name)
-{
-    for (uint32_t i = 0; i < gpufx_effect_param_count(s->fx); i++)
-        if (!strcmp(gpufx_effect_param_name(s->fx, i), name))
-            return 1;
-    return 0;
-}
-
 static void drop_expr(GpufxContext *s, const char *name)
 {
     for (int i = 0; i < s->nb_exprs; i++) {
@@ -126,7 +119,8 @@ static void drop_expr(GpufxContext *s, const char *name)
  * Parses "name=value|name=value". A value is either a literal the package
  * understands ("0.5", "1,0,0", "#ff8800") or, for scalar parameters, an
  * expression of t, n, w, h, a (w/h), sar and dar evaluated for every frame
- * ("clip((t-2)/1.5,0,1)").
+ * ("clip((t-2)/1.5,0,1)"). In a chain, names are "package.name", "index.name"
+ * or a bare name only one effect has; they are stored by their full name.
  */
 static int apply_params(AVFilterContext *ctx, const char *str)
 {
@@ -141,8 +135,10 @@ static int apply_params(AVFilterContext *ctx, const char *str)
 
     for (item = av_strtok(dup, "|", &saveptr); item; item = av_strtok(NULL, "|", &saveptr)) {
         char *value = strchr(item, '=');
+        const char *name;
         AVExpr *expr = NULL;
         ParamExpr *tmp;
+        int index;
 
         if (!value) {
             av_log(ctx, AV_LOG_ERROR, "Expected name=value in params, got '%s'.\n", item);
@@ -150,20 +146,21 @@ static int apply_params(AVFilterContext *ctx, const char *str)
             break;
         }
         *value++ = 0;
-        if (!has_param(s, item)) {
-            av_log(ctx, AV_LOG_ERROR, "Effect '%s' has no parameter '%s'.\n",
-                   gpufx_effect_name(s->fx), item);
+        if ((index = gpufx_effect_find_param(s->fx, item)) < 0) {
+            av_log(ctx, AV_LOG_ERROR, "Effect '%s': %s\n", gpufx_effect_name(s->fx),
+                   gpufx_last_error());
             ret = AVERROR(EINVAL);
             break;
         }
+        name = gpufx_effect_param_name(s->fx, index);
 
-        drop_expr(s, item);
-        if (gpufx_effect_set_param(s->fx, item, value) == 0)
+        drop_expr(s, name);
+        if (gpufx_effect_set_param(s->fx, name, value) == 0)
             continue;
 
         ret = av_expr_parse(&expr, value, var_names, NULL, NULL, NULL, NULL, 0, ctx);
         if (ret < 0) {
-            av_log(ctx, AV_LOG_ERROR, "Invalid value for '%s': %s\n", item, gpufx_last_error());
+            av_log(ctx, AV_LOG_ERROR, "Invalid value for '%s': %s\n", name, gpufx_last_error());
             break;
         }
         tmp = av_realloc_array(s->exprs, s->nb_exprs + 1, sizeof(*s->exprs));
@@ -173,7 +170,7 @@ static int apply_params(AVFilterContext *ctx, const char *str)
             break;
         }
         s->exprs = tmp;
-        s->exprs[s->nb_exprs].name = av_strdup(item);
+        s->exprs[s->nb_exprs].name = av_strdup(name);
         s->exprs[s->nb_exprs].expr = expr;
         if (!s->exprs[s->nb_exprs].name) {
             av_expr_free(expr);
@@ -182,6 +179,49 @@ static int apply_params(AVFilterContext *ctx, const char *str)
         }
         s->nb_exprs++;
     }
+    av_free(dup);
+    return ret;
+}
+
+/* "a.zip|b.zip" opens a chain: one upload, every effect on the GPU, one readback. */
+static av_cold int open_effects(AVFilterContext *ctx)
+{
+    GpufxContext *s = ctx->priv;
+    char *dup, *item, *saveptr = NULL;
+    const char **paths = NULL;
+    unsigned nb_paths = 0;
+    int ret = 0;
+
+    if (!(dup = av_strdup(s->effect_path)))
+        return AVERROR(ENOMEM);
+    for (item = av_strtok(dup, "|", &saveptr); item; item = av_strtok(NULL, "|", &saveptr)) {
+        const char **tmp;
+        char *end = item + strlen(item);
+
+        /* 'a.zip | b.zip': spaces around the separator are not part of the paths. */
+        while (*item == ' ')
+            item++;
+        while (end > item && end[-1] == ' ')
+            *--end = 0;
+        if (!*item)
+            continue;
+        if (!(tmp = av_realloc_array(paths, nb_paths + 1, sizeof(*paths)))) {
+            ret = AVERROR(ENOMEM);
+            goto end;
+        }
+        paths = tmp;
+        paths[nb_paths++] = item;
+    }
+    if (!nb_paths) {
+        av_log(ctx, AV_LOG_ERROR, "The 'effect' option names no package.\n");
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+    s->fx = gpufx_effect_open_chain(paths, nb_paths, s->backend);
+    if (!s->fx)
+        ret = gpufx_error(ctx, "Cannot load effect");
+end:
+    av_free(paths);
     av_free(dup);
     return ret;
 }
@@ -201,9 +241,8 @@ static av_cold int init(AVFilterContext *ctx)
         return AVERROR(EINVAL);
     }
 
-    s->fx = gpufx_effect_open(s->effect_path, s->backend);
-    if (!s->fx)
-        return gpufx_error(ctx, "Cannot load effect");
+    if ((ret = open_effects(ctx)) < 0)
+        return ret;
     av_log(ctx, AV_LOG_VERBOSE, "Loaded '%s' on %s\n",
            gpufx_effect_name(s->fx), gpufx_effect_device(s->fx));
 
@@ -437,6 +476,8 @@ static int process_frame(FFFrameSync *fs)
     AVFilterLink *outlink = ctx->outputs[0];
     AVFrame *in0 = NULL, *out;
     AVFrame *dst;
+    GpufxOutput target;
+    GpufxFrameInfo info;
     double vars[VAR_NB];
     int ret;
 
@@ -526,8 +567,11 @@ static int process_frame(FFFrameSync *fs)
         }
     }
 
-    if (gpufx_effect_process(s->fx, s->images, s->nb_inputs, dst->data[0], dst->linesize[0],
-                             isnan(vars[VAR_T]) ? 0.0 : vars[VAR_T], s->frame_count) < 0) {
+    /* Frames we allocate have top-down rows: a negative linesize would be a huge stride. */
+    av_assert0(dst->linesize[0] > 0);
+    target = (GpufxOutput){ dst->data[0], dst->width, dst->height, dst->linesize[0] };
+    info   = (GpufxFrameInfo){ isnan(vars[VAR_T]) ? 0.0 : vars[VAR_T], s->frame_count, vars[VAR_SAR] };
+    if (gpufx_effect_process(s->fx, s->images, s->nb_inputs, &target, &info) < 0) {
         ret = gpufx_error(ctx, "Processing failed");
         goto fail;
     }
@@ -691,8 +735,8 @@ static int process_command(AVFilterContext *ctx, const char *cmd, const char *ar
 #define FLAGS (AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM)
 
 static const AVOption gpufx_options[] = {
-    { "effect",   "path to the effect package (.zip or directory)", OFFSET(effect_path), AV_OPT_TYPE_STRING, { .str = NULL },   0, 0, FLAGS },
-    { "params",   "effect parameters as name=value|name=value",     OFFSET(params_str),  AV_OPT_TYPE_STRING, { .str = NULL },   0, 0, FLAGS },
+    { "effect",   "effect package (.zip or directory), or packages chained as a.zip|b.zip", OFFSET(effect_path), AV_OPT_TYPE_STRING, { .str = NULL },   0, 0, FLAGS },
+    { "params",   "effect parameters as name=value|name=value (package.name in a chain)", OFFSET(params_str),  AV_OPT_TYPE_STRING, { .str = NULL },   0, 0, FLAGS },
     { "backend",  "GPU API: auto, vulkan, dx12, metal, gl",          OFFSET(backend),     AV_OPT_TYPE_STRING, { .str = "auto" }, 0, 0, FLAGS },
     { "shortest", "end when the shortest input ends",                OFFSET(shortest),    AV_OPT_TYPE_BOOL,   { .i64 = 0 },      0, 1, FLAGS },
     { NULL }

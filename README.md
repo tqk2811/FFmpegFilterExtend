@@ -6,6 +6,8 @@ Hiệu ứng video chạy bằng **shader trên GPU** cho FFmpeg, nạp từ **g
 - Shader **WGSL** hoặc **GLSL**, nhiều pass, nhiều input, texture đi kèm, tham số tự sinh.
 - Chạy trên **Vulkan, DirectX 12, Metal, OpenGL** (qua [wgpu](https://wgpu.rs)), Windows/Linux/macOS.
 - Tham số là literal hoặc biểu thức theo thời gian; đổi lúc chạy bằng `sendcmd`.
+- Nhiều hiệu ứng trong một filter (`effect='blur.zip|vignette.zip'`): frame lên GPU một lần,
+  chạy hết chuỗi rồi mới về RAM.
 - Gói khai báo **quy tắc input/output** (pixel format, kích thước, cùng kích thước giữa
   các input); stream không khớp thì báo lỗi rõ ràng thay vì chuyển đổi ngầm.
 - 31 hiệu ứng mẫu: chỉnh màu, đen trắng, sepia, sharpen, pixelate, chroma key,

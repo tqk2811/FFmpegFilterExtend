@@ -8,6 +8,7 @@ const MAX_LEAVES: u32 = 256u;
 const GRID: vec2u = vec2u(2u, 2u);      // atlas cells
 const SPEED_JITTER: f32 = 0.3;          // per-leaf fall speed in [1-j, 1+j] * speed
 const TAU: f32 = 6.2831853;
+const TICKS: f32 = 64.0;                // time steps per second of the slot clocks
 
 struct Leaf {
     pos: vec2f,      // centre
@@ -31,20 +32,39 @@ fn rnd(slot: u32, gen: u32, k: u32) -> f32 {
     return f32(hash_u(vec4u(u32(params.seed), slot, gen, k)) >> 8u) / 16777216.0;
 }
 
-fn make_leaf(i: u32, t: f32, aspect: f32) -> Leaf {
+// The time as whole ticks and the fraction of a tick, from the exact whole seconds and
+// fraction in globals: f32 seconds would make leaves stutter hours into a clip. The i32
+// tick count wraps after about 388 days, which shows as one jump of the leaves.
+struct Clock {
+    ticks: i32,
+    sub: f32,
+};
+
+fn clock() -> Clock {
+    let off_s = floor(params.offset);
+    let f = (globals.time_frac + params.offset - off_s) * TICKS;   // 0 .. 2 * TICKS
+    let fi = floor(f);
+    return Clock((globals.time_int + i32(off_s)) * i32(TICKS) + i32(fi), f - fi);
+}
+
+fn make_leaf(i: u32, now: Clock, aspect: f32) -> Leaf {
     var l: Leaf;
     l.alive = 0u;
     let speed = max(params.speed, 0.01);
     let margin = max(params.size.x, params.size.y) * 0.75; // half diagonal of the largest sprite
     let dist = 1.0 + 2.0 * margin;                  // above the top edge -> below the bottom
-    // The period is fixed per slot and long enough for the slowest leaf, so the
-    // generation is a pure function of t.
-    let period = dist / (speed * (1.0 - SPEED_JITTER));
-    let local = t + rnd(i, 0xffffffffu, 0u) * period;   // per-slot phase: full sky at t = 0
-    let g = floor(local / period);                     // negative before t = 0 too
-    let gen = bitcast<u32>(i32(g));
+    // The period is fixed per slot, a whole number of ticks long enough for the slowest
+    // leaf, so the generation is a pure function of the time, counted in integers.
+    let pt = i32(ceil(dist / (speed * (1.0 - SPEED_JITTER)) * TICKS));
+    let period = f32(pt) / TICKS;
+    // Per-slot phase: full sky at t = 0.
+    let local = now.ticks + i32(rnd(i, 0xffffffffu, 0u) * f32(pt));
+    var g = local / pt;                               // negative before t = 0 too
+    var r = local - g * pt;
+    if (r < 0) { r += pt; g -= 1; }
+    let gen = bitcast<u32>(g);
     let dur = dist / (speed * mix(1.0 - SPEED_JITTER, 1.0 + SPEED_JITTER, rnd(i, gen, 1u)));
-    let tau = local - g * period - rnd(i, gen, 2u) * (period - dur);
+    let tau = (f32(r) + now.sub) / TICKS - rnd(i, gen, 2u) * (period - dur);
     if (tau < 0.0 || tau > dur) { return l; }
 
     // Slot order is depth order: later slots are nearer, bigger and drawn on top.
@@ -115,12 +135,12 @@ fn sample_cell(cell: u32, uv: vec2f) -> vec4f {
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3u, @builtin(local_invocation_index) li: u32) {
     let aspect = globals.size.x / globals.size.y;
-    let t = globals.time + params.offset;
+    let now = clock();
     let n = min(u32(max(params.count, 0)), MAX_LEAVES);
     // The 64 threads of the workgroup build the leaves once, instead of every pixel
     // building all of them. The barrier needs uniform control flow, so the bounds check
     // comes after it.
-    for (var i = li; i < n; i += 64u) { leaves[i] = make_leaf(i, t, aspect); }
+    for (var i = li; i < n; i += 64u) { leaves[i] = make_leaf(i, now, aspect); }
     workgroupBarrier();
     if (!gpufx_in_bounds(id)) { return; }
 

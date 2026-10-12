@@ -9,7 +9,7 @@ pub mod runtime;
 
 pub use manifest::{Manifest, StreamInfo};
 pub use package::Package;
-pub use runtime::{Backend, Effect, GpuContext, Image, Program};
+pub use runtime::{Backend, Effect, EffectChain, FrameInfo, GpuContext, Image, ImageMut, Program};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

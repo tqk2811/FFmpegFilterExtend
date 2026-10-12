@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define GPUFX_API_VERSION 2
+#define GPUFX_API_VERSION 3
 
 typedef struct GpufxEffect GpufxEffect;
 
@@ -29,6 +29,21 @@ typedef struct GpufxImage {
     uint32_t height;
     uint32_t stride;
 } GpufxImage;
+
+/* Where the effect writes its RGBA8 result. stride is bytes per row, >= width * 4. */
+typedef struct GpufxOutput {
+    uint8_t *data;
+    uint32_t width;
+    uint32_t height;
+    uint32_t stride;
+} GpufxOutput;
+
+/* Per-frame values exposed to shaders as globals. */
+typedef struct GpufxFrameInfo {
+    double time;         /* seconds; globals.time, globals.time_int + globals.time_frac */
+    uint64_t frame;      /* frame index; globals.frame */
+    double pixel_aspect; /* sample aspect ratio (width / height of a pixel), 1 if unknown */
+} GpufxFrameInfo;
 
 /* Properties of one input stream, checked against the manifest rules. */
 typedef struct GpufxStreamInfo {
@@ -50,6 +65,19 @@ const char *gpufx_last_error(void);
  * backend: NULL or "auto", "vulkan", "dx12", "metal", "gl".
  */
 GpufxEffect *gpufx_effect_open(const char *path, const char *backend);
+
+/*
+ * Opens count packages as one chain: each effect takes the output of the one before it,
+ * and a frame is uploaded once, runs through every effect in one GPU submission and is
+ * read back once. Only the first effect may take more than one input. The functions
+ * below then describe the chain: the inputs of the first effect, the output formats of
+ * the last, and the parameters of all of them (see gpufx_effect_param_name()).
+ * Between two effects the rules are checked against the first output format of one that
+ * the next accepts, as two filters in a row would negotiate it, but frames stay RGBA on
+ * the GPU: nothing is converted to that format (no chroma subsampling, alpha kept).
+ * Fails when no format the previous effect outputs is accepted by the next.
+ */
+GpufxEffect *gpufx_effect_open_chain(const char *const *paths, uint32_t count, const char *backend);
 void gpufx_effect_free(GpufxEffect *fx);
 
 /* Strings below are owned by the effect and live as long as it does. */
@@ -77,8 +105,22 @@ const char *gpufx_effect_output_format(const GpufxEffect *fx, uint32_t index);
  */
 int gpufx_effect_check_inputs(const GpufxEffect *fx, const GpufxStreamInfo *streams, uint32_t count);
 
+/*
+ * Parameters. For one effect the names are those of the manifest. In a chain they are
+ * "label.name", where label is the package file name without ".zip", or "index.name"
+ * (0 based) when two packages share a label or the label is a number.
+ */
 uint32_t gpufx_effect_param_count(const GpufxEffect *fx);
 const char *gpufx_effect_param_name(const GpufxEffect *fx, uint32_t index);
+
+/*
+ * Index of a parameter for gpufx_effect_param_name(). Takes the full name, "label.name",
+ * "index.name", or a bare name that only one effect of the chain has. A prefix of
+ * digits is always an index. Returns a negative
+ * value and sets gpufx_last_error() when no parameter or several match.
+ * The functions below take the same names.
+ */
+int gpufx_effect_find_param(const GpufxEffect *fx, const char *name);
 
 /* Sets a parameter from text: "0.5", "1,0,0", "#ff8800", "true". */
 int gpufx_effect_set_param(GpufxEffect *fx, const char *name, const char *value);
@@ -87,13 +129,11 @@ int gpufx_effect_set_param_values(GpufxEffect *fx, const char *name,
                                   const double *values, uint32_t count);
 
 /*
- * Runs the effect. inputs holds one image per package input, in order. The output
- * has the size of inputs[0] and is written to out with row stride out_stride.
- * time is in seconds, frame is the frame index; both are exposed to shaders.
- * Fails when the input sizes break the manifest rules.
+ * Runs the effect. inputs holds one image per input, in order. out must have the size of
+ * inputs[0]. Fails when the input sizes break the manifest rules.
  */
 int gpufx_effect_process(GpufxEffect *fx, const GpufxImage *inputs, uint32_t nb_inputs,
-                         uint8_t *out, uint32_t out_stride, double time, uint64_t frame);
+                         const GpufxOutput *out, const GpufxFrameInfo *info);
 
 #ifdef __cplusplus
 }

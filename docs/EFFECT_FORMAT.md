@@ -117,7 +117,15 @@ không trùng nhau, không bắt đầu bằng `gpufx` và không dùng `globals
 Runtime chèn sẵn phần khai báo sau (ví dụ cho gói có input `src` và tham số `strength`):
 
 ```wgsl
-struct GpufxGlobals { size: vec2f, time: f32, frame: u32 };
+struct GpufxGlobals {
+    size: vec2f,          // kích thước output (px)
+    time: f32,            // thời gian (giây); f32 mất độ chính xác khi clip dài
+    frame: u32,           // số frame, đếm riêng mỗi filter (không bền khi seek)
+    time_int: i32,        // thời gian chính xác: time_int + time_frac giây,
+    time_frac: f32,       //   time_frac trong [0, 1), kể cả khi thời gian âm
+    pixel_aspect: f32,    // rộng / cao của một pixel (SAR), 1 với pixel vuông
+    gpufx_reserved: f32,
+};
 struct GpufxParams { strength: f32 };
 @group(0) @binding(0) var<uniform> globals: GpufxGlobals;
 @group(0) @binding(1) var<uniform> params: GpufxParams;
@@ -128,6 +136,10 @@ fn gpufx_in_bounds(id: vec3u) -> bool
 fn gpufx_uv(id: vec3u) -> vec2f          // tâm pixel, 0..1
 fn gpufx_write(id: vec3u, c: vec4f)      // kẹp 0..1 rồi ghi
 ```
+
+Chuyển động theo thời gian nên dựa vào `time_int` và `time_frac` nếu clip có thể dài: `time`
+là f32 nên sau một ngày chỉ còn bước khoảng 0,008 s. Xem `falling-*/shaders/leaves.wgsl`, đếm
+thời gian theo tick số nguyên.
 
 Shader của bạn chỉ cần:
 

@@ -96,7 +96,7 @@ Mỗi pass là một **compute shader**. Trước mã của tác giả, runtime 
 
 | Binding | Tên trong shader | Ý nghĩa |
 |---------|------------------|---------|
-| 0 | `globals.size`, `globals.time`, `globals.frame` | Kích thước output (px), thời gian (giây), số frame |
+| 0 | `globals.size`, `globals.time`, `globals.frame`, `globals.time_int`, `globals.time_frac`, `globals.pixel_aspect` | Kích thước output (px), thời gian (giây, f32), số frame, thời gian chính xác (giây nguyên + phần lẻ), tỉ lệ cạnh của pixel (SAR) |
 | 1 | `params.<tên>` | Tham số từ manifest |
 | 2 | `out_tex` | Texture ghi kết quả (`rgba8unorm`) |
 | 3 | `smp` | Sampler tuyến tính, clamp |
@@ -125,10 +125,19 @@ tạo graph thay vì chạy sai.
 ## 5. Filter FFmpeg `gpufx`
 
 ```
-gpufx=effect=<zip|thư mục>[:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)'][:backend=auto|vulkan|dx12|metal|gl][:shortest=0|1]
+gpufx=effect=<zip|thư mục>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)'][:backend=auto|vulkan|dx12|metal|gl][:shortest=0|1]
 ```
 
 - **effect**: đường dẫn gói. Số input của filter lấy từ manifest.
+- **Chuỗi hiệu ứng** `effect='a.zip|b.zip|c.zip'`: chạy lần lượt như ba filter nối nhau, nhưng
+  frame chỉ upload một lần, mọi pass nằm trong một lần submit GPU và chỉ readback một lần.
+  Input của filter là input của hiệu ứng đầu; chỉ hiệu ứng đầu được có nhiều input. Output
+  theo quy tắc của hiệu ứng cuối. Quy tắc của hiệu ứng sau được kiểm như khi nối filter:
+  format là format đầu tiên trong `output.formats` của hiệu ứng trước mà hiệu ứng sau nhận,
+  kích thước là kích thước input đầu. Frame vẫn là RGBA trên GPU, không chuyển sang format đó.
+  Tham số đặt theo `gói.tên` (tên file bỏ `.zip`, ví dụ `vignette.strength`), `chỉ_số.tên`
+  (đếm từ 0, bắt buộc khi hai gói trùng tên hoặc tên gói là số), hoặc tên trơn nếu chỉ một
+  hiệu ứng có nó. Dấu cách quanh `|` được bỏ qua.
 - **params**: `tên=giá trị` cách nhau bởi `|`. Giá trị là literal (`0.5`, `1,0,0`, `#ff8800`)
   hoặc **biểu thức FFmpeg** theo `t`, `n`, `w`, `h`, `a` (`w/h`), `sar`, `dar` (`a*sar`),
   tính lại mỗi frame. Đây là cách làm keyframe/transition không cần tool ngoài.
@@ -158,8 +167,11 @@ ffmpeg -i in.mp4 -vf "gpufx=effect=vignette.zip:params='strength=clip(t/2\,0\,1)
 ffmpeg -i a.mp4 -i b.mp4 -filter_complex \
   "[0][1]gpufx=effect=wipe-transition.zip:params='progress=clip((t-1)/1.5\,0\,1)|angle=45'" out.mp4
 
-# xâu chuỗi nhiều hiệu ứng
+# xâu chuỗi nhiều hiệu ứng: hai filter, mỗi filter một lần upload/readback
 ffmpeg -i in.mp4 -vf "gpufx=effect=gaussian-blur.zip,gpufx=effect=gradient-map.zip:params='intensity=0.6'" out.mp4
+
+# cùng kết quả trong một filter: upload và readback một lần
+ffmpeg -i in.mp4 -vf "gpufx=effect='gaussian-blur.zip|gradient-map.zip':params='gradient-map.intensity=0.6'" out.mp4
 ```
 
 ## 6. Đường đi của frame và hiệu năng

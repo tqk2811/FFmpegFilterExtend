@@ -320,9 +320,10 @@ Không phải gap: tỉ lệ khung (`globals.size`), kích thước texture (`te
 
 ## 10. Liên quan tới A2 (chuỗi hiệu ứng) và YUV trên GPU
 
-- **A2, nhiều effect trong một lần upload/readback:** sprite là một pass 1 input bình thường
-  và stateless, nên nối chuỗi không đổi gì về logic. Khi gộp nhiều gói vào một graph GPU, tên
-  texture của từng gói phải có namespace riêng. Texture array và mip thuộc `Program` của từng
+- **A2, nhiều effect trong một lần upload/readback (đã làm, `effect='a.zip|b.zip'`):** sprite
+  là một pass 1 input bình thường và stateless, nên nối chuỗi không đổi gì về logic. Mỗi gói
+  giữ bind group riêng nên tên texture không đụng nhau. Hai gói lá dùng
+  `globals.time_int`/`time_frac` (tick số nguyên) thay cho `globals.time`. Texture array và mip thuộc `Program` của từng
   gói, dùng chung giữa các `Effect` như hiện nay. Loại binding (`D2`/`D2Array`) lấy theo từng
   pass, không giả định chung. `var<workgroup>` gói gọn trong từng pass.
 - **YUV trên GPU, `rgba16float` (P1/B-chung):** shader ghi qua `gpufx_write`, nên đổi format

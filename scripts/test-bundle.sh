@@ -144,6 +144,26 @@ if [ -n "$ONCE_MD5" ] && [ "$SHARED_MD5" = "$ONCE_MD5" ]; then
 else
     fail "same package twice keeps parameters per filter"; cat "$CLIPS/last.log"
 fi
+echo "chains in one filter:"
+# effect='a|b' runs both on the GPU in one go: same pixels as two filters in a row.
+CHAIN_MD5=$(md5 "gpufx=effect='$FX/invert.zip|$FX/invert.zip'")
+if [ -n "$SRC_MD5" ] && [ "$CHAIN_MD5" = "$SRC_MD5" ]; then pass "invert|invert restores the frame"
+else fail "invert|invert restores the frame"; cat "$CLIPS/last.log"; fi
+TWO_MD5=$(md5 "gpufx=effect=$FX/grayscale.zip,gpufx=effect=$FX/vignette.zip:params='strength=0.8'")
+ONE_MD5=$(md5 "gpufx=effect='$FX/grayscale.zip|$FX/vignette.zip':params='vignette.strength=0.8'")
+if [ -n "$TWO_MD5" ] && [ "$ONE_MD5" = "$TWO_MD5" ]; then pass "grayscale|vignette equals two filters"
+else fail "grayscale|vignette equals two filters"; cat "$CLIPS/last.log"; fi
+# Parameters by index (spaces around | allowed), and expressions on qualified names.
+IDX_MD5=$(md5 "gpufx=effect='$FX/invert.zip | $FX/invert.zip':params='1.amount=0'")
+EXPR_MD5=$(md5 "gpufx=effect='$FX/invert.zip|$FX/invert.zip':params='1.amount=0*t'")
+if [ -n "$ONCE_MD5" ] && [ "$IDX_MD5" = "$ONCE_MD5" ] && [ "$EXPR_MD5" = "$ONCE_MD5" ]; then pass "index.param and expressions"
+else fail "index.param and expressions"; cat "$CLIPS/last.log"; fi
+# shellcheck disable=SC2086
+rejects "ambiguous parameter" "0.amount, 1.amount" -i "$A" -an -vf "gpufx=effect='$FX/invert.zip|$FX/invert.zip':params='amount=0'" $NULL
+# shellcheck disable=SC2086
+rejects "only the first effect takes two inputs" "takes 2 inputs" -i "$A" -an -vf "gpufx=effect='$FX/invert.zip|$FX/crossfade.zip'" $NULL
+# shellcheck disable=SC2086
+ok "a transition first in a chain" -i "$A" -i "$B" -filter_complex "[0][1]gpufx=effect='$FX/crossfade.zip|$FX/invert.zip'" -an $NULL
 
 echo "frame rate:"
 # The first input sets the output frame rate: a 25 fps clip mixed with a 60 fps clip must
