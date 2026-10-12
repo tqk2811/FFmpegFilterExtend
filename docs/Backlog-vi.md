@@ -35,3 +35,26 @@
 - **Vị trí**: [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c), [crates/gpufx-core/src/manifest.rs](../crates/gpufx-core/src/manifest.rs), [crates/gpufx-ffi/src/lib.rs](../crates/gpufx-ffi/src/lib.rs), `examples/effects/*`.
 - **Vì sao**: phần negotiate format và chuyển đổi swscale trong `vf_gpufx.c` là logic phức tạp, nên có một lượt review riêng.
 - **Ngày ghi**: 2026-10-12
+
+### Chưa có test cho việc bỏ side data; gray limited range; độ chính xác alpha float
+- **Vấn đề**:
+  - `vf_gpufx.c` bỏ side data phụ thuộc màu (mastering display, content light level, ICC…), motion vector và video enc params, nhưng chưa có clip nào mang side data để test. Với input PQ, output vẫn là PQ nhưng mất HDR10 static metadata (đã có cảnh báo HDR).
+  - swscale luôn coi gray là full range (FIXME trong `libswscale/format.c`), nên gray limited range bị chuyển sai.
+  - Input premultiplied dạng float (EXR `gbrapf32`) bị hạ về 8 bit trước khi bỏ premultiply, nên điểm ảnh alpha thấp mất độ chính xác màu.
+- **Vị trí**: [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`process_frame`, `input_image`, `unpremultiply`).
+- **Vì sao**: sẽ xử lý cùng pipeline trên GPU (YUV/float trên GPU, `rgba16float`) ở bước B-chung của kế hoạch.
+- **Ngày ghi**: 2026-10-12
+
+### Cache gói: khoá toàn cục khi nạp, không phát hiện file đổi
+- **Vấn đề**:
+  - Cache gói trong `gpufx-ffi` giữ một khoá suốt lúc đọc và biên dịch gói, nên hai thread mở hai gói *khác nhau* cùng lúc phải chờ nhau. FFmpeg gọi `init` trên một thread nên chưa ảnh hưởng; app nhiều thread thì chậm hơn.
+  - Theo yêu cầu, cache không kiểm tra file đổi (mtime/kích thước). Nếu sau này làm hot-reload (M1) thì cần thêm mtime vào khoá.
+- **Vị trí**: [crates/gpufx-ffi/src/lib.rs](../crates/gpufx-ffi/src/lib.rs) (`program`).
+- **Vì sao**: chưa cần cho FFmpeg; đổi sang khoá theo từng gói khi có app dùng nhiều thread.
+- **Ngày ghi**: 2026-10-12
+
+### Ảnh PNG trong gói không bị giới hạn kích thước
+- **Vấn đề**: PNG trong `textures` không được kiểm tra kích thước khi nạp. Ảnh lớn hơn giới hạn của device (thường 8192) gây wgpu uncaptured error, mặc định là panic và có thể làm sập process FFmpeg. Cũng không có giới hạn kích thước sau khi giải nén, nên một PNG nhỏ có thể giải ra ảnh rất lớn.
+- **Vị trí**: [crates/gpufx-core/src/runtime.rs](../crates/gpufx-core/src/runtime.rs) (`Program::new`).
+- **Vì sao**: phát hiện khi nghiên cứu kế hoạch sprite ([Plan-sprites-vi.md](Plan-sprites-vi.md), G4); sẽ sửa ở bước 2 của kế hoạch đó.
+- **Ngày ghi**: 2026-10-12

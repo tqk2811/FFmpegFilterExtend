@@ -132,36 +132,22 @@ struct Targets {
     padded_row: u32,
 }
 
-/// A loaded, compiled effect ready to process frames.
-pub struct Effect {
+/// The immutable, compiled part of an effect: package, pipelines, textures and sampler.
+/// One program can back many [`Effect`]s on the same device, so a package used by
+/// several filters is read and compiled once.
+pub struct Program {
     ctx: Arc<GpuContext>,
     package: Package,
-    params: ParamBlock,
     passes: Vec<Pass>,
-    globals: wgpu::Buffer,
-    params_buf: wgpu::Buffer,
     sampler: wgpu::Sampler,
     textures: HashMap<String, wgpu::Texture>,
-    targets: Option<Targets>,
 }
 
-impl Effect {
-    pub fn new(ctx: Arc<GpuContext>, package: Package) -> Result<Self, Error> {
+impl Program {
+    pub fn new(ctx: Arc<GpuContext>, package: Package) -> Result<Arc<Self>, Error> {
+        // Only the layout of the block matters for compiling; values live in each Effect.
         let params = ParamBlock::new(&package.manifest.params)?;
         let device = &ctx.device;
-
-        let globals = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("gpufx globals"),
-            size: 16,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("gpufx params"),
-            size: params.size() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("gpufx sampler"),
             mag_filter: wgpu::FilterMode::Linear,
@@ -191,12 +177,58 @@ impl Effect {
         for (i, def) in package.manifest.passes.iter().enumerate() {
             passes.push(compile_pass(&ctx, &package, &params, i, def)?);
         }
+        Ok(Arc::new(Program { ctx, package, passes, sampler, textures }))
+    }
 
-        Ok(Effect { ctx, package, params, passes, globals, params_buf, sampler, textures, targets: None })
+    pub fn context(&self) -> &Arc<GpuContext> {
+        &self.ctx
     }
 
     pub fn package(&self) -> &Package {
         &self.package
+    }
+}
+
+/// An instance of a [`Program`] with its own parameter values and frame buffers.
+pub struct Effect {
+    program: Arc<Program>,
+    params: ParamBlock,
+    globals: wgpu::Buffer,
+    params_buf: wgpu::Buffer,
+    targets: Option<Targets>,
+}
+
+impl Effect {
+    /// Loads and compiles `package` for this effect alone.
+    pub fn new(ctx: Arc<GpuContext>, package: Package) -> Result<Self, Error> {
+        Self::from_program(Program::new(ctx, package)?)
+    }
+
+    /// Creates an effect that shares the compiled `program` with other effects.
+    pub fn from_program(program: Arc<Program>) -> Result<Self, Error> {
+        let params = ParamBlock::new(&program.package.manifest.params)?;
+        let device = &program.ctx.device;
+        let globals = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gpufx globals"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let params_buf = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gpufx params"),
+            size: params.size() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Ok(Effect { program, params, globals, params_buf, targets: None })
+    }
+
+    pub fn program(&self) -> &Arc<Program> {
+        &self.program
+    }
+
+    pub fn package(&self) -> &Package {
+        &self.program.package
     }
 
     pub fn params(&self) -> &ParamBlock {
@@ -208,7 +240,7 @@ impl Effect {
     }
 
     pub fn input_count(&self) -> usize {
-        self.package.manifest.inputs.len()
+        self.program.package.manifest.inputs.len()
     }
 
     /// Runs every pass on `inputs` (one per manifest input) and writes the RGBA result,
@@ -228,11 +260,11 @@ impl Effect {
         if self.targets.as_ref().is_none_or(|t| t.sizes != sizes) {
             // Size rules of the manifest; pixel formats are the caller's to check.
             let streams: Vec<StreamInfo> = sizes.iter().map(|&(width, height)| StreamInfo { format: None, width, height }).collect();
-            self.package.manifest.check_inputs(&streams)?;
+            self.program.package.manifest.check_inputs(&streams)?;
             self.targets = Some(self.create_targets(sizes));
         }
         let targets = self.targets.as_ref().expect("just created");
-        let (device, queue) = (&self.ctx.device, &self.ctx.queue);
+        let (device, queue) = (&self.program.ctx.device, &self.program.ctx.queue);
 
         for (tex, img) in targets.inputs.iter().zip(inputs) {
             upload(queue, tex, img);
@@ -248,13 +280,13 @@ impl Effect {
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gpufx") });
         {
             let mut cpass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("gpufx"), timestamp_writes: None });
-            for (pass, bg) in self.passes.iter().zip(&targets.bind_groups) {
+            for (pass, bg) in self.program.passes.iter().zip(&targets.bind_groups) {
                 cpass.set_pipeline(&pass.pipeline);
                 cpass.set_bind_group(0, bg, &[]);
                 cpass.dispatch_workgroups(w.div_ceil(WORKGROUP), h.div_ceil(WORKGROUP), 1);
             }
         }
-        let final_tex = &targets.outputs[&self.passes.last().expect("validated").output];
+        let final_tex = &targets.outputs[&self.program.passes.last().expect("validated").output];
         enc.copy_texture_to_buffer(
             final_tex.as_image_copy(),
             wgpu::TexelCopyBufferInfo {
@@ -285,9 +317,10 @@ impl Effect {
     }
 
     fn create_targets(&self, sizes: Vec<(u32, u32)>) -> Targets {
-        let device = &self.ctx.device;
+        let program = &self.program;
+        let device = &program.ctx.device;
         let (w, h) = sizes[0];
-        let inputs: Vec<wgpu::Texture> = self
+        let inputs: Vec<wgpu::Texture> = program
             .package
             .manifest
             .inputs
@@ -298,7 +331,7 @@ impl Effect {
             })
             .collect();
         let mut outputs = HashMap::new();
-        for pass in &self.passes {
+        for pass in &program.passes {
             outputs.entry(pass.output.clone()).or_insert_with(|| {
                 create_texture(
                     device,
@@ -311,15 +344,15 @@ impl Effect {
         }
 
         let lookup = |name: &str| -> &wgpu::Texture {
-            if let Some(i) = self.package.manifest.inputs.iter().position(|d| d.name == name) {
+            if let Some(i) = program.package.manifest.inputs.iter().position(|d| d.name == name) {
                 &inputs[i]
-            } else if let Some(t) = self.textures.get(name) {
+            } else if let Some(t) = program.textures.get(name) {
                 t
             } else {
                 &outputs[name]
             }
         };
-        let bind_groups = self
+        let bind_groups = program
             .passes
             .iter()
             .map(|pass| {
@@ -329,7 +362,7 @@ impl Effect {
                     wgpu::BindGroupEntry { binding: 0, resource: self.globals.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: self.params_buf.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&out_view) },
-                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&self.sampler) },
+                    wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::Sampler(&program.sampler) },
                 ];
                 for (i, v) in views.iter().enumerate() {
                     entries.push(wgpu::BindGroupEntry {

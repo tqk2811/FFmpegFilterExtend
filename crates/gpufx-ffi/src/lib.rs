@@ -10,10 +10,12 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::path::PathBuf;
 use std::ptr;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
-use gpufx_core::{Backend, Effect, GpuContext, Image, Package, StreamInfo};
+use gpufx_core::{Backend, Effect, GpuContext, Image, Package, Program, StreamInfo};
 
 /// Bumped when the C ABI changes incompatibly. Must match `GPUFX_API_VERSION` in gpufx.h.
 const API_VERSION: u32 = 2;
@@ -60,6 +62,34 @@ fn context(backend: Backend) -> Result<Arc<GpuContext>, gpufx_core::Error> {
     let ctx = GpuContext::new(backend)?;
     cache.insert(key, Arc::downgrade(&ctx));
     Ok(ctx)
+}
+
+/// Packages read and compiled so far; lets tests check that the cache works.
+static PROGRAM_LOADS: AtomicUsize = AtomicUsize::new(0);
+
+type ProgramCache = Mutex<Vec<(PathBuf, Weak<Program>)>>;
+
+/// Compiled packages are shared by every effect opened from the same file on the same
+/// device, for as long as one of them is alive. The file is read once: changes made to
+/// it while an effect using it is open are not picked up.
+fn program(path: &str, ctx: Arc<GpuContext>) -> Result<Arc<Program>, String> {
+    static CACHE: OnceLock<ProgramCache> = OnceLock::new();
+    // canonicalize fails on some Windows volumes (RAM disks, virtual drives) that open
+    // fine; the key is then only as good as the absolute path.
+    let canonical = std::fs::canonicalize(path).or_else(|_| std::path::absolute(path)).map_err(|e| format!("{path}: {e}"))?;
+    // Held while loading so two filters opening the same package load it only once.
+    let mut cache = CACHE.get_or_init(Default::default).lock().unwrap_or_else(|p| p.into_inner());
+    cache.retain(|(_, weak)| weak.strong_count() > 0);
+    let hit =
+        cache.iter().filter(|(p, _)| *p == canonical).filter_map(|(_, weak)| weak.upgrade()).find(|prog| Arc::ptr_eq(prog.context(), &ctx));
+    if let Some(prog) = hit {
+        return Ok(prog);
+    }
+    let package = Package::open(&canonical).map_err(|e| format!("{path}: {e}"))?;
+    let prog = Program::new(ctx, package).map_err(|e| format!("{path}: {e}"))?;
+    PROGRAM_LOADS.fetch_add(1, Ordering::Relaxed);
+    cache.push((canonical, Arc::downgrade(&prog)));
+    Ok(prog)
 }
 
 pub struct GpufxEffect {
@@ -110,10 +140,9 @@ pub unsafe extern "C" fn gpufx_effect_open(path: *const c_char, backend: *const 
         } else {
             str_arg(backend, "backend")?.parse().map_err(|e: gpufx_core::Error| e.to_string())?
         };
-        let package = Package::open(path).map_err(|e| format!("{path}: {e}"))?;
         let ctx = context(backend).map_err(|e| e.to_string())?;
         let device = cstring(&ctx.description());
-        let effect = Effect::new(ctx, package).map_err(|e| format!("{path}: {e}"))?;
+        let effect = Effect::from_program(program(path, ctx)?).map_err(|e| format!("{path}: {e}"))?;
         let m = &effect.package().manifest;
         let out = GpufxEffect {
             name: cstring(&m.name),
@@ -262,4 +291,57 @@ pub unsafe extern "C" fn gpufx_effect_process(
         fx.effect.process(&images, out, out_stride, time, frame).map_err(|e| e.to_string())?;
         Ok(0)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn open(path: &std::path::Path) -> *mut GpufxEffect {
+        let path = CString::new(path.to_str().unwrap()).unwrap();
+        unsafe { gpufx_effect_open(path.as_ptr(), ptr::null()) }
+    }
+
+    // Counts loads in a process-wide counter: other tests in this crate that open effects
+    // would make the exact counts below racy, so keep them in this test.
+    #[test]
+    fn a_package_is_loaded_once_while_it_is_in_use() {
+        if GpuContext::new(Backend::Auto).is_err() {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        }
+        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects");
+        let invert = examples.join("invert");
+        // The same package through another spelling of its path.
+        let invert_again = examples.join("../effects/./invert");
+        let loads = || PROGRAM_LOADS.load(Ordering::Relaxed);
+
+        let start = loads();
+        let a = open(&invert);
+        assert!(!a.is_null(), "{:?}", unsafe { CStr::from_ptr(gpufx_last_error()) });
+        let b = open(&invert_again);
+        assert!(!b.is_null());
+        assert_eq!(loads(), start + 1, "second open must reuse the compiled package");
+
+        // Parameters stay per effect.
+        let (name, value) = (CString::new("amount").unwrap(), CString::new("0.25").unwrap());
+        assert_eq!(unsafe { gpufx_effect_set_param(a, name.as_ptr(), value.as_ptr()) }, 0);
+        let (pa, pb) = unsafe { ((*a).effect.params().bytes(), (*b).effect.params().bytes()) };
+        assert_ne!(pa, pb);
+
+        let other = open(&examples.join("vignette"));
+        assert!(!other.is_null());
+        assert_eq!(loads(), start + 2);
+
+        unsafe {
+            gpufx_effect_free(a);
+            gpufx_effect_free(b);
+            gpufx_effect_free(other);
+        }
+        // Nothing holds the package any more, so it is read again.
+        let c = open(&invert);
+        assert!(!c.is_null());
+        assert_eq!(loads(), start + 3);
+        unsafe { gpufx_effect_free(c) };
+    }
 }

@@ -39,6 +39,37 @@ fn every_example_compiles_and_runs() {
 }
 
 #[test]
+fn transitions_start_on_the_first_clip_and_end_on_the_second() {
+    let Some(ctx) = gpu() else { return };
+    let (w, h) = (67, 41);
+    let first = gradient(w, h);
+    let second: Vec<u8> = first.chunks(4).flat_map(|p| [255 - p[0], p[2], 255 - p[1], 255]).collect();
+    let inputs = [Image { data: &first, width: w, height: h, stride: w * 4 }, Image { data: &second, width: w, height: h, stride: w * 4 }];
+    let mut checked = 0;
+    for entry in std::fs::read_dir(examples()).unwrap() {
+        let dir = entry.unwrap().path();
+        let mut fx = Effect::new(ctx.clone(), Package::open(&dir).unwrap()).unwrap();
+        // Transitions: two inputs and a `progress` parameter.
+        if fx.input_count() != 2 || fx.params_mut().set_str("progress", "0").is_err() {
+            continue;
+        }
+        for (progress, want) in [("0", &first), ("1", &second)] {
+            fx.params_mut().set_str("progress", progress).unwrap();
+            let mut out = vec![0u8; (w * h * 4) as usize];
+            fx.process(&inputs, &mut out, w * 4, 0.0, 0).unwrap();
+            assert!(
+                &out == want,
+                "{} at progress {progress} is not the {} clip",
+                dir.display(),
+                if progress == "0" { "first" } else { "second" }
+            );
+        }
+        checked += 1;
+    }
+    assert!(checked >= 13, "only {checked} transitions found");
+}
+
+#[test]
 fn zero_strength_vignette_is_identity() {
     let Some(ctx) = gpu() else { return };
     let mut fx = Effect::new(ctx, Package::open(examples().join("vignette")).unwrap()).unwrap();

@@ -130,13 +130,23 @@ gpufx=effect=<zip|thư mục>[:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)'][:backen
 
 - **effect**: đường dẫn gói. Số input của filter lấy từ manifest.
 - **params**: `tên=giá trị` cách nhau bởi `|`. Giá trị là literal (`0.5`, `1,0,0`, `#ff8800`)
-  hoặc **biểu thức FFmpeg** theo `t`, `n`, `w`, `h`, tính lại mỗi frame. Đây là cách làm
-  keyframe/transition không cần tool ngoài.
+  hoặc **biểu thức FFmpeg** theo `t`, `n`, `w`, `h`, `a` (`w/h`), `sar`, `dar` (`a*sar`),
+  tính lại mỗi frame. Đây là cách làm keyframe/transition không cần tool ngoài.
 - **sendcmd / zmq**: lệnh `params` đổi giá trị lúc chạy, ví dụ
   `sendcmd=c='2.0 gpufx@fx params strength=0.2'`.
 - **timeline** (`enable='between(t,1,3)'`) được hỗ trợ.
-- Nhiều input dùng `framesync`: input đầu quyết định độ dài, các input khác giữ frame cuối
-  (hoặc `shortest=1`).
+- Nhiều input dùng `framesync`: input đầu quyết định độ dài và frame rate (input khác lệch
+  fps thì frame của nó được lặp hoặc bỏ). Input khác chưa bắt đầu thì là ảnh trong suốt; đã
+  hết thì giữ frame cuối (hoặc `shortest=1`).
+- Output nhận kích thước, SAR, frame rate của input đầu; colorspace/range/alpha là giá trị
+  đã negotiate của link output. Side data phụ thuộc màu (HDR metadata, film grain...), motion
+  vector và video enc params bị bỏ vì pixel đã khác.
+- Kích thước hay pixel format của input đổi giữa chừng thì báo lỗi (`ffmpeg` tự dựng lại
+  graph nên chỉ gặp khi dùng libavfilter trực tiếp).
+- Cảnh báo (không chặn): SAR các input khác nhau, input trên 8 bit (pipeline 8-bit RGBA),
+  input HDR PQ/HLG (shader coi như SDR), input interlaced (shader thấy hai field là một
+  frame). Shader làm việc với alpha thường (straight): filter tự bỏ premultiply của input
+  (EXR, JPEG XL…) và premultiply lại khi output cần.
 
 Ví dụ:
 
@@ -159,6 +169,13 @@ RAM. Input không khai báo `formats` thì FFmpeg tự chèn `scale`/`format` đ
 input có `formats` (và output khác RGBA) thì filter nhận nguyên frame, kiểm tra theo quy tắc
 của manifest rồi tự chuyển bằng `swscale`. Các filter `gpufx` trong cùng
 process dùng chung một GPU device.
+
+Gói đã nạp cũng được dùng chung. Mỗi gói (khoá theo đường dẫn tuyệt đối và GPU device) chỉ
+được đọc và biên dịch một lần trong process: `Program` gồm manifest, pipeline, texture PNG,
+sampler. Mỗi filter giữ một `Effect` riêng gồm giá trị tham số, uniform buffer và texture
+frame. Khi không còn filter nào dùng gói thì `Program` được giải phóng, lần mở sau đọc lại
+file. Sửa file zip khi vẫn còn filter dùng gói đó thì không có tác dụng, kể cả với filter
+mở gói sau khi sửa.
 
 Chi phí chính là upload/readback và chuyển màu trên CPU. Lộ trình bỏ dần:
 
@@ -191,7 +208,7 @@ crates/gpufx-cli    lệnh `gpufx`: info, check, pack, run (test hiệu ứng kh
 ffmpeg/             vf_gpufx.c và integrate.sh (thêm filter vào cây nguồn FFmpeg)
 external/FFmpeg     submodule FFmpeg, ghim n9.0-2-g03d9533176 (release/9.0) = commit của bản build sẵn
 docker/, build.sh   build FFmpeg + gpufx một lệnh trong Docker (linux64, win64)
-examples/effects    20 hiệu ứng: chỉnh màu, blur, sharpen, chroma key, overlay, chuyển cảnh...
+examples/effects    29 hiệu ứng: chỉnh màu, blur, sharpen, chroma key, overlay, chuyển cảnh...
 scripts/            build-prebuilt.sh (chỉ build libavfilter, thay vào FFmpeg build sẵn),
                     test-bundle.sh (chạy hiệu ứng qua ffmpeg của gói),
                     install-libgpufx.sh (build + cài .pc cho pkg-config),

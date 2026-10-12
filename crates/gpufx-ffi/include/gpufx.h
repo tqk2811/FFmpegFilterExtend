@@ -44,6 +44,8 @@ const char *gpufx_last_error(void);
 
 /*
  * Opens a package (.zip file or unpacked directory) and compiles its shaders.
+ * Effects opened from the same path with the same backend share the compiled package
+ * while any of them is open: the file is read again only after all of them are freed.
  * backend: NULL or "auto", "vulkan", "dx12", "metal", "gl".
  */
 GpufxEffect *gpufx_effect_open(const char *path, const char *backend);

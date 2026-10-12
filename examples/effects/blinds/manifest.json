@@ -1,0 +1,55 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.blinds",
+  "name": "Blinds",
+  "version": "1.0.0",
+  "description": "Venetian blinds: stripes of the second clip widen until they cover the first. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    },
+    {
+      "name": "count",
+      "type": "int",
+      "default": 10,
+      "min": 1,
+      "max": 200,
+      "description": "Number of stripes"
+    },
+    {
+      "name": "vertical",
+      "type": "bool",
+      "default": false,
+      "description": "Vertical stripes instead of horizontal"
+    },
+    {
+      "name": "softness",
+      "type": "float",
+      "default": 0.05,
+      "min": 0,
+      "max": 0.5,
+      "description": "Edge width, relative to a stripe"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/blinds.wgsl"
+    }
+  ]
+}
