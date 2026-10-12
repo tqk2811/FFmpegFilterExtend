@@ -128,7 +128,10 @@ jobs:
           path: build/test-clips
       - name: Run effects in ffmpeg.exe
         shell: bash
-        # WARP must run the D3D12 and D3D11 frame tests, not skip them.
+        # The D3D12/D3D11 frame tests run only where FFmpeg can create a d3d12va/d3d11va
+        # device (e.g. a GPU runner); on hosted WARP-only runners they are skipped with a warning
+        # and the job passes without D3D coverage. REQUIRE_D3D=1 fails
+        # when a device exists but gpufx rejects or skips it.
         run: REQUIRE_D3D=1 scripts/test-bundle.sh dist/win64 build/test-clips
 
   release:

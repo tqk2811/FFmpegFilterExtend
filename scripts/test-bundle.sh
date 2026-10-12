@@ -395,22 +395,37 @@ dx_md5() {
         -vf "format=$f,hwupload,$1,hwdownload,format=$f" -pix_fmt "$f" -f framemd5 - \
         2> "$CLIPS/last.log" | grep -v '^#' | awk -F, '{print $NF}'
 }
-# REQUIRE_D3D=1 (the Windows CI job): a skipped API is a failure.
+# REQUIRE_D3D=1 (the Windows CI job): a skipped API is a failure, unless FFmpeg itself
+# cannot create the device on any adapter (hosted runners: WARP only, d3d12va -22,
+# d3d11va DXGI_ERROR_UNSUPPORTED), since gpufx is never reached then.
 dx_ran= dx_skipped=
 dx_skip() {
-    echo "  skip  $1"; dx_skipped="$dx_skipped $API"
-    if [ "${REQUIRE_D3D:-0}" = 1 ]; then fail "REQUIRE_D3D=1: $API frames were not tested"; fi
+    echo "  skip  $1"
+    if [ "${2:-}" = nodevice ]; then
+        dx_skipped="$dx_skipped $API(no device)"
+        if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::warning::D3D12/D3D11 frames not tested: $1"; fi
+    else
+        dx_skipped="$dx_skipped $API"
+        if [ "${REQUIRE_D3D:-0}" = 1 ]; then fail "REQUIRE_D3D=1: $API frames were not tested"; fi
+    fi
 }
+dx_hwdevs=$("$FF" -hide_banner -init_hw_device list 2>&1)
 for api in d3d12va d3d11va; do
     API=$(echo "$api" | sed 's/va$//' | tr a-z A-Z)
     if ! grep -qw hwupload "$CLIPS/filters.txt"; then dx_skip "$API: this bundle has no hwupload"; continue; fi
-    DXDEV= why=
+    if ! echo "$dx_hwdevs" | grep -qx "$api"; then dx_skip "$API: this ffmpeg has no $api hwdevice"; continue; fi
+    DXDEV= why= dx_dev=
     for n in 0 1 2 3; do
         if ! "$FF" -hide_banner -nostdin -v error -init_hw_device "$api=dx:$n" -filter_hw_device dx -i "$A" -frames:v 1 -an \
             -vf "format=nv12,hwupload,hwdownload,format=nv12" -f null - > "$CLIPS/last.log" 2>&1; then
-            [ -n "$why" ] || why="no $API device ($(head -n1 "$CLIPS/last.log"))"
+            # Only a failed device creation means "no device here"; anything else is a bug.
+            if ! grep -qi "Device creation failed\|Failed to create Direct3D device\|-22\|887a0004" "$CLIPS/last.log"; then
+                fail "$API: hwupload/hwdownload probe on adapter $n"; cat "$CLIPS/last.log"; dx_dev=1 why=; break
+            fi
+            [ -n "$why" ] || why="$(head -n1 "$CLIPS/last.log")"
             continue
         fi
+        dx_dev=1
         if "$FF" -hide_banner -nostdin -v error -init_hw_device "$api=dx:$n" -filter_hw_device dx -i "$A" -frames:v 1 -an \
             -vf "format=nv12,hwupload,gpufx=effect=$FX/invert.zip,hwdownload,format=nv12" -f null - > "$CLIPS/last.log" 2>&1; then
             DXDEV="$api=dx:$n"; break
@@ -422,7 +437,11 @@ for api in d3d12va d3d11va; do
             "$CLIPS/last.log" || { fail "$API: gpufx takes $API frames"; cat "$CLIPS/last.log"; why=; break; }
     done
     if [ -z "$DXDEV" ]; then
-        [ -n "$why" ] && dx_skip "$API: $why"
+        if [ -z "$dx_dev" ]; then
+            dx_skip "$API: FFmpeg cannot create a $api device on this machine ($why)" nodevice
+        elif [ -n "$why" ]; then
+            dx_skip "$API: $why"
+        fi
         continue
     fi
     echo "  ($API on ${DXDEV#*=})"; dx_ran="$dx_ran $API"
