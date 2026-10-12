@@ -32,10 +32,44 @@ scripts/pack-effects.sh                    # chỉ đóng gói hiệu ứng: exa
 Thêm hoặc sửa hiệu ứng **không cần build lại FFmpeg**: chạy `scripts/pack-effects.sh`
 (Windows: `scripts\pack-effects.ps1`) rồi dùng file `.zip` mới.
 
-### Build FFmpeg kèm gpufx bằng một lệnh (Docker)
+### Build nhanh trên bản FFmpeg build sẵn (khuyên dùng)
 
-FFmpeg nằm trong submodule `external/FFmpeg` (nhánh master, đang là 9.1-dev; sẽ trỏ sang
-tag `n9.1` khi FFmpeg phát hành). Script build trong Docker theo kiểu
+Lấy bản FFmpeg 9.0 shared build sẵn từ
+[tqk2811/FFmpegBuild](https://github.com/tqk2811/FFmpegBuild/releases), chỉ build lại
+`libavfilter` (gpufx + danh sách filter rút gọn) rồi thay vào gói. `ffmpeg`, `ffprobe` và
+các thư viện còn lại (`avcodec`, `avformat`…) giữ nguyên bản build sẵn. Mất vài phút:
+
+```sh
+scripts/build-prebuilt.sh            # linux64 -> dist/linux64
+scripts/build-prebuilt.sh win64      # cross-compile bằng mingw-w64 -> dist/win64
+scripts/test-bundle.sh dist/linux64  # chạy mọi hiệu ứng qua ffmpeg, kể cả quy tắc báo lỗi
+```
+
+Cần cargo, gcc, make, pkg-config, curl, patchelf (win64 thêm `mingw-w64`, `unzip` và Rust
+target `x86_64-pc-windows-gnu`). Đổi bản build sẵn bằng biến `FFBUILD_TAG`,
+`FFBUILD_VERSION`, `FFBUILD_LICENSE` (`lgpl`, `gpl`, `lgpl2`, `gpl2`).
+
+`libavfilter` phải build từ **đúng commit** của bản build sẵn để khớp ABI với các thư viện
+kia. Submodule `external/FFmpeg` được ghim vào commit đó (`n9.0-2-g03d9533176`, nhánh
+`release/9.0`); script dừng lại nếu hai bên lệch nhau. `ffmpeg` tìm filter theo tên lúc chạy
+nên không quan tâm `libavfilter` có bao nhiêu filter. Lệnh nào gọi filter đã bị bỏ thì chỉ lệnh
+đó báo `No such filter`.
+
+Lưu ý với bản này:
+- Chỉ còn các filter trong [docker/keep-filters.txt](docker/keep-filters.txt) cùng `gpufx`.
+  Filter audio như `volume`, `amix`, filter hw (`hwupload`, `scale_cuda`…), `setpts`, `fps`
+  đều không còn. Cần filter nào thì thêm tên vào file đó rồi build lại.
+- `ffmpeg` in `WARNING: library configuration mismatch` ở banner (hoặc khi bỏ
+  `-hide_banner`), vì `libavfilter` được configure khác các thư viện còn lại. Cảnh báo này vô hại.
+- `lib/pkgconfig/libavfilter.pc`, header và import lib vẫn là của bản build sẵn (không biết
+  tới gpufx). Gói dùng để chạy `ffmpeg`, không dùng để link chương trình khác với `libavfilter`.
+- win64: `avfilter-12.dll` và `gpufx.dll` dùng `msvcrt.dll`, còn DLL build sẵn dùng UCRT.
+  FFmpeg cấp phát và giải phóng bộ nhớ qua `avutil` nên chạy được; CI chạy thử trên Windows.
+
+### Build FFmpeg đầy đủ từ mã nguồn (Docker)
+
+Build cả FFmpeg từ submodule `external/FFmpeg` (cùng commit 9.0 ở trên), chậm hơn nhiều.
+Script build trong Docker theo kiểu
 [BtbN/FFmpeg-Builds](https://github.com/BtbN/FFmpeg-Builds), chỉ cần Docker và git:
 
 ```sh
@@ -83,4 +117,4 @@ make -j"$(nproc)"
 | `external/FFmpeg` | Submodule mã nguồn FFmpeg |
 | `docker/`, `build.sh`, `build.ps1` | Build FFmpeg + gpufx một lệnh trong Docker |
 | `examples/effects/` | 20 hiệu ứng mẫu |
-| `scripts/` | `install-libgpufx.sh`, `pack-effects.sh`/`.ps1` (đóng gói zip) |
+| `scripts/` | `build-prebuilt.sh` (build nhanh trên FFmpeg build sẵn), `test-bundle.sh`, `install-libgpufx.sh`, `pack-effects.sh`/`.ps1` (đóng gói zip) |

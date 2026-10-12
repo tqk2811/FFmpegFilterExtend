@@ -189,16 +189,43 @@ crates/gpufx-core   engine Rust: package, manifest, params, runtime (wgpu)
 crates/gpufx-ffi    libgpufx (.so/.dll/.dylib + .a) và include/gpufx.h
 crates/gpufx-cli    lệnh `gpufx`: info, check, pack, run (test hiệu ứng không cần FFmpeg)
 ffmpeg/             vf_gpufx.c và integrate.sh (thêm filter vào cây nguồn FFmpeg)
-external/FFmpeg     submodule FFmpeg (master = 9.1-dev, chuyển sang n9.1 khi phát hành)
+external/FFmpeg     submodule FFmpeg, ghim n9.0-2-g03d9533176 (release/9.0) = commit của bản build sẵn
 docker/, build.sh   build FFmpeg + gpufx một lệnh trong Docker (linux64, win64)
 examples/effects    20 hiệu ứng: chỉnh màu, blur, sharpen, chroma key, overlay, chuyển cảnh...
-scripts/            install-libgpufx.sh (build + cài .pc cho pkg-config),
+scripts/            build-prebuilt.sh (chỉ build libavfilter, thay vào FFmpeg build sẵn),
+                    test-bundle.sh (chạy hiệu ứng qua ffmpeg của gói),
+                    install-libgpufx.sh (build + cài .pc cho pkg-config),
                     pack-effects.sh/.ps1 (chỉ đóng gói hiệu ứng thành zip)
 ```
 
 ## 9. Bản build phân phối
 
-`./build.sh [linux64|win64|all]` (hoặc `build.ps1` trên Windows) dựng image Docker, build
+**Cách nhanh (CI dùng cách này):** `scripts/build-prebuilt.sh [linux64|win64]` tải bản FFmpeg
+9.0 shared build sẵn (tqk2811/FFmpegBuild), build `libgpufx` và **chỉ `libavfilter`** từ
+submodule với `--disable-everything` + `docker/keep-filters.txt` + gpufx, rồi thay
+`libavfilter.so.12` / `avfilter-12.dll` trong gói. Điều kiện để dùng chung ABI:
+
+- cùng commit FFmpeg với bản build sẵn (submodule ghim `03d9533176`, script kiểm tra);
+- cùng tên major (`libavfilter.so.12`, `avfilter-12.dll`); script dừng nếu bản build sẵn
+  không có file trùng tên;
+- ffmpeg CLI chỉ dùng API công khai và tìm filter theo tên lúc chạy, nên bớt filter không
+  làm hỏng việc nạp thư viện. Danh sách giữ lại phải có các filter CLI tự chèn: `null`/`anull`,
+  `format`/`aformat`, `scale`/`aresample`, `trim`/`atrim`, `apad`, `crop`, `hflip`, `vflip`,
+  `transpose`, `rotate`.
+- Linux: RUNPATH của `libavfilter` là `$ORIGIN` (đặt bằng `patchelf`, vì configure của FFmpeg
+  biến `$$` thành PID), và mọi file trong `bin/` được sửa RPATH thành `$ORIGIN/../lib`.
+  Trước khi thay, script so bảng export (`nm -D`) của `libavfilter` mới với bản build sẵn: thiếu
+  symbol nào thì dừng.
+- `libavfilter` rút gọn chỉ link `avutil`, `swscale`, `swresample`, nên không build
+  `avcodec`/`avformat`/`avdevice`. Có `nasm` thì bật SIMD.
+- win64: `avfilter-12.dll` dùng `msvcrt.dll` còn bản build sẵn dùng UCRT (xem
+  [Backlog-vi.md](Backlog-vi.md)).
+
+`scripts/test-bundle.sh dist/<target>` chạy mọi hiệu ứng, biểu thức, `sendcmd`, timeline và
+các ca quy tắc phải báo lỗi qua `ffmpeg` của gói. CI chạy nó cho linux64 (lavapipe) và cho
+win64 trên runner `windows-latest`.
+
+**Build đầy đủ:** `./build.sh [linux64|win64|all]` (hoặc `build.ps1` trên Windows) dựng image Docker, build
 `libgpufx` bằng Rust, chép submodule `external/FFmpeg` ra thư mục tạm (submodule giữ
 nguyên), chạy `integrate.sh`, rồi configure FFmpeg với:
 

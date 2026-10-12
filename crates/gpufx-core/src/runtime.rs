@@ -58,12 +58,20 @@ impl GpuContext {
             backends: backend.wgpu(),
             ..wgpu::InstanceDescriptor::new_without_display_handle()
         });
-        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            compatible_surface: None,
-            ..Default::default()
-        }))
-        .map_err(|e| Error::Gpu(format!("no GPU adapter for backend {backend:?}: {e}")))?;
+        let request = |force_fallback_adapter| {
+            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                force_fallback_adapter,
+                compatible_surface: None,
+                ..Default::default()
+            }))
+        };
+        // Machines without a GPU (CI runners, servers) may still have a software adapter
+        // such as WARP on Windows; try it before giving up.
+        let adapter = request(false).or_else(|first| {
+            request(true)
+                .map_err(|fallback| Error::Gpu(format!("no GPU adapter for backend {backend:?}: {first}; software fallback: {fallback}")))
+        })?;
         let (device, queue) =
             pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor { label: Some("gpufx"), ..Default::default() }))
                 .map_err(|e| Error::Gpu(e.to_string()))?;
