@@ -137,6 +137,13 @@ if [ -n "$SRC_MD5" ] && [ "$ONCE_MD5" != "$SRC_MD5" ] && [ "$TWICE_MD5" = "$SRC_
 else
     fail "invert changes pixels, twice restores them"; cat "$CLIPS/last.log"
 fi
+# Both filters share one compiled package; their parameters must stay separate.
+SHARED_MD5=$(md5 "gpufx=effect=$FX/invert.zip,gpufx=effect=$FX/invert.zip:params='amount=0'")
+if [ -n "$ONCE_MD5" ] && [ "$SHARED_MD5" = "$ONCE_MD5" ]; then
+    pass "same package twice keeps parameters per filter"
+else
+    fail "same package twice keeps parameters per filter"; cat "$CLIPS/last.log"
+fi
 
 echo "frame rate:"
 # The first input sets the output frame rate: a 25 fps clip mixed with a 60 fps clip must

@@ -44,3 +44,11 @@
 - **Vị trí**: [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`process_frame`, `input_image`, `unpremultiply`).
 - **Vì sao**: sẽ xử lý cùng pipeline trên GPU (YUV/float trên GPU, `rgba16float`) ở bước B-chung của kế hoạch.
 - **Ngày ghi**: 2026-10-12
+
+### Cache gói: khoá toàn cục khi nạp, không phát hiện file đổi
+- **Vấn đề**:
+  - Cache gói trong `gpufx-ffi` giữ một khoá suốt lúc đọc và biên dịch gói, nên hai thread mở hai gói *khác nhau* cùng lúc phải chờ nhau. FFmpeg gọi `init` trên một thread nên chưa ảnh hưởng; app nhiều thread thì chậm hơn.
+  - Theo yêu cầu, cache không kiểm tra file đổi (mtime/kích thước). Nếu sau này làm hot-reload (M1) thì cần thêm mtime vào khoá.
+- **Vị trí**: [crates/gpufx-ffi/src/lib.rs](../crates/gpufx-ffi/src/lib.rs) (`program`).
+- **Vì sao**: chưa cần cho FFmpeg; đổi sang khoá theo từng gói khi có app dùng nhiều thread.
+- **Ngày ghi**: 2026-10-12

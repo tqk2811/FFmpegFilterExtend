@@ -170,6 +170,13 @@ input có `formats` (và output khác RGBA) thì filter nhận nguyên frame, ki
 của manifest rồi tự chuyển bằng `swscale`. Các filter `gpufx` trong cùng
 process dùng chung một GPU device.
 
+Gói đã nạp cũng được dùng chung. Mỗi gói (khoá theo đường dẫn tuyệt đối và GPU device) chỉ
+được đọc và biên dịch một lần trong process: `Program` gồm manifest, pipeline, texture PNG,
+sampler. Mỗi filter giữ một `Effect` riêng gồm giá trị tham số, uniform buffer và texture
+frame. Khi không còn filter nào dùng gói thì `Program` được giải phóng, lần mở sau đọc lại
+file. Sửa file zip khi vẫn còn filter dùng gói đó thì không có tác dụng, kể cả với filter
+mở gói sau khi sửa.
+
 Chi phí chính là upload/readback và chuyển màu trên CPU. Lộ trình bỏ dần:
 
 | Giai đoạn | Thay đổi | Lợi ích |
