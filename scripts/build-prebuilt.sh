@@ -132,5 +132,6 @@ else
 fi
 mkdir -p "$OUT/include"
 cp "$ROOT/crates/gpufx-ffi/include/gpufx.h" "$OUT/include/"
+cp "$ROOT/LICENSE" "$OUT/LICENSE-gpufx.txt"
 "$ROOT/scripts/pack-effects.sh" -o "$OUT/effects" > /dev/null
 echo "==> done: $OUT ($(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' "$ROOT/docker/keep-filters.txt" | wc -l) filters)"

@@ -119,3 +119,26 @@ make -j"$(nproc)"
 | `docker/`, `build.sh`, `build.ps1` | Build FFmpeg + gpufx một lệnh trong Docker |
 | `examples/effects/` | 31 hiệu ứng mẫu |
 | `scripts/` | `build-prebuilt.sh` (build nhanh trên FFmpeg build sẵn), `test-bundle.sh`, `install-libgpufx.sh`, `pack-effects.sh`/`.ps1` (đóng gói zip) |
+
+## Giấy phép
+
+Mã nguồn của repo dùng giấy phép [MIT](LICENSE), trừ các phần sau:
+
+| Phần | Giấy phép |
+|------|-----------|
+| `ffmpeg/vf_gpufx.c` (filter, được build vào `libavfilter`) | LGPL 2.1 trở lên, giống FFmpeg |
+| `external/FFmpeg` (submodule) và thư viện FFmpeg trong bản build | Giấy phép của FFmpeg: `scripts/build-prebuilt.sh` mặc định LGPL v3 (`lgpl`), `lgpl2` là LGPL 2.1; bản build Docker (`build.sh`) là LGPL 2.1 trở lên; bản `gpl`/`gpl2` dùng GPL. Giấy phép thực tế là file `LICENSE.txt`/`FFMPEG-LICENSE.txt` đi kèm bản build |
+| Ảnh lá của `falling-maple` | Apache 2.0 (Noto Emoji, Google) |
+| Ảnh lá của `falling-ginkgo` | CC BY 3.0 (game-icons.net, Delapouite) |
+
+Nguồn và giấy phép của ảnh lá ở [assets/leaves/README.md](assets/leaves/README.md).
+
+Thư viện `libgpufx` và các hiệu ứng mẫu dùng được trong phần mềm đóng nguồn, nhưng phải kèm
+thông báo bản quyền: MIT của repo, Apache 2.0 / CC BY 3.0 nếu dùng hai hiệu ứng lá, và giấy
+phép của các crate Rust mà `libgpufx` liên kết.
+
+Khi phân phối bản build kèm FFmpeg, bạn phải tuân theo giấy phép của FFmpeg: kèm nội dung giấy
+phép và thông báo bản quyền, để người dùng thay được thư viện (bản build là shared library), và
+cung cấp mã nguồn FFmpeg đã dùng, gồm cả `vf_gpufx.c` và `ffmpeg/integrate.sh`. Bản `gpl`/`gpl2`
+thì toàn bộ FFmpeg trong bản build là GPL. Xem thêm https://ffmpeg.org/legal.html (đây không
+phải tư vấn pháp lý).

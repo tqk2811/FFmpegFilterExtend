@@ -5,7 +5,7 @@ members = ["crates/gpufx-core", "crates/gpufx-ffi", "crates/gpufx-cli"]
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 repository = "https://github.com/tqk2811/FFmpegFilterExtend"
 
 [workspace.dependencies]
