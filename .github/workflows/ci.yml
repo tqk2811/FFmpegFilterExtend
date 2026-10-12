@@ -4,6 +4,7 @@ on:
   push:
     branches: [main, master]
   pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -34,8 +35,157 @@ jobs:
         shell: bash
         run: scripts/pack-effects.sh --check
 
-  ffmpeg:
-    name: FFmpeg + gpufx (${{ matrix.target }}, Docker)
+  # Prebuilt shared FFmpeg 9.0 (tqk2811/FFmpegBuild) with only libavfilter rebuilt:
+  # gpufx plus the short filter list of docker/keep-filters.txt. A few minutes each.
+  ffmpeg-linux64:
+    name: FFmpeg 9.0 prebuilt + gpufx (linux64)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux64
+      - name: Tools
+        run: |
+          sudo apt-get update
+          # The distro ffmpeg only makes test clips: the bundle has no video sources.
+          sudo apt-get install -y mesa-vulkan-drivers ffmpeg patchelf nasm
+      - run: scripts/build-prebuilt.sh linux64
+      - name: Logs of the failed build
+        if: failure()
+        run: tail -n 100 build/prebuilt-linux64/*.log || true
+      - name: Run effects in ffmpeg
+        run: scripts/test-bundle.sh dist/linux64
+      # tar keeps the exec bits and the .so symlinks that a plain artifact would lose.
+      - run: tar -C dist -cJf ffmpeg-gpufx-linux64.tar.xz linux64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-gpufx-linux64
+          path: ffmpeg-gpufx-linux64.tar.xz
+          retention-days: 14
+
+  ffmpeg-win64:
+    name: FFmpeg 9.0 prebuilt + gpufx (win64, cross-compiled)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: win64
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64 nasm ffmpeg
+      - run: scripts/build-prebuilt.sh win64
+      - name: Logs of the failed build
+        if: failure()
+        run: tail -n 100 build/prebuilt-win64/*.log || true
+      - name: Test clips for the Windows job
+        run: TEST_CLIPS_ONLY=1 scripts/test-bundle.sh dist/win64 build/test-clips
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-gpufx-win64
+          path: dist/win64
+          retention-days: 14
+      - uses: actions/upload-artifact@v4
+        with:
+          name: test-clips
+          path: build/test-clips
+          retention-days: 1
+
+  ffmpeg-windows:
+    name: FFmpeg 9.0 prebuilt + gpufx (win64, run on Windows)
+    needs: ffmpeg-win64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-gpufx-win64
+          path: dist/win64
+      - uses: actions/download-artifact@v4
+        with:
+          name: test-clips
+          path: build/test-clips
+      - name: Run effects in ffmpeg.exe
+        shell: bash
+        run: scripts/test-bundle.sh dist/win64 build/test-clips
+
+  release:
+    # Temporary pre-release of every green build, tagged with the commit id (7 chars).
+    # Only the newest KEEP_RELEASES pre-releases are kept. PRs from forks and Dependabot
+    # are skipped: their token cannot write releases.
+    name: Pre-release (tag = commit id)
+    needs: [rust, ffmpeg-linux64, ffmpeg-windows]
+    if: >-
+      github.actor != 'dependabot[bot]' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: release-${{ github.event.pull_request.head.sha || github.sha }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      # For a PR, github.sha is the temporary merge commit; release the branch head.
+      SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      KEEP_RELEASES: 10
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-gpufx-linux64
+          path: assets
+      - uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-gpufx-win64
+          path: win64
+      - name: Package
+        run: |
+          # Same layout as the linux64 tar.xz: one top folder named after the target.
+          zip -qr assets/ffmpeg-gpufx-win64.zip win64
+          # All effect packages in one archive.
+          (cd win64/effects && zip -qr ../../assets/gpufx-effects.zip .)
+          ls -l assets
+      - name: Create or update the release
+        run: |
+          TAG=${SHA::7}
+          NOTES="Temporary build of ${SHA} (${GITHUB_HEAD_REF:-$GITHUB_REF_NAME}): prebuilt FFmpeg 9.0 with libavfilter rebuilt for gpufx.
+          Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          if OLD=$(gh release view "$TAG" --json targetCommitish -q .targetCommitish 2> /dev/null); then
+            # Re-run of the same commit; a different commit with the same short id must not
+            # overwrite it.
+            [ "$OLD" = "$SHA" ] || { echo "tag $TAG already belongs to $OLD" >&2; exit 1; }
+            gh release upload "$TAG" assets/* --clobber
+            gh release edit "$TAG" --notes "$NOTES"
+          else
+            gh release create "$TAG" assets/* --prerelease --target "$SHA" \
+              --title "Build $TAG" --notes "$NOTES"
+          fi
+      - name: Delete old temporary releases
+        run: |
+          gh release list --limit 200 --json tagName,isPrerelease,name,createdAt \
+            -q '[.[] | select(.isPrerelease and (.name | startswith("Build ")))]
+                | sort_by(.createdAt) | reverse
+                | (env.KEEP_RELEASES | tonumber) as $keep | .[$keep:] | .[].tagName' |
+          while read -r tag; do
+            echo "delete $tag"
+            gh release delete "$tag" --yes --cleanup-tag
+          done
+
+  ffmpeg-docker:
+    # Full FFmpeg build from source in Docker (build.sh). Slow; run it by hand.
+    if: github.event_name == 'workflow_dispatch'
+    name: FFmpeg + gpufx full build (${{ matrix.target }}, Docker)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -49,31 +199,9 @@ jobs:
       - name: Run effects in a filter graph
         if: matrix.target == 'linux64'
         run: |
-          # Test clips come from the distro ffmpeg: this build has no video source filters.
           sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers ffmpeg
-          ffmpeg -v error -f lavfi -i testsrc2=s=320x180:d=1 -c:v ffv1 a.mkv
-          ffmpeg -v error -f lavfi -i smptebars=s=320x180:d=1 -c:v ffv1 b.mkv
-          FF=dist/linux64/bin/ffmpeg
-          FX=dist/linux64/effects
-          "$FF" -hide_banner -filters > filters.txt
-          grep -qw gpufx filters.txt
-          if grep -qwE "overlay|drawtext|gblur" filters.txt; then echo "built-in video filters were not removed"; exit 1; fi
-          "$FF" -hide_banner -i a.mkv \
-            -vf "gpufx=effect=$FX/vignette.zip:params='strength=clip(t\,0\,1)|color=#ff0000'" -f null -
-          "$FF" -hide_banner -i a.mkv -i b.mkv \
-            -filter_complex "[0][1]gpufx=effect=$FX/wipe-transition.zip:params='progress=t'" -f null -
-          "$FF" -hide_banner -i a.mkv \
-            -vf "gpufx=effect=$FX/gaussian-blur.zip,sendcmd=c='0.5 gpufx@g params intensity=0.2',gpufx@g=effect=$FX/gradient-map.zip,gpufx=effect=$FX/rgb-split.zip" -f null -
-          # Manifest rules: accepted formats pass through, mismatches must fail.
-          "$FF" -hide_banner -i a.mkv -vf "format=yuv420p,gpufx=effect=$FX/chroma-key.zip,format=yuva420p" -f null -
-          if "$FF" -hide_banner -v error -i a.mkv -vf "format=gray,gpufx=effect=$FX/chroma-key.zip" -f null -; then
-            echo "chroma-key accepted gray input"; exit 1
-          fi
-          ffmpeg -v error -f lavfi -i smptebars=s=300x180:d=1 -c:v ffv1 c.mkv
-          if "$FF" -hide_banner -v error -i a.mkv -i c.mkv -filter_complex "[0][1]gpufx=effect=$FX/crossfade.zip" -f null -; then
-            echo "crossfade accepted inputs of different sizes"; exit 1
-          fi
+          scripts/test-bundle.sh dist/linux64
       - uses: actions/upload-artifact@v4
         with:
-          name: ffmpeg-gpufx-${{ matrix.target }}
+          name: ffmpeg-gpufx-full-${{ matrix.target }}
           path: dist/${{ matrix.target }}

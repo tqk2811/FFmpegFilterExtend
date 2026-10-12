@@ -488,7 +488,13 @@ static int config_output(AVFilterLink *outlink)
         FFFrameSyncIn *in = &s->fs.in[i];
 
         in->time_base = ctx->inputs[i]->time_base;
-        in->sync      = 1;
+        /*
+         * Only frames of the first input produce output frames, so the output has its
+         * frame rate; other inputs at another rate are sampled (their latest frame is
+         * repeated or skipped). With equal levels, every input would emit frames and a
+         * 30 fps + 25 fps pair would output both cadences mixed.
+         */
+        in->sync      = i == 0 ? 2 : 1;
         in->before    = EXT_STOP;
         /* The first input decides the output length; others hold their last frame. */
         in->after     = (i == 0 || s->shortest) ? EXT_STOP : EXT_INFINITY;
