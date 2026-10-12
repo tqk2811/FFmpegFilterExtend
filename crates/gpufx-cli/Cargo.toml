@@ -1,0 +1,16 @@
+[package]
+name = "gpufx-cli"
+description = "Inspect, pack and run gpufx effect packages without FFmpeg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "gpufx"
+path = "src/main.rs"
+
+[dependencies]
+gpufx-core.workspace = true
+image = { version = "0.25", default-features = false, features = ["png"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }

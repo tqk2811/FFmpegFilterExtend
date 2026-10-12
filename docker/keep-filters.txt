@@ -1,0 +1,27 @@
+# FFmpeg's own video filters are all disabled in this build; effects come from gpufx
+# packages instead. Audio filters are kept. The video filters below stay because the
+# ffmpeg CLI or gpufx itself needs them. One name per line; '#' starts a comment.
+
+# Graph plumbing (buffer/buffersink are always built and need no entry)
+null
+format
+
+# Pixel format conversion: gpufx works in RGBA, decoders output YUV.
+scale
+
+# Used by the ffmpeg CLI itself (-ss/-t trimming, autorotate, cropping metadata).
+trim
+crop
+hflip
+vflip
+transpose
+rotate
+
+# Change gpufx params while running: sendcmd=c='2.0 gpufx@fx params strength=0.2'
+sendcmd
+
+# Feed one input to several gpufx chains: [0]split[a][b]
+split
+
+# The effect filter
+gpufx

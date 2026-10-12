@@ -1,0 +1,14 @@
+[package]
+name = "gpufx-ffi"
+description = "C ABI for gpufx (libgpufx), consumed by the FFmpeg gpufx filter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "gpufx"
+crate-type = ["cdylib", "staticlib"]
+
+[dependencies]
+gpufx-core.workspace = true

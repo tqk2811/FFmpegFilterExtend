@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Software Vulkan driver (lavapipe)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --release --all-targets -- -D warnings
+      # GPU tests skip themselves when the runner has no usable adapter.
+      - run: cargo test --release
+      - name: Check every example shader
+        if: runner.os == 'Linux'
+        shell: bash
+        run: for e in examples/effects/*/; do ./target/release/gpufx check "$e"; done
+
+  ffmpeg:
+    name: FFmpeg + gpufx (${{ matrix.target }}, Docker)
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [linux64, win64]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - run: ./build.sh ${{ matrix.target }}
+      - name: Run effects in a filter graph
+        if: matrix.target == 'linux64'
+        run: |
+          # Test clips come from the distro ffmpeg: this build has no video source filters.
+          sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers ffmpeg
+          ffmpeg -v error -f lavfi -i testsrc2=s=320x180:d=1 -c:v ffv1 a.mkv
+          ffmpeg -v error -f lavfi -i smptebars=s=320x180:d=1 -c:v ffv1 b.mkv
+          FF=dist/linux64/bin/ffmpeg
+          FX=dist/linux64/effects
+          "$FF" -hide_banner -filters > filters.txt
+          grep -qw gpufx filters.txt
+          if grep -qwE "overlay|drawtext|gblur" filters.txt; then echo "built-in video filters were not removed"; exit 1; fi
+          "$FF" -hide_banner -i a.mkv \
+            -vf "gpufx=effect=$FX/vignette.zip:params='strength=clip(t\,0\,1)|color=#ff0000'" -f null -
+          "$FF" -hide_banner -i a.mkv -i b.mkv \
+            -filter_complex "[0][1]gpufx=effect=$FX/wipe-transition.zip:params='progress=t'" -f null -
+          "$FF" -hide_banner -i a.mkv \
+            -vf "gpufx=effect=$FX/gaussian-blur.zip,sendcmd=c='0.5 gpufx@g params intensity=0.2',gpufx@g=effect=$FX/gradient-map.zip,gpufx=effect=$FX/rgb-split.zip" -f null -
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-gpufx-${{ matrix.target }}
+          path: dist/${{ matrix.target }}

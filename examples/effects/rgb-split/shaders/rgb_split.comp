@@ -1,0 +1,20 @@
+#version 450
+// GLSL works too: same bindings and gpufx_* helpers as WGSL, declared by the prelude.
+layout(local_size_x = 8, local_size_y = 8) in;
+
+float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+void main() {
+    uvec3 id = gl_GlobalInvocationID;
+    if (!gpufx_in_bounds(id)) return;
+    vec2 uv = gpufx_uv(id);
+    float a = radians(params.angle);
+    vec2 off = vec2(cos(a), sin(a)) * params.amount / globals.size;
+    vec4 c = textureLod(sampler2D(src, smp), uv, 0.0);
+    c.r = textureLod(sampler2D(src, smp), uv + off, 0.0).r;
+    c.b = textureLod(sampler2D(src, smp), uv - off, 0.0).b;
+    float n = hash(uv * globals.size + float(globals.frame % 1024u) * 17.0) - 0.5;
+    gpufx_write(id, vec4(c.rgb + n * params.grain, c.a));
+}

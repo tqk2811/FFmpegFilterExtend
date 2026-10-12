@@ -1,0 +1,13 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.gradient-map",
+  "name": "Teal & Orange",
+  "version": "1.0.0",
+  "description": "Color grade through a gradient map shipped as a PNG in the package.",
+  "inputs": [{ "name": "src" }],
+  "params": [
+    { "name": "intensity", "type": "float", "default": 0.8, "min": 0, "max": 1, "description": "Mix with the original" }
+  ],
+  "textures": [{ "name": "lut", "path": "textures/teal_orange.png" }],
+  "passes": [{ "shader": "shaders/gradient_map.wgsl" }]
+}
