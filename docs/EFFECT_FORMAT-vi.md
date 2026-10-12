@@ -202,4 +202,6 @@ void main() {
 | `examples/effects/dip-to-color` | Tối dần về một màu (mặc định đen) rồi hiện clip sau |
 | `examples/effects/dissolve` | Hạt ngẫu nhiên (hash số nguyên, giống nhau trên mọi GPU) |
 | `examples/effects/pixelize-transition`, `zoom-transition`, `fade-grays`, `blinds` | Chuyển cảnh kiểu `xfade`: vỡ điểm ảnh, zoom, qua ảnh xám, rèm |
+| `examples/effects/checkerboard`, `push-box`, `push-film`, `photo-collection` | Chuyển cảnh slideshow theo [tanersener/ffmpeg-video-slideshow-scripts](https://github.com/tanersener/ffmpeg-video-slideshow-scripts) (viết lại bằng shader): ô vuông lớn dần, hộp thu nhỏ - đẩy - phóng to, cuộn phim có lỗ vẽ bằng shader, ảnh bay vào vừa xoay vừa đáp nghiêng lên clip đầu (nối chuỗi để xếp chồng ảnh) |
+| `examples/effects/fit` | Các chế độ khung hình của các script đó (giữa, cắt, kéo giãn, nền mờ) cho ảnh kích thước bất kỳ: input đầu chỉ cho kích thước khung; **hai pass**, box blur tách trục với số tap bilinear cố định |
 | `examples/effects/falling-maple`, `falling-ginkgo` | Lá phong đỏ / lá rẻ quạt vàng rơi: **ảnh PNG trong gói** (atlas 2×2), hạt không trạng thái (chỉ phụ thuộc `t`, seek đúng), `var<workgroup>` + `workgroupBarrier`, 4 kiểu chuyển động (`mode`). Ảnh gốc và giấy phép ở `assets/leaves/` |

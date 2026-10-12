@@ -1,0 +1,77 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.push-film",
+  "name": "Push Film",
+  "version": "1.0.0",
+  "description": "Both clips run through a film strip: the second pushes the first out of the frame like a film moving through a projector. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    },
+    {
+      "name": "direction",
+      "type": "int",
+      "default": 0,
+      "min": 0,
+      "max": 3,
+      "description": "Where the clips move: 0 left, 1 right, 2 up, 3 down"
+    },
+    {
+      "name": "strip",
+      "type": "float",
+      "default": 0.1,
+      "min": 0,
+      "max": 0.3,
+      "description": "Width of the perforated band on each side, relative to the frame"
+    },
+    {
+      "name": "gap",
+      "type": "float",
+      "default": 0.03,
+      "min": 0,
+      "max": 0.2,
+      "description": "Gap between two pictures of the strip, relative to the frame"
+    },
+    {
+      "name": "holes",
+      "type": "int",
+      "default": 8,
+      "min": 1,
+      "max": 64,
+      "description": "Perforations per picture on each side"
+    },
+    {
+      "name": "film_color",
+      "type": "color",
+      "default": "#141414",
+      "description": "Colour of the film"
+    },
+    {
+      "name": "hole_color",
+      "type": "color",
+      "default": "#f2f2f2",
+      "description": "Colour seen through the perforations"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/push_film.wgsl"
+    }
+  ]
+}

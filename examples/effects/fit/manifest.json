@@ -1,0 +1,64 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.fit",
+  "name": "Fit Picture",
+  "version": "1.0.0",
+  "description": "Fits the second input into the frame of the first, like the screen modes of slideshow tools: center, crop, stretch, or centered over a blurred copy. The first input gives the size, and shows through wherever the picture and `color` are transparent.",
+  "inputs": [
+    {
+      "name": "canvas",
+      "description": "Gives the output size and frame rate; shows through a transparent background"
+    },
+    {
+      "name": "src",
+      "description": "Picture to fit, any size"
+    }
+  ],
+  "params": [
+    {
+      "name": "mode",
+      "type": "int",
+      "default": 3,
+      "min": 0,
+      "max": 3,
+      "description": "0 center, 1 crop to fill, 2 stretch, 3 center over a blurred stretched copy"
+    },
+    {
+      "name": "upscale",
+      "type": "bool",
+      "default": false,
+      "description": "Let center and blur modes enlarge pictures smaller than the frame"
+    },
+    {
+      "name": "blur",
+      "type": "float",
+      "default": 0.14,
+      "min": 0,
+      "max": 0.5,
+      "description": "Blur radius of the background in mode 3, relative to the frame height"
+    },
+    {
+      "name": "color",
+      "type": "color",
+      "default": "#000000",
+      "description": "Background behind the picture in modes 0 to 2 (transparent shows the first input); mode 3 uses the blurred copy"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/blur_h.wgsl",
+      "inputs": [
+        "src"
+      ],
+      "output": "blurred_h"
+    },
+    {
+      "shader": "shaders/fit.wgsl",
+      "inputs": [
+        "canvas",
+        "src",
+        "blurred_h"
+      ]
+    }
+  ]
+}

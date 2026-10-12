@@ -52,3 +52,9 @@
 - **Vị trí**: [scripts/build-prebuilt.sh](../scripts/build-prebuilt.sh), CI pre-release.
 - **Vì sao**: cần thêm bước sinh `THIRD-PARTY-LICENSES` (ví dụ `cargo about`) và `cargo deny check licenses` trong CI để không có crate GPL lọt vào.
 - **Ngày ghi**: 2026-10-12
+
+### Thu nhỏ input không có mipmap: răng cưa khi ảnh lớn hơn khung nhiều
+- **Vấn đề**: sampler tuyến tính, texture input không có mip. Khi hiệu ứng thu nhỏ input nhiều lần (ảnh 4000 px trong `fit`, hộp nhỏ của `push-box`, ảnh của `photo-collection`), ảnh bị răng cưa/nhấp nháy. Nền mờ của `fit` dùng 64 tap bilinear rải đều trên bán kính, nên bán kính lớn (trên khoảng 64 px) có thể lộ bóng lặp.
+- **Vị trí**: [crates/gpufx-core/src/runtime.rs](../crates/gpufx-core/src/runtime.rs) (`create_texture`, sampler), `examples/effects/{fit,push-box,photo-collection}`.
+- **Vì sao**: cần tuỳ chọn mipmap cho input (sinh mip trên GPU mỗi frame) hoặc pass thu nhỏ trước; làm cùng bước mipmap của [Plan-sprites-vi.md](Plan-sprites-vi.md).
+- **Ngày ghi**: 2026-10-12

@@ -202,4 +202,6 @@ void main() {
 | `examples/effects/dip-to-color` | Fade to a color (black by default), then reveal the second clip |
 | `examples/effects/dissolve` | Random particles (integer hash, identical on every GPU) |
 | `examples/effects/pixelize-transition`, `zoom-transition`, `fade-grays`, `blinds` | `xfade`-style transitions: pixel break-up, zoom, through grayscale, blinds |
+| `examples/effects/checkerboard`, `push-box`, `push-film`, `photo-collection` | Slideshow transitions after [tanersener/ffmpeg-video-slideshow-scripts](https://github.com/tanersener/ffmpeg-video-slideshow-scripts) (written anew as shaders): growing squares, shrink-push-grow boxes, a procedural perforated film strip, a photo that flies in spinning and lands tilted on the first clip (chain it to stack photos) |
+| `examples/effects/fit` | The screen modes of those scripts (center, crop, stretch, blurred background) for a picture of any size: the first input only sets the frame; **two passes**, a separable box blur with a fixed number of bilinear taps |
 | `examples/effects/falling-maple`, `falling-ginkgo` | Falling red maple / yellow ginkgo leaves: **PNG images in the package** (2×2 atlas), stateless particles (depend only on `t`, so seeking is correct), `var<workgroup>` + `workgroupBarrier`, 4 motion styles (`mode`). Source images and licenses are in `assets/leaves/` |

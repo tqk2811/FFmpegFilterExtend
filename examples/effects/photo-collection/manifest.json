@@ -1,0 +1,79 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.photo-collection",
+  "name": "Photo Collection",
+  "version": "1.0.0",
+  "description": "The second clip flies in as a photo, spinning, and lands tilted on top of the first: chain it to stack photos. At `progress` 1 the photo lies on the first clip, so the result is not the second clip alone. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = the photo has landed on the first clip"
+    },
+    {
+      "name": "direction",
+      "type": "int",
+      "default": 0,
+      "min": 0,
+      "max": 3,
+      "description": "Where the photo comes from: 0 left, 1 right, 2 top, 3 bottom"
+    },
+    {
+      "name": "angle",
+      "type": "float",
+      "default": 12,
+      "min": -180,
+      "max": 180,
+      "description": "Tilt of the photo once it lands, in degrees"
+    },
+    {
+      "name": "spins",
+      "type": "float",
+      "default": 3,
+      "min": -20,
+      "max": 20,
+      "description": "Turns during the flight (negative: the other way)"
+    },
+    {
+      "name": "size",
+      "type": "float",
+      "default": 0.8,
+      "min": 0.05,
+      "max": 1,
+      "description": "Photo size, border included: it fits inside this part of the frame"
+    },
+    {
+      "name": "border",
+      "type": "float",
+      "default": 0,
+      "min": 0,
+      "max": 0.2,
+      "description": "Photo border, relative to the frame height"
+    },
+    {
+      "name": "border_color",
+      "type": "color",
+      "default": "#ffffff",
+      "description": "Border colour"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/photo_collection.wgsl"
+    }
+  ]
+}

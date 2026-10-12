@@ -82,10 +82,10 @@ if grep -qwE "overlay|drawtext|gblur" "$CLIPS/filters.txt"; then fail "built-in 
 
 NULL="-f null -"
 # Two input transitions driven by `progress`.
-TRANSITIONS="wipe-transition crossfade slide-transition circle-reveal clock-wipe collapse expand dip-to-color dissolve pixelize-transition zoom-transition fade-grays blinds"
+TRANSITIONS="wipe-transition crossfade slide-transition circle-reveal clock-wipe collapse expand dip-to-color dissolve pixelize-transition zoom-transition fade-grays blinds checkerboard push-box push-film photo-collection"
 echo "single input effects (audio stream kept):"
 for e in "$FX"/*.zip; do
-    case " $TRANSITIONS overlay " in *" $(basename "$e" .zip) "*) continue ;; esac
+    case " $TRANSITIONS overlay fit " in *" $(basename "$e" .zip) "*) continue ;; esac
     # shellcheck disable=SC2086
     ok "$(basename "$e" .zip)" -i "$A" -vf "gpufx=effect=$e" $NULL
 done
@@ -96,6 +96,10 @@ for e in $TRANSITIONS; do
 done
 # shellcheck disable=SC2086
 ok "overlay (different sizes)" -i "$A" -i "$C" -filter_complex "[0][1]gpufx=effect=$FX/overlay.zip:params='border=2'" -an $NULL
+for m in 0 1 2 3; do
+    # shellcheck disable=SC2086
+    ok "fit mode $m (different sizes)" -i "$A" -i "$C" -filter_complex "[0][1]gpufx=effect=$FX/fit.zip:params='mode=$m'" -an $NULL
+done
 echo "expressions, sendcmd, timeline, chains:"
 # shellcheck disable=SC2086
 ok "expression params" -i "$A" -vf "gpufx=effect=$FX/vignette.zip:params='strength=clip(t\,0\,1)|color=#ff0000'" $NULL

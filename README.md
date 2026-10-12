@@ -12,9 +12,9 @@ Video effects powered by **GPU shaders** for FFmpeg, loaded from external **`.zi
   GPU once, runs through the whole chain, and only then goes back to RAM.
 - A package declares **input/output rules** (pixel format, size, same size across inputs);
   a stream that does not match gets a clear error instead of a silent conversion.
-- 31 sample effects: color adjustment, grayscale, sepia, sharpen, pixelate, chroma key,
-  picture-in-picture, falling maple / ginkgo leaves (PNG images in the package), transitions (crossfade, slide, wipe, circle, clock, collapse, expand,
-  dip to black, dissolve, pixelize, zoom, blinds...)
+- 36 sample effects: color adjustment, grayscale, sepia, sharpen, pixelate, chroma key,
+  picture-in-picture, fitting a picture over a blurred background, falling maple / ginkgo leaves (PNG images in the package), transitions (crossfade, slide, wipe, circle, clock, collapse, expand,
+  dip to black, dissolve, pixelize, zoom, blinds, checkerboard, push box, film strip, photo collection...)
 
 ```sh
 ffmpeg -i a.mp4 -i b.mp4 -filter_complex \
@@ -121,7 +121,7 @@ make -j"$(nproc)"
 | `ffmpeg/` | The `vf_gpufx.c` filter and the integration script |
 | `external/FFmpeg` | FFmpeg source submodule |
 | `docker/`, `build.sh`, `build.ps1` | Build FFmpeg + gpufx with one command in Docker |
-| `examples/effects/` | 31 sample effects |
+| `examples/effects/` | 36 sample effects |
 | `scripts/` | `build-prebuilt.sh` (fast build on a prebuilt FFmpeg), `test-bundle.sh`, `install-libgpufx.sh`, `pack-effects.sh`/`.ps1` (zip packaging) |
 
 ## License
