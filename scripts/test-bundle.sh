@@ -170,6 +170,44 @@ rejects "only the first effect takes two inputs" "takes 2 inputs" -i "$A" -an -v
 # shellcheck disable=SC2086
 ok "a transition first in a chain" -i "$A" -i "$B" -filter_complex "[0][1]gpufx=effect='$FX/crossfade.zip|$FX/invert.zip'" -an $NULL
 
+echo "graphs in one filter:"
+# graph='...' runs a DAG on the GPU: same pixels as the filters it stands for.
+SPLIT_MD5=$(md5 "split[a][b];[a]gpufx=effect=$FX/grayscale.zip[g];[g][b]gpufx=effect=$FX/crossfade.zip:params='progress=0.3'")
+GRAPH_MD5=$(md5 "gpufx=graph='[0]split[a][b]; [a]$FX/grayscale.zip[g]; [g][b]$FX/crossfade.zip[out]':params='progress=0.3'")
+if [ -n "$SPLIT_MD5" ] && [ "$GRAPH_MD5" = "$SPLIT_MD5" ]; then pass "graph with split equals split + two filters"
+else fail "graph with split equals split + two filters"; cat "$CLIPS/last.log"; fi
+LINEAR_MD5=$(md5 "gpufx=graph='[0]$FX/invert.zip|$FX/invert.zip[out]'")
+if [ -n "$SRC_MD5" ] && [ "$LINEAR_MD5" = "$SRC_MD5" ]; then pass "linear graph invert|invert restores the frame"
+else fail "linear graph invert|invert restores the frame"; cat "$CLIPS/last.log"; fi
+# Two output pads mapped to two files, emitted together: each equals its effect alone.
+rm -f "$CLIPS/p.md5" "$CLIPS/q.md5"
+"$FF" -hide_banner -nostdin -v error -i "$A" -filter_complex \
+    "[0:v]format=rgba,gpufx=graph='[0]split[a][b]; [a]$FX/invert.zip[inv]; [b]$FX/grayscale.zip[gray]'[p][q]" \
+    -map "[p]" -frames:v 3 -pix_fmt rgba -f framemd5 -y "$CLIPS/p.md5" \
+    -map "[q]" -frames:v 3 -pix_fmt rgba -f framemd5 -y "$CLIPS/q.md5" > "$CLIPS/last.log" 2>&1
+P_MD5=$(grep -v '^#' "$CLIPS/p.md5" 2>/dev/null | awk -F, '{print $NF}')
+Q_MD5=$(grep -v '^#' "$CLIPS/q.md5" 2>/dev/null | awk -F, '{print $NF}')
+GRAY_MD5=$(md5 "gpufx=effect=$FX/grayscale.zip")
+if [ -n "$P_MD5" ] && [ "$P_MD5" = "$ONCE_MD5" ] && [ "$Q_MD5" = "$GRAY_MD5" ]; then pass "two output pads to two files"
+else fail "two output pads to two files"; cat "$CLIPS/last.log"; fi
+# Two inputs, two outputs, parameters by node label, sendcmd and the timeline.
+# shellcheck disable=SC2086
+ok "graph: 2 inputs, 2 outputs, sendcmd, enable" -i "$A" -i "$B" -filter_complex \
+    "[0:v][1:v]gpufx@g=graph='[0]split[a][b]; [a]$FX/gaussian-blur.zip[ba]; [b]$FX/grayscale.zip|$FX/vignette.zip[gb]; [ba][gb]$FX/crossfade.zip[x]; [x]split[x1][x2]; [x2][1]$FX/wipe-transition.zip[out]':params='x.progress=0.5|out.progress=t':enable='lt(t\,0.8)'[p][q];[q]sendcmd=c='0.5 gpufx@g params gb.strength=0.2',nullsink" \
+    -map "[p]" -an $NULL
+# shellcheck disable=SC2086
+rejects "graph: effect and graph together" "not both" -i "$A" -an -vf "gpufx=effect=$FX/invert.zip:graph='[0]$FX/invert.zip[o]'" $NULL
+# shellcheck disable=SC2086
+rejects "graph: cycle" "cycle through" -i "$A" -an -vf "gpufx=graph='[0][b]$FX/crossfade.zip[a]; [a]split[b][out]'" $NULL
+# shellcheck disable=SC2086
+rejects "graph: label never written" "is read but never written" -i "$A" -an -vf "gpufx=graph='[0][c]$FX/crossfade.zip[out]'" $NULL
+# shellcheck disable=SC2086
+rejects "graph: label read twice" "is read twice" -i "$A" -an -vf "gpufx=graph='[0]$FX/invert.zip[a]; [a][a]$FX/crossfade.zip[out]'" $NULL
+# shellcheck disable=SC2086
+rejects "graph: wrong number of labels" "takes 2 inputs, the node gives it 1" -i "$A" -an -vf "gpufx=graph='[0]$FX/crossfade.zip[out]'" $NULL
+# shellcheck disable=SC2086
+rejects "graph: same size rule inside the graph" "must equal the first input" -i "$A" -i "$C" -filter_complex "[0][1]gpufx=graph='[0]$FX/invert.zip[i]; [i][1]$FX/crossfade.zip[out]'" -an $NULL
+
 echo "frame rate:"
 # The first input sets the output frame rate: a 25 fps clip mixed with a 60 fps clip must
 # give exactly the 25 fps timestamps and durations (passthrough keeps what the filter

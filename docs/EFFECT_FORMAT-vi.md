@@ -89,6 +89,10 @@ Cách áp dụng:
   `formats` nhận nguyên format của stream; khác danh sách thì lỗi khi cấu hình filter graph.
   Muốn chạy thì đổi format trước bằng `format=yuv420p,gpufx=...`. Kích thước được kiểm tra
   khi cấu hình và mỗi khi kích thước frame đổi. Tên format sai chính tả cũng là lỗi.
+- **Chuỗi và đồ thị** (`effect='a|b'`, `graph='...'`): mỗi hiệu ứng được kiểm tại chỗ của nó. Hiệu ứng
+  đọc hiệu ứng khác thấy kích thước của hiệu ứng đó (kích thước input đầu của nó) và format đầu tiên
+  trong `output.formats` của nó mà hiệu ứng đọc nhận; input pad được nhiều hiệu ứng đọc phải có
+  format mà tất cả đều nhận. Vì vậy `same_size` cũng áp dụng giữa hai nhánh của đồ thị.
 - **`gpufx run`:** format lấy từ PNG (`rgba`, `rgb24`, `gray`, `ya8`, bản 16-bit là
   `rgba64be`, `rgb48be`, `gray16be`, `ya16be`). CLI luôn ghi PNG RGBA nên không kiểm tra
   `output.formats`.

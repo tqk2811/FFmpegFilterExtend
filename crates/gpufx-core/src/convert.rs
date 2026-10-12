@@ -261,6 +261,20 @@ impl InputSlot {
         InputSlot { key, planes, texture, pass: Some((buf, bg)), deep }
     }
 
+    /// Textures this slot holds: the planes, and the converted frame unless direct.
+    pub fn texture_count(&self) -> usize {
+        self.planes.len() + self.pass.is_some() as usize
+    }
+
+    /// Bytes of those textures.
+    pub fn texture_bytes(&self) -> u64 {
+        let size = |t: &wgpu::Texture| {
+            let bytes = t.format().block_copy_size(None).unwrap_or(4) as u64;
+            t.width() as u64 * t.height() as u64 * bytes
+        };
+        self.planes.iter().map(size).sum::<u64>() + if self.pass.is_some() { size(&self.texture) } else { 0 }
+    }
+
     /// Uploads the planes of a frame matching the key, and its colour info.
     pub fn upload(&self, queue: &wgpu::Queue, planes: &[&[u8]; 4], strides: &[u32; 4], color: &ColorInfo) {
         let (w, h) = (self.key.width, self.key.height);
@@ -298,21 +312,22 @@ struct OutPlane {
     offset: u64,
 }
 
-/// Conversion passes and readback buffers of the output.
+/// Conversion passes of one output. Its planes are copied into a readback buffer shared
+/// by every output of a graph, at `offset`..`end()`.
 pub(crate) struct OutputSlot {
     pub key: (PixelFormat, u32, u32),
     planes: Vec<OutPlane>,
-    readback: wgpu::Buffer,
+    end: u64,
     /// Bind groups reading the effect output ([0]) and the input texture (bypass, [1]),
     /// both kept so a timeline toggling the filter makes nothing new.
     bind_groups: [Option<Vec<wgpu::BindGroup>>; 2],
 }
 
 impl OutputSlot {
-    pub fn new(device: &wgpu::Device, format: PixelFormat, w: u32, h: u32) -> Result<Self, Error> {
+    /// `offset`: where the planes start in the shared readback buffer (a multiple of 4).
+    pub fn new(device: &wgpu::Device, format: PixelFormat, w: u32, h: u32, mut offset: u64) -> Result<Self, Error> {
         let max = device.limits().max_storage_buffer_binding_size;
         let mut planes = Vec::new();
-        let mut offset = 0;
         for p in 0..format.plane_count() {
             let (row_bytes, rows) = format.plane_size(p, w, h);
             let row_words = row_bytes.div_ceil(4);
@@ -332,13 +347,12 @@ impl OutputSlot {
             planes.push(OutPlane { words, uniform: uniform_buffer(device, "gpufx convert out"), row_words, rows, row_bytes, offset });
             offset += size;
         }
-        let readback = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("gpufx readback"),
-            size: offset,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-        Ok(OutputSlot { key: (format, w, h), planes, readback, bind_groups: [None, None] })
+        Ok(OutputSlot { key: (format, w, h), planes, end: offset, bind_groups: [None, None] })
+    }
+
+    /// End of the planes in the readback buffer.
+    pub fn end(&self) -> u64 {
+        self.end
     }
 
     pub fn is_bound(&self, input: bool) -> bool {
@@ -377,33 +391,55 @@ impl OutputSlot {
         }
     }
 
-    /// Copies the encoded planes into the mappable buffer; after the compute pass.
-    pub fn copy(&self, enc: &mut wgpu::CommandEncoder) {
+    /// Copies the encoded planes into the shared readback buffer; after the compute pass.
+    pub fn copy(&self, enc: &mut wgpu::CommandEncoder, readback: &wgpu::Buffer) {
         for p in &self.planes {
-            enc.copy_buffer_to_buffer(&p.words, 0, &self.readback, p.offset, p.words.size());
+            enc.copy_buffer_to_buffer(&p.words, 0, readback, p.offset, p.words.size());
         }
     }
 
-    /// Waits for the GPU and copies every plane into `out`.
-    pub fn read(&self, device: &wgpu::Device, out: &mut FrameMut) -> Result<(), Error> {
-        let slice = self.readback.slice(..);
-        let (tx, rx) = std::sync::mpsc::channel();
-        slice.map_async(wgpu::MapMode::Read, move |r| {
-            let _ = tx.send(r);
-        });
-        device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| Error::Gpu(e.to_string()))?;
-        rx.recv().map_err(|e| Error::Gpu(e.to_string()))?.map_err(|e| Error::Gpu(e.to_string()))?;
-        {
-            let mapped = slice.get_mapped_range().map_err(|e| Error::Gpu(e.to_string()))?;
-            for (i, p) in self.planes.iter().enumerate() {
-                let (row, stride) = (p.row_bytes as usize, out.strides[i] as usize);
-                for y in 0..p.rows as usize {
-                    let src = &mapped[p.offset as usize + y * p.row_words as usize * 4..][..row];
-                    out.planes[i][y * stride..][..row].copy_from_slice(src);
-                }
+    /// Copies every plane from the mapped readback buffer into `out`.
+    fn read(&self, mapped: &[u8], out: &mut FrameMut) {
+        for (i, p) in self.planes.iter().enumerate() {
+            let (row, stride) = (p.row_bytes as usize, out.strides[i] as usize);
+            for y in 0..p.rows as usize {
+                let src = &mapped[p.offset as usize + y * p.row_words as usize * 4..][..row];
+                out.planes[i][y * stride..][..row].copy_from_slice(src);
             }
         }
-        self.readback.unmap();
-        Ok(())
     }
+}
+
+/// The one mappable buffer every output of a graph is read back through.
+pub(crate) fn readback_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("gpufx readback"),
+        size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    })
+}
+
+/// Waits for the GPU, maps `readback` once and copies every output into its frame.
+pub(crate) fn read_outputs(
+    device: &wgpu::Device,
+    readback: &wgpu::Buffer,
+    slots: &[OutputSlot],
+    outs: &mut [FrameMut],
+) -> Result<(), Error> {
+    let slice = readback.slice(..);
+    let (tx, rx) = std::sync::mpsc::channel();
+    slice.map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    device.poll(wgpu::PollType::wait_indefinitely()).map_err(|e| Error::Gpu(e.to_string()))?;
+    rx.recv().map_err(|e| Error::Gpu(e.to_string()))?.map_err(|e| Error::Gpu(e.to_string()))?;
+    {
+        let mapped = slice.get_mapped_range().map_err(|e| Error::Gpu(e.to_string()))?;
+        for (slot, out) in slots.iter().zip(outs.iter_mut()) {
+            slot.read(&mapped, out);
+        }
+    }
+    readback.unmap();
+    Ok(())
 }

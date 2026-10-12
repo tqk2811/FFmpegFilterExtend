@@ -129,6 +129,7 @@ initialize the graph instead of running incorrectly.
 
 ```
 gpufx=effect=<zip|directory>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)'][:backend=auto|vulkan|dx12|metal|gl][:shortest=0|1]
+gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backend=...][:shortest=0|1]
 ```
 
 - **effect**: path to the package. The filter's number of inputs comes from the manifest.
@@ -141,6 +142,8 @@ gpufx=effect=<zip|directory>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)
   Parameters are set as `package.name` (the file name without `.zip`, for example `vignette.strength`), `index.name`
   (counted from 0, required when two packages share a name or a package name is a number), or the bare name if only one
   effect has it. Spaces around `|` are ignored.
+- **graph**: a whole effect graph with several inputs and outputs, in place of `effect`; see
+  "GPU graph inside one filter" in section 6.
 - **params**: `name=value` separated by `|`. A value is a literal (`0.5`, `1,0,0`, `#ff8800`)
   or an **FFmpeg expression** in `t`, `n`, `w`, `h`, `a` (`w/h`), `sar`, `dar` (`a*sar`),
   re-evaluated for every frame. This is how you do keyframes/transitions without external tools.
@@ -150,7 +153,7 @@ gpufx=effect=<zip|directory>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)
 - Multiple inputs use `framesync`: the first input decides the length and frame rate (an input with a
   different fps has its frames repeated or dropped). Another input that has not started yet is a transparent image; one that has
   ended holds its last frame (or use `shortest=1`).
-- The output takes the size, SAR and frame rate of the first input; colorspace/range/alpha are the values
+- The output takes the size, SAR and frame rate of the first input (in a graph, of the input pad its source comes from); colorspace/range/alpha are the values
   negotiated on the output link. Color-dependent side data (HDR metadata, film grain...), motion
   vectors and video enc params are dropped because the pixels have changed.
 - If an input's size or pixel format changes midstream, that is an error (`ffmpeg` rebuilds the
@@ -232,26 +235,46 @@ The main costs are upload/readback and color conversion on the CPU. The roadmap 
 In every phase, **the package format and shaders do not change**: authors never need to know whether a frame comes from
 the CPU or from CUDA.
 
-### GPU graph inside one filter (planned, after P1)
+### GPU graph inside one filter (done, C API v5)
 
-A single `gpufx` can run a whole effect graph, so complex branching stays on the GPU on every
+A single `gpufx` runs a whole effect graph, so complex branching stays on the GPU on every
 backend (Vulkan, D3D12, Metal, GL), without hardware frames:
 
 ```sh
 ffmpeg -i a.mp4 -i b.mp4 -filter_complex "[0:v][1:v]gpufx=graph='[0]split[a][b]; [a]gaussian-blur.zip[ba]; [b]grayscale.zip|vignette.zip[gb]; [ba][gb]crossfade.zip[x]; [x][1]wipe-transition.zip[out]'[v]" -map "[v]" out.mp4
 ```
 
-`[0]`, `[1]` are the filter's input pads, `[out]` its output pad; the single quotes protect `;` and `[]` from
-the outer filter graph.
+The single quotes protect `;` and `[]` from the outer filter graph. Rules:
 
-- Each input pad is uploaded once, each output pad is read back once; every intermediate texture stays
-  on the GPU. The graph may have several output pads.
-- `split` costs nothing: it is two edges reading the same texture.
-- The whole graph runs in one submission, nodes in topological order. `effect='a.zip|b.zip'` is the special
-  case of a linear graph, so the `EffectChain` of A2 grows into a DAG.
-- Parameters are named after the node label, as in chains; `sendcmd` keeps working.
-- Checked at configuration: cycles, unused or undefined labels, size and format rules give a clear error.
-- Zero-copy (P3) later feeds the same graph with hardware frames; the graph does not change.
+- Statements are separated by `;`; each reads labels, runs a node and writes labels.
+- `[0]`, `[1]`... are the filter's input pads (named `in0`, `in1`...). Every pad up to the highest must be read.
+- Any other label (letters, digits, `_`, `-`; no `.`, which would clash with `label.param`) is written once and read at most once (`split` it to read it twice).
+- **Outputs**: the labels no statement reads are the filter's output pads, in the order they are written
+  (several are allowed; the pad names are the labels). There is no explicit output list: a misspelled
+  label shows up as an extra output pad, which FFmpeg reports as unconnected.
+- A node is `split` (one label in, any number out), `null` (one in, one out), or packages chained with
+  `|` as in `effect=`, which take as many labels as the first package has inputs and write one.
+  `split` and `null` cost nothing: their outputs *are* their input (two edges reading one texture).
+- An effect writes the size of its first input; output pad k takes the size, SAR and frame rate of the
+  input pad its source comes from. Frames come at input 0's events (framesync as with several inputs).
+- Each input pad is uploaded once, each output pad is read back once, all outputs through one shared
+  readback buffer; the whole graph runs in one submission, effects in topological order. The output
+  frames of one event are sent together.
+- `effect='a.zip|b.zip'` is the linear graph: `EffectChain` is a wrapper around `EffectGraph`, and a single
+  `Effect` runs through the same code. `effect` and `graph` are mutually exclusive.
+- Parameters are named as in chains over all packages of the graph in statement order (`label.name`,
+  `index.name`, bare name); `node.name` with a node's output label also works (`ba.radius`, `gb.strength`
+  finds the one effect of `grayscale|vignette` that has `strength`). `sendcmd` keeps working.
+- Checked when the filter is created: cycles, labels read but never written, written twice or read twice,
+  unread input pads, label counts against a node's inputs, numeric output labels. Checked at configuration:
+  the manifest size and format rules of every node (an edge carries its producer's size and the format
+  negotiated between the two effects), and input pads read by effects with no common format.
+- With `enable=`, a disabled graph sends each output's source input pad converted to the output format.
+- Paths in a graph must not contain `[`, `]`, `;` or `|`.
+
+C API (v5, additive): `gpufx_effect_open_graph`, `gpufx_effect_output_count`, `gpufx_effect_output_name`,
+`gpufx_effect_output_source`, `gpufx_effect_output_pad_format[_count]`, `gpufx_effect_process_graph`,
+`gpufx_effect_convert_graph`; see `gpufx.h`.
 
 ### VRAM budget (rule for every phase)
 
@@ -260,13 +283,20 @@ VRAM is limited, so GPU memory is kept as low as possible and nothing is duplica
 - No copies on the way in or out: YUV plane textures and the converted RGBA texture are reused frame to
   frame, and the first effect reads the converted texture directly.
 - Intermediate textures (pass outputs, chain links, graph edges) come from a pool keyed by size and
-  format (done for chains: a 1-input 2-effect chain of one pass each allocates two pass outputs, a third
-  effect reuses the first). Textures whose lifetimes do not overlap share memory (ping-pong); a texture goes back to the pool
-  right after its last reader. The graph check computes the peak number of live textures up front, so a
-  wide graph costs only the textures alive at the same time, not one per node.
+  format: a 1-input 2-effect chain of one pass each allocates two pass outputs, a third effect reuses the
+  first. Textures whose lifetimes do not overlap share memory (ping-pong); a texture goes back to the pool
+  right after its last reader, counted over the whole graph in execution order. A pass output that is a
+  graph output is kept until readback. The plan is computed before anything is allocated
+  (`EffectGraph::memory_plan`), so a wide graph costs only the textures alive at the same time, not one per
+  node. Example, the diamond `[0]split[a][b]; [a]gaussian-blur[ba]; [b]grayscale|vignette[gb];
+  [ba][gb]crossfade[out]`: five pass outputs share **3** pooled textures (blur's two passes and the gray
+  frame are alive together; vignette reuses blur's first pass, crossfade the gray frame), plus one upload
+  texture (straight RGBA is read directly) and one readback buffer: 5 frame-sized allocations
+  (1920x1080 `rgba8unorm`: 3 x 7.9 MiB pooled, 41.5 MB in all), against 8 with one texture per pass
+  output and a copy for `split` (5 + 1 + upload + readback).
 - `rgba16float` (twice the size of `rgba8unorm`) only where precision needs it (inputs or outputs above
   8 bits); an all-8-bit chain stays `rgba8unorm`.
-- Staging and readback buffers are shared, not per effect. Textures are freed when the frame size changes.
+- Staging and readback buffers are shared, not per effect: one readback buffer holds every output of a graph. Textures are freed when the frame size changes.
 - Package textures (PNG) belong to the shared `Program` and are loaded once per device.
 
 ## 7. Effect package security

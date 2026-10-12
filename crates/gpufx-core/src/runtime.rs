@@ -3,9 +3,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::convert::{texture_2d, work_format, Converter, InputKey, InputSlot, OutputSlot};
-use crate::frame::{Frame, FrameMut, PixelFormat};
-use crate::manifest::{PassDef, ShaderLanguage, StreamInfo};
+use crate::convert::{texture_2d, Converter};
+use crate::frame::{Frame, FrameMut};
+use crate::graph::{run, FrameIo, Topology};
+use crate::manifest::{PassDef, ShaderLanguage};
 use crate::package::Package;
 use crate::params::ParamBlock;
 use crate::Error;
@@ -49,10 +50,10 @@ impl Backend {
 
 /// A GPU device. One context can be shared by many effects.
 pub struct GpuContext {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    pub(crate) device: wgpu::Device,
+    pub(crate) queue: wgpu::Queue,
     info: wgpu::AdapterInfo,
-    conv: Converter,
+    pub(crate) conv: Converter,
 }
 
 impl GpuContext {
@@ -167,18 +168,18 @@ fn globals_bytes(size: (u32, u32), info: &FrameInfo) -> [u8; GLOBALS_SIZE as usi
     g
 }
 
-const WORKGROUP: u32 = 8;
+pub(crate) const WORKGROUP: u32 = 8;
 const FIRST_TEXTURE_BINDING: u32 = 4;
 
-struct Pass {
+pub(crate) struct Pass {
     pipeline: wgpu::ComputePipeline,
     layout: wgpu::BindGroupLayout,
-    inputs: Vec<String>,
-    output: String,
+    pub(crate) inputs: Vec<String>,
+    pub(crate) output: String,
 }
 
 /// Pass outputs and bind groups of one effect, for one set of input textures.
-struct Bound {
+pub(crate) struct Bound {
     size: (u32, u32),
     /// Pass outputs are `rgba16float` (else `rgba8unorm`).
     deep: bool,
@@ -186,23 +187,12 @@ struct Bound {
     bind_groups: Vec<wgpu::BindGroup>,
 }
 
-/// Frame upload, conversion and readback resources, shared by the effects of a chain.
-#[derive(Default)]
-struct FrameIo {
-    /// How many times textures or bind groups were made; see [`EffectChain::allocations`].
-    allocations: usize,
-    /// The frames of the chain carry more than 8 bits: see [`work_format`].
-    deep: bool,
-    inputs: Vec<InputSlot>,
-    output: Option<OutputSlot>,
-}
-
 /// The immutable, compiled part of an effect: package, pipelines, textures and sampler.
 /// One program can back many [`Effect`]s on the same device, so a package used by
 /// several filters is read and compiled once.
 pub struct Program {
-    ctx: Arc<GpuContext>,
-    package: Package,
+    pub(crate) ctx: Arc<GpuContext>,
+    pub(crate) package: Package,
     /// Pipelines writing `rgba8unorm`, for chains of 8-bit frames.
     passes: Vec<Pass>,
     /// Pipelines writing `rgba16float`, compiled the first time a deeper frame comes.
@@ -257,7 +247,7 @@ impl Program {
     }
 
     /// The pipelines for one work format; the shaders were validated in `new`.
-    fn passes(&self, deep: bool) -> Result<&[Pass], Error> {
+    pub(crate) fn passes(&self, deep: bool) -> Result<&[Pass], Error> {
         if !deep {
             return Ok(&self.passes);
         }
@@ -281,12 +271,12 @@ impl Program {
 
 /// An instance of a [`Program`] with its own parameter values and frame buffers.
 pub struct Effect {
-    program: Arc<Program>,
-    params: ParamBlock,
+    pub(crate) program: Arc<Program>,
+    pub(crate) params: ParamBlock,
     globals: wgpu::Buffer,
     params_buf: wgpu::Buffer,
-    bound: Option<Bound>,
-    /// Upload and readback buffers of [`Effect::process`]; a chain has its own.
+    pub(crate) bound: Option<Bound>,
+    /// Upload and readback buffers of [`Effect::process`]; a graph has its own.
     io: Option<FrameIo>,
 }
 
@@ -347,14 +337,15 @@ impl Effect {
     /// from RGBA on the GPU.
     pub fn process_frames(&mut self, inputs: &[Frame], out: FrameMut, info: &FrameInfo) -> Result<(), Error> {
         let mut io = self.io.take().unwrap_or_default();
-        let res = run(std::slice::from_mut(self), &mut io, inputs, out, Some(info));
+        let topo = Topology::single(self.input_count());
+        let res = run(std::slice::from_mut(self), &topo, &mut io, inputs, &mut [out], Some(info));
         self.io = Some(io);
         res
     }
 
     /// Creates the bind groups for `inputs` (one texture per manifest input) and the
     /// pass `outputs` handed out by `allocate`. Called again whenever they change.
-    fn bind(
+    pub(crate) fn bind(
         &mut self,
         inputs: &[&wgpu::Texture],
         outputs: HashMap<String, wgpu::Texture>,
@@ -398,12 +389,12 @@ impl Effect {
     }
 
     /// The texture the last pass writes. Only valid after `bind`.
-    fn output(&self) -> &wgpu::Texture {
+    pub(crate) fn output(&self) -> &wgpu::Texture {
         let bound = self.bound.as_ref().expect("bound before use");
         &bound.outputs[&self.program.package.manifest.passes.last().expect("validated").output]
     }
 
-    fn encode(&self, cpass: &mut wgpu::ComputePass, info: &FrameInfo) {
+    pub(crate) fn encode(&self, cpass: &mut wgpu::ComputePass, info: &FrameInfo) {
         let bound = self.bound.as_ref().expect("bound before use");
         let queue = &self.program.ctx.queue;
         queue.write_buffer(&self.globals, 0, &globals_bytes(bound.size, info));
@@ -415,373 +406,6 @@ impl Effect {
             cpass.set_bind_group(0, bg, &[]);
             cpass.dispatch_workgroups(w.div_ceil(WORKGROUP), h.div_ceil(WORKGROUP), 1);
         }
-    }
-}
-
-/// Runs `effects` one after the other: the frames are uploaded once, every pass goes into
-/// one command buffer and the result of the last effect is read back once. Effects after
-/// the first take one input, the output of the effect before them. Without `info` the
-/// effects are bypassed: input 0 is only converted to the output format.
-fn run(effects: &mut [Effect], io: &mut FrameIo, inputs: &[Frame], mut out: FrameMut, info: Option<&FrameInfo>) -> Result<(), Error> {
-    let first = &effects[0];
-    let wanted = if info.is_some() { first.input_count() } else { 1 };
-    if inputs.len() != wanted {
-        return Err(Error::Frame(format!("effect expects {wanted} inputs, got {}", inputs.len())));
-    }
-    for (i, f) in inputs.iter().enumerate() {
-        f.check(&format!("input {i}"))?;
-    }
-    let (w, h) = (inputs[0].width, inputs[0].height);
-    out.check("output")?;
-    if (out.width, out.height) != (w, h) {
-        return Err(Error::Frame(format!(
-            "output is {}x{}, the effect writes {w}x{h} (the size of the first input)",
-            out.width, out.height
-        )));
-    }
-
-    let ctx = first.program.ctx.clone();
-    let (device, queue, conv) = (&ctx.device, &ctx.queue, &ctx.conv);
-    let keys: Vec<InputKey> = inputs
-        .iter()
-        .map(|f| InputKey {
-            format: f.format,
-            width: f.width,
-            height: f.height,
-            direct: f.format == PixelFormat::Rgba && !f.color.premultiplied,
-        })
-        .collect();
-    // A bypass call only brings input 0: keep the slots of the other inputs, and their
-    // depth, so toggling the filter on and off does not rebuild anything.
-    let others = if info.is_some() { &[][..] } else { io.inputs.get(1..).unwrap_or_default() };
-    let deep = keys.iter().chain(others.iter().map(|slot| &slot.key)).any(|k| work_format(k.format) != wgpu::TextureFormat::Rgba8Unorm)
-        || work_format(out.format) != wgpu::TextureFormat::Rgba8Unorm;
-    let stale = io.deep != deep
-        || if info.is_some() {
-            io.inputs.len() != keys.len() || io.inputs.iter().zip(&keys).any(|(slot, k)| slot.key != *k)
-        } else {
-            io.inputs.first().is_none_or(|slot| slot.key != keys[0])
-        };
-    if stale {
-        let mut keys = keys.clone();
-        if info.is_none() {
-            // Other inputs keep their keys, or take input 0's when there are none yet.
-            for i in 1..first.input_count() {
-                keys.push(io.inputs.get(i).map_or(keys[0], |slot| slot.key));
-            }
-        }
-        // Size rules of the manifests; pixel formats are the caller's to check.
-        let streams: Vec<StreamInfo> = keys.iter().map(|k| StreamInfo { format: None, width: k.width, height: k.height }).collect();
-        first.package().manifest.check_inputs(&streams)?;
-        for fx in &effects[1..] {
-            fx.package().manifest.check_inputs(&streams[..1])?;
-        }
-        let names: Vec<String> = first.package().manifest.inputs.iter().map(|d| d.name.clone()).collect();
-        // Drop the old textures before making new ones.
-        io.inputs.clear();
-        io.output = None;
-        for fx in effects.iter_mut() {
-            fx.bound = None;
-        }
-        io.deep = deep;
-        io.allocations += 1;
-        io.inputs = keys.iter().zip(&names).map(|(&k, d)| InputSlot::new(device, conv, d, k, deep)).collect();
-        let mut prev: Vec<wgpu::Texture> = io.inputs.iter().map(|slot| slot.texture.clone()).collect();
-        let outputs = allocate(effects, device, (w, h), deep)?;
-        for (fx, outputs) in effects.iter_mut().zip(outputs) {
-            fx.bind(&prev.iter().collect::<Vec<_>>(), outputs, (w, h), deep)?;
-            prev = vec![fx.output().clone()];
-        }
-        // Its bind groups read textures that are gone.
-        io.output = None;
-    }
-    if io.output.as_ref().is_none_or(|o| o.key != (out.format, w, h)) {
-        io.output = Some(OutputSlot::new(device, out.format, w, h)?);
-    }
-    let output = io.output.as_mut().expect("just created");
-    let bypass = info.is_none();
-    if !output.is_bound(bypass) {
-        let source = if bypass { &io.inputs[0].texture } else { effects.last().expect("at least one effect").output() };
-        output.bind(device, conv, source, bypass);
-        io.allocations += 1;
-    }
-    let output = io.output.as_ref().expect("just created");
-
-    for (slot, f) in io.inputs.iter().zip(inputs) {
-        slot.upload(queue, &f.planes, &f.strides, &f.color);
-    }
-    let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gpufx") });
-    {
-        let mut cpass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("gpufx"), timestamp_writes: None });
-        for slot in &io.inputs[..inputs.len()] {
-            slot.encode(conv, &mut cpass);
-        }
-        if let Some(info) = info {
-            for fx in effects.iter() {
-                fx.encode(&mut cpass, info);
-            }
-        }
-        output.encode(queue, conv, &mut cpass, &out.color, bypass);
-    }
-    output.copy(&mut enc);
-    queue.submit([enc.finish()]);
-    output.read(device, &mut out)
-}
-
-/// Hands out the pass output textures of every effect of a chain from a pool: a texture
-/// goes back to the pool after the last pass that reads it, so a chain ping-pongs
-/// between a few textures instead of keeping one per pass per effect.
-fn allocate(
-    effects: &[Effect],
-    device: &wgpu::Device,
-    (w, h): (u32, u32),
-    deep: bool,
-) -> Result<Vec<HashMap<String, wgpu::Texture>>, Error> {
-    // Last pass (counted over the whole chain) that writes or reads each output.
-    let mut last: HashMap<(usize, &str), usize> = HashMap::new();
-    let mut g = 0;
-    for (k, fx) in effects.iter().enumerate() {
-        let m = &fx.program.package.manifest;
-        let passes = fx.program.passes(deep)?;
-        for pass in passes {
-            for name in &pass.inputs {
-                if passes.iter().any(|p| p.output == *name) {
-                    last.insert((k, name), g);
-                } else if k > 0 && m.inputs.iter().any(|d| d.name == *name) {
-                    // The output of the effect before is this effect's input.
-                    let prev = &effects[k - 1].program.passes(deep)?.last().expect("validated").output;
-                    last.insert((k - 1, prev), g);
-                }
-            }
-            let end = last.entry((k, &pass.output)).or_insert(g);
-            *end = (*end).max(g);
-            g += 1;
-        }
-    }
-    let k_last = effects.len() - 1;
-    let final_out = &effects[k_last].program.passes(deep)?.last().expect("validated").output;
-    // Read by the output conversion.
-    last.insert((k_last, final_out), usize::MAX);
-
-    let format = if deep { wgpu::TextureFormat::Rgba16Float } else { wgpu::TextureFormat::Rgba8Unorm };
-    let mut free: Vec<wgpu::Texture> = Vec::new();
-    let mut live: Vec<(usize, wgpu::Texture)> = Vec::new();
-    let mut maps = vec![HashMap::new(); effects.len()];
-    let mut g = 0;
-    for (k, fx) in effects.iter().enumerate() {
-        for pass in fx.program.passes(deep)? {
-            live.retain(|(end, tex)| {
-                if *end < g {
-                    free.push(tex.clone());
-                }
-                *end >= g
-            });
-            if !maps[k].contains_key(&pass.output) {
-                let tex = free.pop().unwrap_or_else(|| {
-                    texture_2d(
-                        device,
-                        "gpufx pass output",
-                        w,
-                        h,
-                        format,
-                        wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-                    )
-                });
-                live.push((last[&(k, pass.output.as_str())], tex.clone()));
-                maps[k].insert(pass.output.clone(), tex);
-            }
-            g += 1;
-        }
-    }
-    Ok(maps)
-}
-
-/// Effects run one after the other in one GPU submission, as if each fed the next
-/// through its own filter, without the round trip to CPU memory in between.
-pub struct EffectChain {
-    effects: Vec<Effect>,
-    labels: Vec<String>,
-    /// Pixel format each effect after the first sees on its input, as two filters in a
-    /// row would negotiate it. Frames stay RGBA on the GPU; only the rules are checked.
-    links: Vec<String>,
-    /// (effect, parameter) of every entry of `param_names`.
-    params: Vec<(usize, usize)>,
-    param_names: Vec<String>,
-    io: FrameIo,
-}
-
-impl EffectChain {
-    /// `effects` pairs a label (the package file name, used in parameter names such as
-    /// `vignette.strength`) with an effect. All effects must share one GPU context.
-    pub fn new(effects: Vec<(String, Effect)>) -> Result<Self, Error> {
-        if effects.is_empty() {
-            return Err(Error::Unsupported("a chain needs at least one effect".into()));
-        }
-        let (labels, effects): (Vec<String>, Vec<Effect>) = effects.into_iter().unzip();
-        let ctx = &effects[0].program.ctx;
-        let mut links = Vec::new();
-        for (k, fx) in effects.iter().enumerate().skip(1) {
-            let m = &fx.package().manifest;
-            if !Arc::ptr_eq(&fx.program.ctx, ctx) {
-                return Err(Error::Unsupported(format!("effect {k} (`{}`) runs on another GPU device", labels[k])));
-            }
-            if m.inputs.len() != 1 {
-                return Err(Error::Unsupported(format!(
-                    "effect {k} (`{}`) takes {} inputs; only the first effect of a chain may take more than one",
-                    labels[k],
-                    m.inputs.len()
-                )));
-            }
-            // What gpufx=a,gpufx=b would negotiate: the first output format of `a` that
-            // `b` accepts.
-            let prev = &effects[k - 1].package().manifest;
-            let accepted = &m.inputs[0].formats;
-            let link = prev.output.formats.iter().find(|f| accepted.is_empty() || accepted.contains(f)).ok_or_else(|| {
-                Error::Unsupported(format!(
-                    "`{}` outputs {} but `{}` accepts {}",
-                    labels[k - 1],
-                    prev.output.formats.join(", "),
-                    labels[k],
-                    accepted.join(", ")
-                ))
-            })?;
-            links.push(link.clone());
-        }
-
-        let mut params = Vec::new();
-        let mut param_names = Vec::new();
-        for (k, fx) in effects.iter().enumerate() {
-            for (i, def) in fx.params.defs().iter().enumerate() {
-                params.push((k, i));
-                param_names.push(if effects.len() == 1 {
-                    def.name.clone()
-                } else if labels.iter().filter(|l| **l == labels[k]).count() == 1 && labels[k].parse::<usize>().is_err() {
-                    format!("{}.{}", labels[k], def.name)
-                } else {
-                    format!("{k}.{}", def.name)
-                });
-            }
-        }
-        Ok(EffectChain { effects, labels, links, params, param_names, io: FrameIo::default() })
-    }
-
-    pub fn effects(&self) -> &[Effect] {
-        &self.effects
-    }
-
-    pub fn labels(&self) -> &[String] {
-        &self.labels
-    }
-
-    /// The first effect: its inputs are the inputs of the chain.
-    pub fn first(&self) -> &Effect {
-        &self.effects[0]
-    }
-
-    /// The last effect: its output rules are those of the chain.
-    pub fn last(&self) -> &Effect {
-        self.effects.last().expect("at least one effect")
-    }
-
-    /// Full names of every parameter: `name` for a single effect, else `label.name`, or
-    /// `index.name` when two effects share a label.
-    pub fn param_names(&self) -> &[String] {
-        &self.param_names
-    }
-
-    /// Finds a parameter by its full name, by `label.name`, by `index.name` (0 based) or,
-    /// when only one effect has it, by its bare name. A prefix made of digits is always an
-    /// index, so a package named `2.zip` is reached by its index only.
-    pub fn find_param(&self, name: &str) -> Result<usize, Error> {
-        if let Some(i) = self.param_names.iter().position(|n| n == name) {
-            return Ok(i);
-        }
-        let find = |k: usize, param: &str| self.params.iter().position(|&(e, p)| e == k && self.effects[e].params.defs()[p].name == param);
-        if let Some((prefix, param)) = name.split_once('.') {
-            let effect = match prefix.parse::<usize>() {
-                Ok(k) if k < self.effects.len() => Some(k),
-                Ok(_) => None,
-                Err(_) => {
-                    let matches: Vec<usize> = (0..self.labels.len()).filter(|&k| self.labels[k] == prefix).collect();
-                    if matches.len() > 1 {
-                        return Err(Error::Param(format!(
-                            "`{prefix}` names {} effects of the chain; use the index, e.g. `{}.{param}`",
-                            matches.len(),
-                            matches[0]
-                        )));
-                    }
-                    matches.first().copied()
-                }
-            };
-            let Some(k) = effect else {
-                return Err(Error::Param(format!("the chain has no effect `{prefix}` (effects: {})", self.labels.join(", "))));
-            };
-            return find(k, param).ok_or_else(|| Error::Param(format!("effect `{}` has no parameter `{param}`", self.labels[k])));
-        }
-        let owners: Vec<usize> = (0..self.effects.len()).filter_map(|k| find(k, name)).collect();
-        match owners.as_slice() {
-            [i] => Ok(*i),
-            [] => Err(Error::Param(format!("no effect of the chain has a parameter `{name}`"))),
-            _ => Err(Error::Param(format!(
-                "several effects have a parameter `{name}`: {}",
-                owners.iter().map(|&i| self.param_names[i].as_str()).collect::<Vec<_>>().join(", ")
-            ))),
-        }
-    }
-
-    /// Parameter `index` of `param_names` as (block, name inside its effect).
-    fn param(&mut self, index: usize) -> Result<(&mut ParamBlock, String), Error> {
-        let &(k, p) = self.params.get(index).ok_or_else(|| Error::Param(format!("no parameter {index}")))?;
-        let block = &mut self.effects[k].params;
-        let name = block.defs()[p].name.clone();
-        Ok((block, name))
-    }
-
-    /// Sets a parameter (any name `find_param` takes) from text.
-    pub fn set_param_str(&mut self, name: &str, text: &str) -> Result<(), Error> {
-        let (block, name) = self.param(self.find_param(name)?)?;
-        block.set_str(&name, text)
-    }
-
-    /// Sets the first components of a parameter (any name `find_param` takes).
-    pub fn set_param(&mut self, name: &str, values: &[f64]) -> Result<(), Error> {
-        let (block, name) = self.param(self.find_param(name)?)?;
-        block.set(&name, values)
-    }
-
-    /// Checks one stream per input of the first effect against the rules of every effect:
-    /// later effects see the first stream's size and the format negotiated in `new`.
-    pub fn check_inputs(&self, streams: &[StreamInfo]) -> Result<(), Error> {
-        self.first().package().manifest.check_inputs(streams)?;
-        for (fx, link) in self.effects[1..].iter().zip(&self.links) {
-            let s = StreamInfo { format: Some(link), width: streams[0].width, height: streams[0].height };
-            fx.package().manifest.check_inputs(&[s])?;
-        }
-        Ok(())
-    }
-
-    /// Runs every effect on `inputs` (one per input of the first effect) and writes the
-    /// RGBA result of the last one into `out`, which has the size of `inputs[0]`.
-    pub fn process(&mut self, inputs: &[Image], out: ImageMut, info: &FrameInfo) -> Result<(), Error> {
-        let frames: Vec<Frame> = inputs.iter().map(|&i| i.into()).collect();
-        self.process_frames(&frames, out.into(), info)
-    }
-
-    /// [`EffectChain::process`] for frames in any [`PixelFormat`], converted on the GPU.
-    pub fn process_frames(&mut self, inputs: &[Frame], out: FrameMut, info: &FrameInfo) -> Result<(), Error> {
-        run(&mut self.effects, &mut self.io, inputs, out, Some(info))
-    }
-
-    /// How many times frame textures, buffers or bind groups were (re)made: once per new
-    /// size or format, never per frame. For tests and diagnostics.
-    pub fn allocations(&self) -> usize {
-        self.io.allocations
-    }
-
-    /// Converts `input` (in place of input 0) to the format of `out` without running the
-    /// effects, as a disabled filter passes its first input through.
-    pub fn convert(&mut self, input: &Frame, out: FrameMut) -> Result<(), Error> {
-        run(&mut self.effects, &mut self.io, std::slice::from_ref(input), out, None)
     }
 }
 

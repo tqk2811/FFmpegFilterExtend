@@ -10,7 +10,7 @@ DESIGN-vi.md mục 6).
 |------|----------|------------|
 | A2 | Chuỗi `effect='a.zip\|b.zip'`, C API v3, thời gian chính xác, `pixel_aspect` | Xong |
 | B-chung (P1) | YUV (NV12, P010, yuv420p) ↔ RGBA trên GPU; `rgba16float` chỉ khi cần; pool texture, dùng lại buffer staging | Xong (C API v4) |
-| Đồ thị GPU | `gpufx=graph='...'`: `EffectChain` thành DAG, nhiều input/output pad, `split` không copy, texture trả pool sau lần đọc cuối | Chưa |
+| Đồ thị GPU | `gpufx=graph='...'`: `EffectChain` thành DAG, nhiều input/output pad, `split` không copy, texture trả pool sau lần đọc cuối | Xong (C API v5) |
 | B-Vulkan (P3) | Zero-copy `AV_PIX_FMT_VULKAN`: device wgpu từ `AVVulkanDeviceContext`, nhận/trả `VkImage`, semaphore của `AVVKFrame` | Chưa |
 | B-D3D12 (P5) | `AV_PIX_FMT_D3D12` vào backend DX12 của wgpu; chạy thử trên WARP | Chưa |
 | B-D3D11 (P5) | D3D11 qua shared NT handle sang DX12 | Chưa |

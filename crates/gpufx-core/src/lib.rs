@@ -4,15 +4,17 @@
 
 mod convert;
 pub mod frame;
+pub mod graph;
 pub mod manifest;
 pub mod package;
 pub mod params;
 pub mod runtime;
 
 pub use frame::{ChromaLocation, ColorInfo, Frame, FrameMut, Matrix, PixelFormat, Range};
+pub use graph::{EffectChain, EffectGraph, MemoryStats, Source};
 pub use manifest::{Manifest, StreamInfo};
 pub use package::Package;
-pub use runtime::{Backend, Effect, EffectChain, FrameInfo, GpuContext, Image, ImageMut, Program};
+pub use runtime::{Backend, Effect, FrameInfo, GpuContext, Image, ImageMut, Program};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -33,4 +35,7 @@ pub enum Error {
     Unsupported(String),
     #[error("frame: {0}")]
     Frame(String),
+    /// A graph description is malformed or wired wrongly (labels, pads, cycles).
+    #[error("graph: {0}")]
+    Graph(String),
 }

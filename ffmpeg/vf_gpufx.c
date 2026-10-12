@@ -7,6 +7,9 @@
  * as they come and fail on a mismatch instead of being converted silently.
  * libgpufx converts the common YUV formats (NV12, P010, yuv420p...) to and from
  * the RGBA the effects work in on the GPU; other formats go through swscale.
+ * graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]' runs a whole effect graph in
+ * one GPU submission, with one input pad per [N] and one output pad per label that no
+ * statement reads.
  *
  * This file is part of FFmpeg.
  *
@@ -54,20 +57,28 @@ typedef struct GpufxContext {
     const AVClass *class;
 
     char *effect_path;
+    char *graph_str;
     char *params_str;
     char *backend;
     int shortest;
 
     GpufxEffect *fx;
     unsigned nb_inputs;
+    unsigned nb_outputs;
     ParamExpr *exprs;
     int nb_exprs;
     AVFrame **conv;   /* per-input copies: swscale RGBA conversions or flipped frames */
     SwsContext **in_sws;
-    SwsContext *out_sws;
-    AVFrame *rgba_out; /* GPU result when swscale converts it to the output format */
     AVFrame **blank;  /* transparent image for inputs > 0 before their first frame */
+    AVFrame **in;     /* frame of each input in the current event, NULL before it starts */
     GpufxFrame *frames;
+    /* Per output: */
+    SwsContext **out_sws;
+    AVFrame **rgba_out; /* GPU result when swscale converts it to the output format */
+    AVFrame **out;
+    GpufxFrameOut *targets;
+    int *source;        /* input pad whose size, rate and aspect ratio the output has */
+    int configured;     /* inputs checked and framesync set up (by the first output) */
     FFFrameSync fs;
     int64_t frame_count;
     int warned_interlaced;
@@ -184,6 +195,8 @@ static int apply_params(AVFilterContext *ctx, const char *str)
     return ret;
 }
 
+static int config_output(AVFilterLink *outlink);
+
 /* "a.zip|b.zip" opens a chain: one upload, every effect on the GPU, one readback. */
 static av_cold int open_effects(AVFilterContext *ctx)
 {
@@ -232,8 +245,10 @@ static av_cold int init(AVFilterContext *ctx)
     GpufxContext *s = ctx->priv;
     int ret;
 
-    if (!s->effect_path) {
-        av_log(ctx, AV_LOG_ERROR, "The 'effect' option (path to a .zip package) is required.\n");
+    if (!s->effect_path == !s->graph_str) {
+        av_log(ctx, AV_LOG_ERROR, s->effect_path ?
+               "Set either 'effect' or 'graph', not both.\n" :
+               "The 'effect' option (path to a .zip package) or the 'graph' option is required.\n");
         return AVERROR(EINVAL);
     }
     /* Versions only add functions: a newer library works. */
@@ -243,8 +258,12 @@ static av_cold int init(AVFilterContext *ctx)
         return AVERROR(EINVAL);
     }
 
-    if ((ret = open_effects(ctx)) < 0)
+    if (s->graph_str) {
+        if (!(s->fx = gpufx_effect_open_graph(s->graph_str, s->backend)))
+            return gpufx_error(ctx, "Cannot load graph");
+    } else if ((ret = open_effects(ctx)) < 0) {
         return ret;
+    }
     av_log(ctx, AV_LOG_VERBOSE, "Loaded '%s' on %s\n",
            gpufx_effect_name(s->fx), gpufx_effect_device(s->fx));
 
@@ -260,20 +279,54 @@ static av_cold int init(AVFilterContext *ctx)
             return ret;
     }
 
+    s->nb_outputs = gpufx_effect_output_count(s->fx);
+    for (unsigned k = 0; k < s->nb_outputs; k++) {
+        AVFilterPad pad = { 0 };
+
+        pad.type         = AVMEDIA_TYPE_VIDEO;
+        pad.config_props = config_output;
+        pad.name         = av_strdup(gpufx_effect_output_name(s->fx, k));
+        if (!pad.name)
+            return AVERROR(ENOMEM);
+        if ((ret = ff_append_outpad_free_name(ctx, &pad)) < 0)
+            return ret;
+        /*
+         * framesync asserts a single output when it is set up: do it while there is
+         * one. activate() makes up for what it only does on the first output.
+         */
+        if (k == 0 && (ret = ff_framesync_init(&s->fs, ctx, s->nb_inputs)) < 0)
+            return ret;
+    }
+
     for (unsigned i = 0; i < s->nb_inputs; i++)
         for (uint32_t j = 0; j < gpufx_effect_input_format_count(s->fx, i); j++)
             if ((ret = check_format_name(ctx, gpufx_effect_input_format(s->fx, i, j), 0)) < 0)
                 return ret;
-    for (uint32_t j = 0; j < gpufx_effect_output_format_count(s->fx); j++)
-        if ((ret = check_format_name(ctx, gpufx_effect_output_format(s->fx, j), 1)) < 0)
-            return ret;
+    for (unsigned k = 0; k < s->nb_outputs; k++)
+        for (uint32_t j = 0; j < gpufx_effect_output_pad_format_count(s->fx, k); j++)
+            if ((ret = check_format_name(ctx, gpufx_effect_output_pad_format(s->fx, k, j), 1)) < 0)
+                return ret;
 
-    s->conv   = av_calloc(s->nb_inputs, sizeof(*s->conv));
-    s->in_sws = av_calloc(s->nb_inputs, sizeof(*s->in_sws));
-    s->frames = av_calloc(s->nb_inputs, sizeof(*s->frames));
-    s->blank  = av_calloc(s->nb_inputs, sizeof(*s->blank));
-    if (!s->conv || !s->in_sws || !s->frames || !s->blank)
+    s->conv     = av_calloc(s->nb_inputs, sizeof(*s->conv));
+    s->in_sws   = av_calloc(s->nb_inputs, sizeof(*s->in_sws));
+    s->frames   = av_calloc(s->nb_inputs, sizeof(*s->frames));
+    s->blank    = av_calloc(s->nb_inputs, sizeof(*s->blank));
+    s->in       = av_calloc(s->nb_inputs, sizeof(*s->in));
+    s->out_sws  = av_calloc(s->nb_outputs, sizeof(*s->out_sws));
+    s->rgba_out = av_calloc(s->nb_outputs, sizeof(*s->rgba_out));
+    s->out      = av_calloc(s->nb_outputs, sizeof(*s->out));
+    s->targets  = av_calloc(s->nb_outputs, sizeof(*s->targets));
+    s->source   = av_calloc(s->nb_outputs, sizeof(*s->source));
+    if (!s->conv || !s->in_sws || !s->frames || !s->blank || !s->in ||
+        !s->out_sws || !s->rgba_out || !s->out || !s->targets || !s->source)
         return AVERROR(ENOMEM);
+    for (unsigned k = 0; k < s->nb_outputs; k++) {
+        s->source[k] = gpufx_effect_output_source(s->fx, k);
+        if (s->source[k] < 0 || s->source[k] >= (int)s->nb_inputs) {
+            av_log(ctx, AV_LOG_ERROR, "Output %u has no source input: %s\n", k, gpufx_last_error());
+            return AVERROR(EINVAL);
+        }
+    }
 
     return apply_params(ctx, s->params_str);
 }
@@ -292,11 +345,21 @@ static av_cold void uninit(AVFilterContext *ctx)
         sws_free_context(&s->in_sws[i]);
     for (unsigned i = 0; s->blank && i < s->nb_inputs; i++)
         av_frame_free(&s->blank[i]);
+    for (unsigned k = 0; s->out_sws && k < s->nb_outputs; k++)
+        sws_free_context(&s->out_sws[k]);
+    for (unsigned k = 0; s->rgba_out && k < s->nb_outputs; k++)
+        av_frame_free(&s->rgba_out[k]);
+    for (unsigned k = 0; s->out && k < s->nb_outputs; k++)
+        av_frame_free(&s->out[k]);
     av_freep(&s->blank);
     av_freep(&s->conv);
     av_freep(&s->in_sws);
-    sws_free_context(&s->out_sws);
-    av_frame_free(&s->rgba_out);
+    av_freep(&s->in);
+    av_freep(&s->out_sws);
+    av_freep(&s->rgba_out);
+    av_freep(&s->out);
+    av_freep(&s->targets);
+    av_freep(&s->source);
     av_freep(&s->frames);
     gpufx_effect_free(s->fx);
     s->fx = NULL;
@@ -471,9 +534,9 @@ static int input_frame(AVFilterContext *ctx, unsigned i, AVFrame *in)
 
 /*
  * Points target at out when the GPU writes its format and colours, else at
- * s->rgba_out, which finish_output() then converts into out with swscale.
+ * s->rgba_out[k], which finish_output() then converts into out with swscale.
  */
-static int output_target(GpufxContext *s, AVFrame *out, GpufxFrameOut *target)
+static int output_target(GpufxContext *s, unsigned k, AVFrame *out, GpufxFrameOut *target)
 {
     const char *name = gpu_color(out, &target->color);
     AVFrame *dst = out;
@@ -482,9 +545,9 @@ static int output_target(GpufxContext *s, AVFrame *out, GpufxFrameOut *target)
     if (!name) {
         enum AVPixelFormat fmt = rgba_for(out->format);
 
-        if ((ret = alloc_frame(&s->rgba_out, fmt, out->width, out->height)) < 0)
+        if ((ret = alloc_frame(&s->rgba_out[k], fmt, out->width, out->height)) < 0)
             return ret;
-        dst  = s->rgba_out;
+        dst  = s->rgba_out[k];
         name = av_get_pix_fmt_name(fmt);
         /* Premultiplied on the GPU when the output wants it; swscale keeps alpha. */
         target->color = (GpufxColor){ GPUFX_MATRIX_BT601, GPUFX_RANGE_FULL, GPUFX_CHROMA_LEFT,
@@ -502,12 +565,12 @@ static int output_target(GpufxContext *s, AVFrame *out, GpufxFrameOut *target)
     return 0;
 }
 
-static int finish_output(GpufxContext *s, AVFrame *out, const GpufxFrameOut *target)
+static int finish_output(GpufxContext *s, unsigned k, AVFrame *out, const GpufxFrameOut *target)
 {
     if (target->data[0] == out->data[0])
         return 0;
-    set_rgba_props(s->rgba_out, out);
-    return sws_convert(&s->out_sws, out, s->rgba_out);
+    set_rgba_props(s->rgba_out[k], out);
+    return sws_convert(&s->out_sws[k], out, s->rgba_out[k]);
 }
 
 /*
@@ -540,22 +603,34 @@ static void set_output_props(AVFrame *out, const AVFrame *in0, AVFilterLink *inl
     out->alpha_mode          = outlink->alpha_mode;
 }
 
+/* Frees the output frames of an event that failed or was sent. */
+static void drop_outputs(GpufxContext *s)
+{
+    for (unsigned k = 0; k < s->nb_outputs; k++)
+        av_frame_free(&s->out[k]);
+}
+
+/*
+ * One event of the inputs: every output gets a frame, all made in one GPU submission and
+ * sent together. Output k has the size of input s->source[k]; the timing and the other
+ * properties come from input 0, which drives the events.
+ */
 static int process_frame(FFFrameSync *fs)
 {
     AVFilterContext *ctx = fs->parent;
     GpufxContext *s = ctx->priv;
     AVFilterLink *outlink = ctx->outputs[0];
-    AVFrame *in0 = NULL, *out;
-    GpufxFrameOut target;
+    AVFrame *in0 = NULL;
     GpufxFrameInfo info;
     double vars[VAR_NB];
-    int ret;
+    int ret, passthrough;
 
     for (unsigned i = 0; i < s->nb_inputs; i++) {
         AVFrame *in;
 
         if ((ret = ff_framesync_get_frame(fs, i, &in, 0)) < 0)
             return ret;
+        s->in[i] = in;
         if (!in) {
             /* Input i > 0 has not started yet (input 0 always has a frame here). */
             const AVFrame *b = s->blank[i];
@@ -584,35 +659,51 @@ static int process_frame(FFFrameSync *fs)
             return ret;
     }
 
-    if (ctx->is_disabled && in0->format == outlink->format &&
-        (in0->alpha_mode == outlink->alpha_mode || !has_alpha(in0->format))) {
-        out = av_frame_clone(in0);
-        if (!out)
-            return AVERROR(ENOMEM);
-        set_output_props(out, in0, ctx->inputs[0], outlink, fs->pts, fs->time_base);
-        return ff_filter_frame(outlink, out);
+    /* Disabled: outputs that already have their input's format are that input. */
+    passthrough = ctx->is_disabled;
+    for (unsigned k = 0; passthrough && k < s->nb_outputs; k++) {
+        const AVFrame *src = s->in[s->source[k]];
+        const AVFilterLink *ol = ctx->outputs[k];
+
+        passthrough = src && src->format == ol->format &&
+                      (src->alpha_mode == ol->alpha_mode || !has_alpha(src->format));
+    }
+    for (unsigned k = 0; k < s->nb_outputs; k++) {
+        AVFilterLink *ol = ctx->outputs[k];
+        AVFrame *out;
+
+        if (passthrough) {
+            if (!(s->out[k] = av_frame_clone(s->in[s->source[k]]))) {
+                ret = AVERROR(ENOMEM);
+                goto fail;
+            }
+            set_output_props(s->out[k], in0, ctx->inputs[0], ol, fs->pts, fs->time_base);
+            continue;
+        }
+        if (!(out = s->out[k] = ff_get_video_buffer(ol, ol->w, ol->h))) {
+            ret = AVERROR(ENOMEM);
+            goto fail;
+        }
+        if ((ret = av_frame_copy_props(out, in0)) < 0)
+            goto fail;
+        set_output_props(out, in0, ctx->inputs[0], ol, fs->pts, fs->time_base);
+        /* The color properties are the negotiated ones of the output link, not input 0's. */
+        out->colorspace  = ol->colorspace;
+        out->color_range = ol->color_range;
+        /* The pixels are new: drop what describes the old ones. */
+        av_frame_side_data_remove_by_props(&out->side_data, &out->nb_side_data,
+                                           AV_SIDE_DATA_PROP_COLOR_DEPENDENT);
+        av_frame_remove_side_data(out, AV_FRAME_DATA_MOTION_VECTORS);
+        av_frame_remove_side_data(out, AV_FRAME_DATA_VIDEO_ENC_PARAMS);
+        if ((ret = output_target(s, k, out, &s->targets[k])) < 0)
+            goto fail;
     }
 
-    out = ff_get_video_buffer(outlink, outlink->w, outlink->h);
-    if (!out)
-        return AVERROR(ENOMEM);
-    if ((ret = av_frame_copy_props(out, in0)) < 0)
-        goto fail;
-    set_output_props(out, in0, ctx->inputs[0], outlink, fs->pts, fs->time_base);
-    /* The color properties are the negotiated ones of the output link, not input 0's. */
-    out->colorspace  = outlink->colorspace;
-    out->color_range = outlink->color_range;
-    /* The pixels are new: drop what describes the old ones. */
-    av_frame_side_data_remove_by_props(&out->side_data, &out->nb_side_data,
-                                       AV_SIDE_DATA_PROP_COLOR_DEPENDENT);
-    av_frame_remove_side_data(out, AV_FRAME_DATA_MOTION_VECTORS);
-    av_frame_remove_side_data(out, AV_FRAME_DATA_VIDEO_ENC_PARAMS);
-    if ((ret = output_target(s, out, &target)) < 0)
-        goto fail;
-
-    if (ctx->is_disabled) {
-        /* Pass input 0 through, converted to the output format. */
-        if (gpufx_effect_convert_frame(s->fx, &s->frames[0], &target) < 0) {
+    if (passthrough) {
+        /* Nothing to run. */
+    } else if (ctx->is_disabled) {
+        /* Pass the inputs through, converted to the output formats. */
+        if (gpufx_effect_convert_graph(s->fx, s->frames, s->nb_inputs, s->targets, s->nb_outputs) < 0) {
             ret = gpufx_error(ctx, "Conversion failed");
             goto fail;
         }
@@ -633,18 +724,31 @@ static int process_frame(FFFrameSync *fs)
         }
 
         info = (GpufxFrameInfo){ isnan(vars[VAR_T]) ? 0.0 : vars[VAR_T], s->frame_count, vars[VAR_SAR] };
-        if (gpufx_effect_process_frames(s->fx, s->frames, s->nb_inputs, &target, &info) < 0) {
+        if (gpufx_effect_process_graph(s->fx, s->frames, s->nb_inputs, s->targets, s->nb_outputs, &info) < 0) {
             ret = gpufx_error(ctx, "Processing failed");
             goto fail;
         }
         s->frame_count++;
     }
-    if ((ret = finish_output(s, out, &target)) < 0)
-        goto fail;
-    return ff_filter_frame(outlink, out);
+    for (unsigned k = 0; !passthrough && k < s->nb_outputs; k++)
+        if ((ret = finish_output(s, k, s->out[k], &s->targets[k])) < 0)
+            goto fail;
+    for (unsigned k = 0; k < s->nb_outputs; k++) {
+        AVFrame *out = s->out[k];
+
+        s->out[k] = NULL;
+        /* An output closed downstream (-frames:v on its file) takes nothing more. */
+        if (ff_outlink_get_status(ctx->outputs[k])) {
+            av_frame_free(&out);
+            continue;
+        }
+        if ((ret = ff_filter_frame(ctx->outputs[k], out)) < 0)
+            goto fail;
+    }
+    return 0;
 
 fail:
-    av_frame_free(&out);
+    drop_outputs(s);
     return ret;
 }
 
@@ -686,23 +790,24 @@ static int query_formats(const AVFilterContext *ctx,
         if ((ret = ff_formats_ref(ff_all_alpha_modes(), &cfg_in[i]->alpha_modes)) < 0)
             return ret;
     }
-    if ((ret = ff_formats_ref(ff_make_format_list(out_alpha), &cfg_out[0]->alpha_modes)) < 0)
-        return ret;
-
-    formats = NULL;
-    for (uint32_t j = 0; j < gpufx_effect_output_format_count(s->fx); j++)
-        if ((ret = ff_add_format(&formats, av_get_pix_fmt(gpufx_effect_output_format(s->fx, j)))) < 0)
+    for (unsigned k = 0; k < s->nb_outputs; k++) {
+        if ((ret = ff_formats_ref(ff_make_format_list(out_alpha), &cfg_out[k]->alpha_modes)) < 0)
             return ret;
-    return ff_formats_ref(formats, &cfg_out[0]->formats);
+        formats = NULL;
+        for (uint32_t j = 0; j < gpufx_effect_output_pad_format_count(s->fx, k); j++)
+            if ((ret = ff_add_format(&formats, av_get_pix_fmt(gpufx_effect_output_pad_format(s->fx, k, j)))) < 0)
+                return ret;
+        if ((ret = ff_formats_ref(formats, &cfg_out[k]->formats)) < 0)
+            return ret;
+    }
+    return 0;
 }
 
-static int config_output(AVFilterLink *outlink)
+/* Checks every input against the manifest rules and sets up framesync; once. */
+static int config_inputs(AVFilterContext *ctx)
 {
-    AVFilterContext *ctx = outlink->src;
     GpufxContext *s = ctx->priv;
     AVFilterLink *inlink = ctx->inputs[0];
-    FilterLink *il = ff_filter_link(inlink);
-    FilterLink *ol = ff_filter_link(outlink);
     GpufxStreamInfo *streams;
     int ret;
 
@@ -745,16 +850,6 @@ static int config_output(AVFilterLink *outlink)
         }
     }
 
-    outlink->w = inlink->w;
-    outlink->h = inlink->h;
-    outlink->sample_aspect_ratio = inlink->sample_aspect_ratio;
-    ol->frame_rate = il->frame_rate;
-    /* The output link takes input 0's side data; drop what the new pixels invalidate. */
-    av_frame_side_data_remove_by_props(&outlink->side_data, &outlink->nb_side_data,
-                                       AV_SIDE_DATA_PROP_COLOR_DEPENDENT);
-
-    if ((ret = ff_framesync_init(&s->fs, ctx, s->nb_inputs)) < 0)
-        return ret;
     s->fs.opaque   = s;
     s->fs.on_event = process_frame;
     for (unsigned i = 0; i < s->nb_inputs; i++) {
@@ -773,15 +868,73 @@ static int config_output(AVFilterLink *outlink)
         /* The first input decides the output length; others hold their last frame. */
         in->after     = (i == 0 || s->shortest) ? EXT_STOP : EXT_INFINITY;
     }
-    ret = ff_framesync_configure(&s->fs);
-    outlink->time_base = s->fs.time_base;
-    return ret;
+    if ((ret = ff_framesync_configure(&s->fs)) < 0)
+        return ret;
+    s->configured = 1;
+    return 0;
 }
 
+/*
+ * Output k has the size, aspect ratio and frame rate of its source input (the first
+ * input of the effect writing it); frames come at input 0's events.
+ */
+static int config_output(AVFilterLink *outlink)
+{
+    AVFilterContext *ctx = outlink->src;
+    GpufxContext *s = ctx->priv;
+    AVFilterLink *inlink = ctx->inputs[s->source[FF_OUTLINK_IDX(outlink)]];
+    FilterLink *il = ff_filter_link(ctx->inputs[0]);
+    FilterLink *ol = ff_filter_link(outlink);
+    int ret;
+
+    if (!s->configured && (ret = config_inputs(ctx)) < 0)
+        return ret;
+
+    outlink->w = inlink->w;
+    outlink->h = inlink->h;
+    outlink->sample_aspect_ratio = inlink->sample_aspect_ratio;
+    ol->frame_rate = il->frame_rate;
+    /* The output link takes input 0's side data; drop what the new pixels invalidate. */
+    av_frame_side_data_remove_by_props(&outlink->side_data, &outlink->nb_side_data,
+                                       AV_SIDE_DATA_PROP_COLOR_DEPENDENT);
+    outlink->time_base = s->fs.time_base;
+    return 0;
+}
+
+/*
+ * framesync only looks at the first output: it requests input frames only when that
+ * output wants one, stops the inputs when it is closed and ends only that one. Request
+ * frames for the other outputs too, close them with output 0, and keep running while
+ * output 0 is open even when others are closed (their frames are dropped).
+ */
 static int activate(AVFilterContext *ctx)
 {
     GpufxContext *s = ctx->priv;
-    return ff_framesync_activate(&s->fs);
+    int ret = ff_framesync_activate(&s->fs);
+
+    if (ret == FFERROR_NOT_READY && !ff_outlink_get_status(ctx->outputs[0])) {
+        int wanted = 0;
+
+        for (unsigned k = 1; k < s->nb_outputs; k++)
+            wanted |= ff_outlink_frame_wanted(ctx->outputs[k]);
+        if (wanted) {
+            /* An input's status_in is set before framesync acknowledges its EOF. */
+            for (unsigned i = 0; i < s->nb_inputs; i++)
+                if (!ff_inlink_queued_frames(ctx->inputs[i]) && !ff_outlink_get_status(ctx->inputs[i]))
+                    ff_inlink_request_frame(ctx->inputs[i]);
+            return 0;
+        }
+    }
+
+    if (ret >= 0 && ff_outlink_get_status(ctx->outputs[0])) {
+        int64_t pts = s->fs.pts == AV_NOPTS_VALUE ? AV_NOPTS_VALUE :
+                      av_rescale_q(s->fs.pts, s->fs.time_base, ctx->outputs[0]->time_base);
+
+        for (unsigned k = 1; k < s->nb_outputs; k++)
+            if (!ff_outlink_get_status(ctx->outputs[k]))
+                ff_outlink_set_status(ctx->outputs[k], AVERROR_EOF, pts);
+    }
+    return ret;
 }
 
 static int process_command(AVFilterContext *ctx, const char *cmd, const char *args,
@@ -798,7 +951,8 @@ static int process_command(AVFilterContext *ctx, const char *cmd, const char *ar
 
 static const AVOption gpufx_options[] = {
     { "effect",   "effect package (.zip or directory), or packages chained as a.zip|b.zip", OFFSET(effect_path), AV_OPT_TYPE_STRING, { .str = NULL },   0, 0, FLAGS },
-    { "params",   "effect parameters as name=value|name=value (package.name in a chain)", OFFSET(params_str),  AV_OPT_TYPE_STRING, { .str = NULL },   0, 0, FLAGS },
+    { "graph",    "effect graph: '[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'", OFFSET(graph_str),   AV_OPT_TYPE_STRING, { .str = NULL },   0, 0, FLAGS },
+    { "params",   "effect parameters as name=value|name=value (package.name in a chain or graph)", OFFSET(params_str),  AV_OPT_TYPE_STRING, { .str = NULL },   0, 0, FLAGS },
     { "backend",  "GPU API: auto, vulkan, dx12, metal, gl",          OFFSET(backend),     AV_OPT_TYPE_STRING, { .str = "auto" }, 0, 0, FLAGS },
     { "shortest", "end when the shortest input ends",                OFFSET(shortest),    AV_OPT_TYPE_BOOL,   { .i64 = 0 },      0, 1, FLAGS },
     { NULL }
@@ -806,24 +960,16 @@ static const AVOption gpufx_options[] = {
 
 AVFILTER_DEFINE_CLASS(gpufx);
 
-static const AVFilterPad gpufx_outputs[] = {
-    {
-        .name         = "default",
-        .type         = AVMEDIA_TYPE_VIDEO,
-        .config_props = config_output,
-    },
-};
-
 const FFFilter ff_vf_gpufx = {
     .p.name          = "gpufx",
     .p.description   = NULL_IF_CONFIG_SMALL("Apply a GPU effect package (manifest + WGSL shaders)."),
     .p.priv_class    = &gpufx_class,
-    .p.flags         = AVFILTER_FLAG_DYNAMIC_INPUTS | AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL,
+    .p.flags         = AVFILTER_FLAG_DYNAMIC_INPUTS | AVFILTER_FLAG_DYNAMIC_OUTPUTS |
+                       AVFILTER_FLAG_SUPPORT_TIMELINE_INTERNAL,
     .priv_size       = sizeof(GpufxContext),
     .init            = init,
     .uninit          = uninit,
     .activate        = activate,
     .process_command = process_command,
-    FILTER_OUTPUTS(gpufx_outputs),
     FILTER_QUERY_FUNC2(query_formats),
 };

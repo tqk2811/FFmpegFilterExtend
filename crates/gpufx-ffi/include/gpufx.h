@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define GPUFX_API_VERSION 4
+#define GPUFX_API_VERSION 5
 
 typedef struct GpufxEffect GpufxEffect;
 
@@ -149,6 +149,32 @@ GpufxEffect *gpufx_effect_open(const char *path, const char *backend);
  * Fails when no format the previous effect outputs is accepted by the next.
  */
 GpufxEffect *gpufx_effect_open_chain(const char *const *paths, uint32_t count, const char *backend);
+
+/*
+ * Since version 5. Opens a graph of effects that runs in one GPU submission:
+ *   "[0]split[a][b]; [a]blur.zip[ba]; [b]gray.zip|vignette.zip[gb]; [ba][gb]crossfade.zip[out]"
+ * Statements are separated by ';'. Each reads labels, runs a node and writes labels.
+ * [0], [1]... are the input pads (named "in0", "in1"...); every pad up to the highest
+ * must be read. Other labels (letters, digits, '_', '-') are written once and read at most once (split them to read
+ * them twice). Labels no statement reads are the output pads, in the order they are
+ * written; gpufx_effect_output_name() gives their labels. A node is:
+ *   split         one label in, any number out, no copy (the outputs are the input)
+ *   null          one label in, one out, no copy
+ *   a.zip|b.zip   packages (paths, as for gpufx_effect_open) chained as in
+ *                 gpufx_effect_open_chain(): as many labels in as the first package has
+ *                 inputs, one out.
+ * An effect writes the size of its first input. Every input is uploaded once and every
+ * output read back once; edges stay on the GPU in pooled textures that are reused once
+ * their last reader has run. Cycles, labels read but never written, written twice or
+ * read twice, unread pads and wrong label counts fail here; the manifest size and format
+ * rules of every node are checked by gpufx_effect_check_inputs(). Paths must not contain
+ * '[', ']', ';' or '|'.
+ * Parameters are named as in a chain over all packages of the graph, in statement order;
+ * gpufx_effect_find_param() also takes "label.name" where label is the output label of a
+ * node ("ba.radius"). The other functions describe the graph: input formats are those
+ * every effect reading the pad accepts, gpufx_effect_output_format*() describe output 0.
+ */
+GpufxEffect *gpufx_effect_open_graph(const char *graph, const char *backend);
 void gpufx_effect_free(GpufxEffect *fx);
 
 /* Strings below are owned by the effect and live as long as it does. */
@@ -169,6 +195,21 @@ const char *gpufx_effect_input_format(const GpufxEffect *fx, uint32_t input, uin
 /* Pixel formats the effect may output, in order of preference (at least one). */
 uint32_t gpufx_effect_output_format_count(const GpufxEffect *fx);
 const char *gpufx_effect_output_format(const GpufxEffect *fx, uint32_t index);
+
+/*
+ * Since version 5. Output pads: 1 for an effect or a chain (named "default"), any number
+ * for a graph (named after their labels).
+ */
+uint32_t gpufx_effect_output_count(const GpufxEffect *fx);
+const char *gpufx_effect_output_name(const GpufxEffect *fx, uint32_t output);
+/*
+ * Since version 5. The input pad whose size output has (effects write the size of their
+ * first input), or a negative value when there is no such output.
+ */
+int gpufx_effect_output_source(const GpufxEffect *fx, uint32_t output);
+/* Since version 5. gpufx_effect_output_format*() for any output pad. */
+uint32_t gpufx_effect_output_pad_format_count(const GpufxEffect *fx, uint32_t output);
+const char *gpufx_effect_output_pad_format(const GpufxEffect *fx, uint32_t output, uint32_t index);
 
 /*
  * Checks one stream per input against the manifest rules (pixel format, size limits,
@@ -217,6 +258,26 @@ int gpufx_effect_process(GpufxEffect *fx, const GpufxImage *inputs, uint32_t nb_
  */
 int gpufx_effect_process_frames(GpufxEffect *fx, const GpufxFrame *inputs, uint32_t nb_inputs,
                                 const GpufxFrameOut *out, const GpufxFrameInfo *info);
+
+/*
+ * Since version 5. gpufx_effect_process_frames() for any number of outputs: outs holds
+ * one frame per output pad, each the size of its gpufx_effect_output_source() input.
+ * Everything runs in one GPU submission and all outputs are read back together through
+ * one shared buffer. No plane may overlap another (refused).
+ * gpufx_effect_process_frames() and gpufx_effect_convert_frame() refuse a graph with
+ * several outputs.
+ */
+int gpufx_effect_process_graph(GpufxEffect *fx, const GpufxFrame *inputs, uint32_t nb_inputs,
+                               const GpufxFrameOut *outs, uint32_t nb_outputs,
+                               const GpufxFrameInfo *info);
+
+/*
+ * Since version 5. Bypass for any number of outputs: each output is its
+ * gpufx_effect_output_source() input converted to its format, without running the effects.
+ * inputs may hold only the first pads, as long as every output's source is among them.
+ */
+int gpufx_effect_convert_graph(GpufxEffect *fx, const GpufxFrame *inputs, uint32_t nb_inputs,
+                               const GpufxFrameOut *outs, uint32_t nb_outputs);
 
 /*
  * Converts input to out's format and colour properties without running

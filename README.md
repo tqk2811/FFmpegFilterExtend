@@ -10,6 +10,9 @@ Video effects powered by **GPU shaders** for FFmpeg, loaded from external **`.zi
 - Parameters are literals or time-based expressions; change them at run time with `sendcmd`.
 - Several effects in one filter (`effect='blur.zip|vignette.zip'`): the frame is uploaded to the
   GPU once, runs through the whole chain, and only then goes back to RAM.
+- A whole **effect graph** in one filter (`graph='[0]split[a][b]; [a]blur.zip[x]; [x][b]crossfade.zip[out]'`):
+  branches, several inputs and several outputs, all in one GPU submission; `split` copies nothing and
+  intermediate textures are pooled.
 - A package declares **input/output rules** (pixel format, size, same size across inputs);
   a stream that does not match gets a clear error instead of a silent conversion.
 - 36 sample effects: color adjustment, grayscale, sepia, sharpen, pixelate, chroma key,
@@ -19,6 +22,13 @@ Video effects powered by **GPU shaders** for FFmpeg, loaded from external **`.zi
 ```sh
 ffmpeg -i a.mp4 -i b.mp4 -filter_complex \
   "[0][1]gpufx=effect=wipe-transition.zip:params='progress=clip((t-1)/1.5\,0\,1)|angle=45'" out.mp4
+```
+
+```sh
+# one upload, a diamond of effects on the GPU, two output pads written to two files
+ffmpeg -i a.mp4 -i b.mp4 -filter_complex \
+  "[0:v][1:v]gpufx=graph='[0]split[a][b]; [a]gaussian-blur.zip[ba]; [b]grayscale.zip|vignette.zip[gb]; [ba][gb]crossfade.zip[x]; [x]split[x1][x2]; [x2][1]wipe-transition.zip[w]':params='x.progress=0.5|w.progress=t'[mix][wipe]" \
+  -map "[mix]" mix.mp4 -map "[wipe]" wipe.mp4
 ```
 
 Docs: [design](docs/DESIGN.md) · [package format and how to write shaders](docs/EFFECT_FORMAT.md)

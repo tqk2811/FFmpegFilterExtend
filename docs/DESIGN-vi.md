@@ -128,6 +128,7 @@ tạo graph thay vì chạy sai.
 
 ```
 gpufx=effect=<zip|thư mục>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)'][:backend=auto|vulkan|dx12|metal|gl][:shortest=0|1]
+gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backend=...][:shortest=0|1]
 ```
 
 - **effect**: đường dẫn gói. Số input của filter lấy từ manifest.
@@ -140,6 +141,8 @@ gpufx=effect=<zip|thư mục>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1
   Tham số đặt theo `gói.tên` (tên file bỏ `.zip`, ví dụ `vignette.strength`), `chỉ_số.tên`
   (đếm từ 0, bắt buộc khi hai gói trùng tên hoặc tên gói là số), hoặc tên trơn nếu chỉ một
   hiệu ứng có nó. Dấu cách quanh `|` được bỏ qua.
+- **graph**: cả đồ thị hiệu ứng với nhiều input và output, thay cho `effect`; xem "Đồ thị GPU trong
+  một filter" ở mục 6.
 - **params**: `tên=giá trị` cách nhau bởi `|`. Giá trị là literal (`0.5`, `1,0,0`, `#ff8800`)
   hoặc **biểu thức FFmpeg** theo `t`, `n`, `w`, `h`, `a` (`w/h`), `sar`, `dar` (`a*sar`),
   tính lại mỗi frame. Đây là cách làm keyframe/transition không cần tool ngoài.
@@ -149,7 +152,7 @@ gpufx=effect=<zip|thư mục>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1
 - Nhiều input dùng `framesync`: input đầu quyết định độ dài và frame rate (input khác lệch
   fps thì frame của nó được lặp hoặc bỏ). Input khác chưa bắt đầu thì là ảnh trong suốt; đã
   hết thì giữ frame cuối (hoặc `shortest=1`).
-- Output nhận kích thước, SAR, frame rate của input đầu; colorspace/range/alpha là giá trị
+- Output nhận kích thước, SAR, frame rate của input đầu (trong đồ thị: của input pad mà nguồn của nó đi ra); colorspace/range/alpha là giá trị
   đã negotiate của link output. Side data phụ thuộc màu (HDR metadata, film grain...), motion
   vector và video enc params bị bỏ vì pixel đã khác.
 - Kích thước hay pixel format của input đổi giữa chừng thì báo lỗi (`ffmpeg` tự dựng lại
@@ -229,27 +232,46 @@ Chi phí chính là upload/readback và chuyển màu trên CPU. Lộ trình b�
 Ở mọi giai đoạn, **định dạng gói và shader không đổi**: tác giả không cần biết frame đến từ
 CPU hay CUDA.
 
-### Đồ thị GPU trong một filter (dự kiến, sau P1)
+### Đồ thị GPU trong một filter (xong, C API v5)
 
-Một `gpufx` chạy được cả đồ thị hiệu ứng, nên nhánh phức tạp ở lại trên GPU với mọi backend
+Một `gpufx` chạy cả đồ thị hiệu ứng, nên nhánh phức tạp ở lại trên GPU với mọi backend
 (Vulkan, D3D12, Metal, GL), không cần hw frame:
 
 ```sh
 ffmpeg -i a.mp4 -i b.mp4 -filter_complex "[0:v][1:v]gpufx=graph='[0]split[a][b]; [a]gaussian-blur.zip[ba]; [b]grayscale.zip|vignette.zip[gb]; [ba][gb]crossfade.zip[x]; [x][1]wipe-transition.zip[out]'[v]" -map "[v]" out.mp4
 ```
 
-`[0]`, `[1]` là input pad của filter, `[out]` là output pad; dấu nháy đơn che `;` và `[]` khỏi
-filter graph bên ngoài.
+Dấu nháy đơn che `;` và `[]` khỏi filter graph bên ngoài. Quy tắc:
 
-- Mỗi input pad tải lên một lần, mỗi output pad đọc về một lần; mọi texture trung gian ở lại
-  trên GPU. Đồ thị có thể có nhiều output pad.
-- `split` không tốn gì: chỉ là hai cạnh cùng đọc một texture.
-- Cả đồ thị chạy trong một lần submit, các nút theo thứ tự topo. `effect='a.zip|b.zip'` là
-  trường hợp đồ thị thẳng, nên `EffectChain` của A2 được mở rộng thành DAG.
-- Tham số đặt tên theo nhãn của nút như chuỗi hiện nay; `sendcmd` vẫn dùng được.
-- Kiểm tra lúc configure: vòng lặp, nhãn thừa hoặc chưa định nghĩa, quy tắc kích thước/format
-  đều báo lỗi rõ ràng.
-- Zero-copy (P3) sau này đưa hw frame vào cùng đồ thị đó; đồ thị không đổi.
+- Các câu cách nhau bởi `;`; mỗi câu đọc nhãn, chạy một nút rồi ghi nhãn.
+- `[0]`, `[1]`... là input pad của filter (tên `in0`, `in1`...). Mọi pad tới pad cao nhất đều phải được đọc.
+- Nhãn khác (chữ, số, `_`, `-`; không có `.` vì trùng với `nhãn.tham_số`) được ghi đúng một lần và đọc nhiều nhất một lần (muốn đọc hai lần thì `split`).
+- **Output**: các nhãn không câu nào đọc là output pad của filter, theo thứ tự được ghi (được phép
+  nhiều output; tên pad là nhãn). Không có danh sách output riêng: nhãn gõ sai thành output pad thừa,
+  FFmpeg báo là chưa nối.
+- Nút là `split` (một nhãn vào, bao nhiêu nhãn ra cũng được), `null` (một vào, một ra), hoặc các gói
+  nối bằng `|` như `effect=`, đọc số nhãn bằng số input của gói đầu và ghi một nhãn. `split` và
+  `null` không tốn gì: output của chúng *chính là* input (hai cạnh cùng đọc một texture).
+- Hiệu ứng ghi kích thước input đầu của nó; output pad k lấy kích thước, SAR và frame rate của input
+  pad mà nguồn của nó đi ra. Frame ra theo sự kiện của input 0 (framesync như khi có nhiều input).
+- Mỗi input pad upload một lần, mỗi output pad readback một lần, mọi output qua một buffer readback
+  dùng chung; cả đồ thị chạy trong một lần submit, hiệu ứng theo thứ tự topo. Các frame output của
+  một sự kiện được gửi cùng nhau.
+- `effect='a.zip|b.zip'` là đồ thị thẳng: `EffectChain` bọc `EffectGraph`, và `Effect` đơn cũng chạy
+  qua cùng đoạn mã. `effect` và `graph` không dùng cùng lúc.
+- Tham số đặt tên như chuỗi, trên mọi gói của đồ thị theo thứ tự câu (`nhãn.tên`, `chỉ_số.tên`, tên
+  trơn); `nút.tên` với nhãn output của nút cũng được (`ba.radius`; `gb.strength` tìm hiệu ứng duy nhất
+  trong `grayscale|vignette` có `strength`). `sendcmd` vẫn dùng được.
+- Kiểm lúc tạo filter: vòng lặp, nhãn đọc mà chưa ghi, ghi hai lần hoặc đọc hai lần, input pad không
+  được đọc, số nhãn so với số input của nút, nhãn output là số. Kiểm lúc configure: quy tắc kích
+  thước và format trong manifest của mọi nút (một cạnh mang kích thước của hiệu ứng ghi nó và format
+  negotiate giữa hai hiệu ứng), và input pad được các hiệu ứng không có format chung đọc.
+- Với `enable=`, đồ thị bị tắt gửi input pad nguồn của mỗi output, chuyển sang format của output.
+- Đường dẫn trong đồ thị không được chứa `[`, `]`, `;` hoặc `|`.
+
+C API (v5, chỉ thêm): `gpufx_effect_open_graph`, `gpufx_effect_output_count`, `gpufx_effect_output_name`,
+`gpufx_effect_output_source`, `gpufx_effect_output_pad_format[_count]`, `gpufx_effect_process_graph`,
+`gpufx_effect_convert_graph`; xem `gpufx.h`.
 
 ### Ngân sách VRAM (quy tắc cho mọi giai đoạn)
 
@@ -258,13 +280,20 @@ VRAM có hạn, nên bộ nhớ GPU giữ ở mức thấp nhất và không nh�
 - Không chép thêm khi vào/ra: texture các plane YUV và texture RGBA sau chuyển đổi được dùng
   lại qua các frame; hiệu ứng đầu tiên đọc thẳng texture đã chuyển đổi.
 - Texture trung gian (output của pass, chỗ nối chuỗi, cạnh của đồ thị) lấy từ pool theo kích
-  thước và format (đã làm cho chuỗi: chuỗi 1 input, 2 hiệu ứng mỗi cái một pass cấp hai texture
-  output, hiệu ứng thứ ba dùng lại texture đầu). Texture có thời gian sống không chồng nhau dùng chung bộ nhớ (ping-pong);
-  texture trả về pool ngay sau lần đọc cuối. Bước kiểm tra đồ thị tính trước số texture sống
-  cùng lúc tối đa, nên đồ thị rộng chỉ tốn số texture sống đồng thời, không phải một cái mỗi nút.
+  thước và format: chuỗi 1 input, 2 hiệu ứng mỗi cái một pass cấp hai texture output, hiệu ứng thứ
+  ba dùng lại texture đầu. Texture có thời gian sống không chồng nhau dùng chung bộ nhớ (ping-pong);
+  texture trả về pool ngay sau lần đọc cuối, tính trên cả đồ thị theo thứ tự chạy. Output của pass
+  mà cũng là output của đồ thị được giữ tới lúc readback. Kế hoạch được tính trước khi cấp gì
+  (`EffectGraph::memory_plan`), nên đồ thị rộng chỉ tốn số texture sống đồng thời, không phải một cái
+  mỗi nút. Ví dụ đồ thị hình thoi `[0]split[a][b]; [a]gaussian-blur[ba]; [b]grayscale|vignette[gb];
+  [ba][gb]crossfade[out]`: năm output của pass dùng chung **3** texture trong pool (hai pass của blur
+  và frame xám sống cùng lúc; vignette dùng lại pass đầu của blur, crossfade dùng lại frame xám), thêm
+  một texture upload (RGBA thẳng được đọc trực tiếp) và một buffer readback: 5 lần cấp cỡ một frame
+  (1920x1080 `rgba8unorm`: 3 x 7,9 MiB trong pool, tổng 41,5 MB), so với 8 nếu mỗi output của pass
+  một texture và `split` chép một bản (5 + 1 + upload + readback).
 - `rgba16float` (gấp đôi `rgba8unorm`) chỉ dùng khi cần độ chính xác (input/output trên
   8 bit); chuỗi toàn 8 bit giữ `rgba8unorm`.
-- Buffer staging và readback dùng chung, không theo từng hiệu ứng. Texture được giải phóng khi
+- Buffer staging và readback dùng chung, không theo từng hiệu ứng: một buffer readback chứa mọi output của đồ thị. Texture được giải phóng khi
   kích thước frame đổi.
 - Texture của gói (PNG) thuộc `Program` dùng chung, nạp một lần cho mỗi device.
 

@@ -71,3 +71,17 @@
 - **Vị trí**: [crates/gpufx-core/src/runtime.rs](../crates/gpufx-core/src/runtime.rs) (`create_texture`, sampler), `examples/effects/{fit,push-box,photo-collection}`.
 - **Vì sao**: cần tuỳ chọn mipmap cho input (sinh mip trên GPU mỗi frame) hoặc pass thu nhỏ trước; làm cùng bước mipmap của [Plan-sprites-vi.md](Plan-sprites-vi.md).
 - **Ngày ghi**: 2026-10-12
+
+### Đồ thị GPU: các giới hạn còn lại
+- **Vấn đề**:
+  - framesync của FFmpeg chỉ nhìn output 0 (`ff_framesync_init` assert một output, nên `vf_gpufx.c` gọi nó khi mới có pad đầu). `activate()` tự xin frame từ input khi output khác muốn frame, và đóng các output còn lại khi output 0 đóng. Output 0 đóng trước (ví dụ `-frames:v` chỉ trên file của output 0) thì mọi output dừng.
+  - Output đã đóng (output khác 0) vẫn được tính trên GPU mỗi frame, chỉ bỏ frame đi; nên bỏ output đó khỏi lần chạy (tốn ít VRAM/thời gian hơn).
+  - framesync chỉ cấu hình một lần cho mỗi instance filter (output đầu tiên được configure làm việc đó); configure lại link (đổi graph lúc chạy bằng API) chưa được xử lý.
+  - Không có danh sách output riêng: nhãn không ai đọc là output, nên nhãn gõ sai thành output pad thừa (FFmpeg báo pad chưa nối, chưa nói rõ nhãn nào).
+  - pts, thời lượng và thuộc tính frame (side data, field order) của mọi output lấy từ input 0, kể cả output có kích thước của input khác; cảnh báo SAR vẫn so với input 0.
+  - Khi `enable=` tắt filter, chỉ đi tắt (clone frame) nếu mọi output đều trùng format với input nguồn; còn lại tất cả qua `gpufx_effect_convert_graph`.
+  - Đường dẫn gói trong `graph=` không được chứa `[`, `]`, `;`, `|`. `memory_plan`/`MemoryStats` chỉ có trong Rust, chưa có trong C API và chưa log trong `vf_gpufx.c`.
+  - Pool texture riêng cho từng filter `gpufx`; hai filter cạnh nhau không dùng chung.
+- **Vị trí**: [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`init`, `activate`, `process_frame`), [crates/gpufx-core/src/graph.rs](../crates/gpufx-core/src/graph.rs).
+- **Vì sao**: muốn các output độc lập thật thì phải tự viết đồng bộ frame thay framesync (hoặc framesync có hỗ trợ nhiều output); số liệu VRAM nên hiện ra cho người dùng (log verbose hoặc hàm C).
+- **Ngày ghi**: 2026-10-12

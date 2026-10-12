@@ -8,6 +8,9 @@ Hiệu ứng video chạy bằng **shader trên GPU** cho FFmpeg, nạp từ **g
 - Tham số là literal hoặc biểu thức theo thời gian; đổi lúc chạy bằng `sendcmd`.
 - Nhiều hiệu ứng trong một filter (`effect='blur.zip|vignette.zip'`): frame lên GPU một lần,
   chạy hết chuỗi rồi mới về RAM.
+- Cả **đồ thị hiệu ứng** trong một filter (`graph='[0]split[a][b]; [a]blur.zip[x]; [x][b]crossfade.zip[out]'`):
+  rẽ nhánh, nhiều input và nhiều output, tất cả trong một lần submit GPU; `split` không chép gì và
+  texture trung gian lấy từ pool.
 - Gói khai báo **quy tắc input/output** (pixel format, kích thước, cùng kích thước giữa
   các input); stream không khớp thì báo lỗi rõ ràng thay vì chuyển đổi ngầm.
 - 36 hiệu ứng mẫu: chỉnh màu, đen trắng, sepia, sharpen, pixelate, chroma key,
@@ -17,6 +20,13 @@ Hiệu ứng video chạy bằng **shader trên GPU** cho FFmpeg, nạp từ **g
 ```sh
 ffmpeg -i a.mp4 -i b.mp4 -filter_complex \
   "[0][1]gpufx=effect=wipe-transition.zip:params='progress=clip((t-1)/1.5\,0\,1)|angle=45'" out.mp4
+```
+
+```sh
+# upload một lần, đồ thị hình thoi trên GPU, hai output pad ghi ra hai file
+ffmpeg -i a.mp4 -i b.mp4 -filter_complex \
+  "[0:v][1:v]gpufx=graph='[0]split[a][b]; [a]gaussian-blur.zip[ba]; [b]grayscale.zip|vignette.zip[gb]; [ba][gb]crossfade.zip[x]; [x]split[x1][x2]; [x2][1]wipe-transition.zip[w]':params='x.progress=0.5|w.progress=t'[mix][wipe]" \
+  -map "[mix]" mix.mp4 -map "[wipe]" wipe.mp4
 ```
 
 Tài liệu: [thiết kế](docs/DESIGN-vi.md) · [định dạng gói và cách viết shader](docs/EFFECT_FORMAT-vi.md) · [English](README.md)

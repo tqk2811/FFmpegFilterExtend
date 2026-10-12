@@ -195,7 +195,7 @@ fn default_entry() -> String {
 fn default_output() -> String {
     "out".into()
 }
-fn default_output_formats() -> Vec<String> {
+pub(crate) fn default_output_formats() -> Vec<String> {
     crate::PixelFormat::ALL.iter().map(|f| f.name().to_string()).collect()
 }
 fn default_inputs() -> Vec<InputDef> {

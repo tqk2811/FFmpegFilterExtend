@@ -16,12 +16,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use gpufx_core::{
-    Backend, ChromaLocation, ColorInfo, Effect, EffectChain, Frame, FrameInfo, FrameMut, GpuContext, Image, ImageMut, Matrix, Package,
-    PixelFormat, Program, Range, StreamInfo,
+    Backend, ChromaLocation, ColorInfo, Effect, EffectChain, EffectGraph, Frame, FrameInfo, FrameMut, GpuContext, Image, ImageMut, Matrix,
+    Package, PixelFormat, Program, Range, StreamInfo,
 };
 
 /// Bumped when the C ABI changes incompatibly. Must match `GPUFX_API_VERSION` in gpufx.h.
-const API_VERSION: u32 = 4;
+const API_VERSION: u32 = 5;
 
 thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
@@ -96,12 +96,13 @@ fn program(path: &str, ctx: Arc<GpuContext>) -> Result<Arc<Program>, String> {
 }
 
 pub struct GpufxEffect {
-    chain: EffectChain,
+    graph: EffectGraph,
     name: CString,
     device: CString,
     inputs: Vec<CString>,
     input_formats: Vec<Vec<CString>>,
-    output_formats: Vec<CString>,
+    outputs: Vec<CString>,
+    output_formats: Vec<Vec<CString>>,
     params: Vec<CString>,
 }
 
@@ -218,9 +219,9 @@ fn plane_lens(what: &str, format: PixelFormat, w: u32, h: u32, nulls: [bool; 4],
 
 /// Refuses an output plane that overlaps an input plane or another output plane: the
 /// GPU result is copied into it while the inputs are still borrowed.
-fn check_no_alias(inputs: &[Frame], out: &FrameMut) -> Result<(), String> {
+fn check_no_alias(inputs: &[Frame], outs: &[FrameMut]) -> Result<(), String> {
     let range = |s: &[u8]| (s.as_ptr() as usize, s.as_ptr() as usize + s.len());
-    let outs: Vec<(usize, usize)> = out.planes.iter().filter(|p| !p.is_empty()).map(|p| range(p)).collect();
+    let outs: Vec<(usize, usize)> = outs.iter().flat_map(|o| o.planes.iter().filter(|p| !p.is_empty()).map(|p| range(p))).collect();
     let ins = inputs.iter().flat_map(|f| f.planes.iter().filter(|p| !p.is_empty()).map(|p| range(p)));
     let overlap = |a: (usize, usize), b: (usize, usize)| a.0 < b.1 && b.0 < a.1;
     for (i, &o) in outs.iter().enumerate() {
@@ -241,9 +242,9 @@ unsafe fn frame_arg<'a>(f: &GpufxFrame, what: &str) -> Result<Frame<'a>, String>
     Ok(Frame { format, width: f.width, height: f.height, planes, strides: f.stride, color: color_info(&f.color)? })
 }
 
-unsafe fn frame_out_arg<'a>(f: &GpufxFrameOut) -> Result<FrameMut<'a>, String> {
-    let format = pixel_format(f.format, "out")?;
-    let lens = plane_lens("out", format, f.width, f.height, f.data.map(|d| d.is_null()), f.stride)?;
+unsafe fn frame_out_arg<'a>(f: &GpufxFrameOut, what: &str) -> Result<FrameMut<'a>, String> {
+    let format = pixel_format(f.format, what)?;
+    let lens = plane_lens(what, format, f.width, f.height, f.data.map(|d| d.is_null()), f.stride)?;
     let mut planes: [&mut [u8]; 4] = Default::default();
     for p in 0..format.plane_count() {
         planes[p] = std::slice::from_raw_parts_mut(f.data[p], lens[p]);
@@ -296,32 +297,54 @@ fn label(path: &str) -> String {
     name.strip_suffix(".zip").or_else(|| name.strip_suffix(".ZIP")).unwrap_or(&name).to_string()
 }
 
-unsafe fn open_chain(paths: &[&str], backend: *const c_char) -> Result<*mut GpufxEffect, String> {
-    let backend: Backend = if backend.is_null() {
-        Backend::Auto
-    } else {
-        str_arg(backend, "backend")?.parse().map_err(|e: gpufx_core::Error| e.to_string())?
+unsafe fn backend_arg(backend: *const c_char) -> Result<Backend, String> {
+    if backend.is_null() {
+        return Ok(Backend::Auto);
+    }
+    str_arg(backend, "backend")?.parse().map_err(|e: gpufx_core::Error| e.to_string())
+}
+
+fn wrap(graph: EffectGraph, name: String, device: CString) -> *mut GpufxEffect {
+    let strings = |list: &[String]| list.iter().map(|f| cstring(f)).collect::<Vec<_>>();
+    let out = GpufxEffect {
+        name: cstring(&name),
+        device,
+        inputs: strings(graph.input_names()),
+        input_formats: (0..graph.input_count()).map(|i| strings(graph.input_formats(i))).collect(),
+        outputs: strings(graph.output_names()),
+        output_formats: (0..graph.output_count()).map(|k| strings(graph.output_formats(k))).collect(),
+        params: strings(graph.param_names()),
+        graph,
     };
-    let ctx = context(backend).map_err(|e| e.to_string())?;
+    Box::into_raw(Box::new(out))
+}
+
+unsafe fn open_chain(paths: &[&str], backend: *const c_char) -> Result<*mut GpufxEffect, String> {
+    let ctx = context(backend_arg(backend)?).map_err(|e| e.to_string())?;
     let device = cstring(&ctx.description());
     let mut effects = Vec::with_capacity(paths.len());
     for path in paths {
         let effect = Effect::from_program(program(path, ctx.clone())?).map_err(|e| format!("{path}: {e}"))?;
         effects.push((label(path), effect));
     }
-    let chain = EffectChain::new(effects).map_err(|e| e.to_string())?;
-    let first = &chain.first().package().manifest;
-    let names: Vec<&str> = chain.effects().iter().map(|fx| fx.package().manifest.name.as_str()).collect();
-    let out = GpufxEffect {
-        name: cstring(&names.join(" | ")),
-        device,
-        inputs: first.inputs.iter().map(|i| cstring(&i.name)).collect(),
-        input_formats: first.inputs.iter().map(|i| i.formats.iter().map(|f| cstring(f)).collect()).collect(),
-        output_formats: chain.last().package().manifest.output.formats.iter().map(|f| cstring(f)).collect(),
-        params: chain.param_names().iter().map(|p| cstring(p)).collect(),
-        chain,
-    };
-    Ok(Box::into_raw(Box::new(out)))
+    let graph = EffectChain::new(effects).map_err(|e| e.to_string())?.into_graph();
+    let names: Vec<&str> = graph.effects().iter().map(|fx| fx.package().manifest.name.as_str()).collect();
+    let name = names.join(" | ");
+    Ok(wrap(graph, name, device))
+}
+
+unsafe fn open_graph(text: &str, backend: *const c_char) -> Result<*mut GpufxEffect, String> {
+    let ctx = context(backend_arg(backend)?).map_err(|e| e.to_string())?;
+    let device = cstring(&ctx.description());
+    let graph = EffectGraph::parse(text, |path| {
+        let effect = Effect::from_program(program(path, ctx.clone()).map_err(gpufx_core::Error::Package)?)
+            .map_err(|e| gpufx_core::Error::Package(format!("{path}: {e}")))?;
+        Ok((label(path), effect))
+    })
+    .map_err(|e| e.to_string())?;
+    let names: Vec<&str> = graph.effects().iter().map(|fx| fx.package().manifest.name.as_str()).collect();
+    let name = format!("graph of {}", names.join(", "));
+    Ok(wrap(graph, name, device))
 }
 
 #[no_mangle]
@@ -342,6 +365,11 @@ pub unsafe extern "C" fn gpufx_effect_open_chain(paths: *const *const c_char, co
         }
         open_chain(&list, backend)
     })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_open_graph(graph: *const c_char, backend: *const c_char) -> *mut GpufxEffect {
+    guard(ptr::null_mut(), || open_graph(str_arg(graph, "graph")?, backend))
 }
 
 #[no_mangle]
@@ -383,12 +411,46 @@ pub unsafe extern "C" fn gpufx_effect_input_format(fx: *const GpufxEffect, input
 
 #[no_mangle]
 pub unsafe extern "C" fn gpufx_effect_output_format_count(fx: *const GpufxEffect) -> u32 {
-    fx.as_ref().map_or(0, |fx| fx.output_formats.len() as u32)
+    gpufx_effect_output_pad_format_count(fx, 0)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn gpufx_effect_output_format(fx: *const GpufxEffect, index: u32) -> *const c_char {
-    fx.as_ref().and_then(|fx| fx.output_formats.get(index as usize)).map_or(ptr::null(), |s| s.as_ptr())
+    gpufx_effect_output_pad_format(fx, 0, index)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_output_count(fx: *const GpufxEffect) -> u32 {
+    fx.as_ref().map_or(0, |fx| fx.outputs.len() as u32)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_output_name(fx: *const GpufxEffect, output: u32) -> *const c_char {
+    fx.as_ref().and_then(|fx| fx.outputs.get(output as usize)).map_or(ptr::null(), |s| s.as_ptr())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_output_source(fx: *const GpufxEffect, output: u32) -> c_int {
+    guard(-1, || {
+        let fx = fx.as_ref().ok_or("effect is NULL")?;
+        if output as usize >= fx.graph.output_count() {
+            return Err(format!("no output {output}"));
+        }
+        Ok(fx.graph.output_pad(output as usize) as c_int)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_output_pad_format_count(fx: *const GpufxEffect, output: u32) -> u32 {
+    fx.as_ref().and_then(|fx| fx.output_formats.get(output as usize)).map_or(0, |f| f.len() as u32)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_output_pad_format(fx: *const GpufxEffect, output: u32, index: u32) -> *const c_char {
+    fx.as_ref()
+        .and_then(|fx| fx.output_formats.get(output as usize))
+        .and_then(|f| f.get(index as usize))
+        .map_or(ptr::null(), |s| s.as_ptr())
 }
 
 #[no_mangle]
@@ -404,7 +466,7 @@ pub unsafe extern "C" fn gpufx_effect_check_inputs(fx: *const GpufxEffect, strea
             let format = if s.format.is_null() { None } else { Some(str_arg(s.format, &format!("stream {i} format"))?) };
             infos.push(StreamInfo { format, width: s.width, height: s.height });
         }
-        fx.chain.check_inputs(&infos).map_err(|e| e.to_string())?;
+        fx.graph.check_inputs(&infos).map_err(|e| e.to_string())?;
         Ok(0)
     })
 }
@@ -423,7 +485,7 @@ pub unsafe extern "C" fn gpufx_effect_param_name(fx: *const GpufxEffect, index: 
 pub unsafe extern "C" fn gpufx_effect_find_param(fx: *const GpufxEffect, name: *const c_char) -> c_int {
     guard(-1, || {
         let fx = fx.as_ref().ok_or("effect is NULL")?;
-        let i = fx.chain.find_param(str_arg(name, "name")?).map_err(|e| e.to_string())?;
+        let i = fx.graph.find_param(str_arg(name, "name")?).map_err(|e| e.to_string())?;
         Ok(i as c_int)
     })
 }
@@ -433,7 +495,7 @@ pub unsafe extern "C" fn gpufx_effect_set_param(fx: *mut GpufxEffect, name: *con
     guard(-1, || {
         let fx = fx.as_mut().ok_or("effect is NULL")?;
         let (name, value) = (str_arg(name, "name")?, str_arg(value, "value")?);
-        fx.chain.set_param_str(name, value).map_err(|e| e.to_string())?;
+        fx.graph.set_param_str(name, value).map_err(|e| e.to_string())?;
         Ok(0)
     })
 }
@@ -447,7 +509,7 @@ pub unsafe extern "C" fn gpufx_effect_set_param_values(fx: *mut GpufxEffect, nam
             return Err("values must hold 1 to 4 numbers".into());
         }
         let values = std::slice::from_raw_parts(values, count as usize);
-        fx.chain.set_param(name, values).map_err(|e| e.to_string())?;
+        fx.graph.set_param(name, values).map_err(|e| e.to_string())?;
         Ok(0)
     })
 }
@@ -487,9 +549,48 @@ pub unsafe extern "C" fn gpufx_effect_process(
         let target =
             ImageMut { data: std::slice::from_raw_parts_mut(out.data, out_len), width: out.width, height: out.height, stride: out.stride };
         let info = FrameInfo { time: info.time, frame: info.frame, pixel_aspect: info.pixel_aspect };
-        fx.chain.process(&images, target, &info).map_err(|e| e.to_string())?;
+        single(fx)?;
+        fx.graph.process(&images, vec![target], &info).map_err(|e| e.to_string())?;
         Ok(0)
     })
+}
+
+/// Inputs of a frame call, checked.
+unsafe fn frames_arg<'a>(inputs: *const GpufxFrame, nb_inputs: u32) -> Result<Vec<Frame<'a>>, String> {
+    if inputs.is_null() || nb_inputs == 0 {
+        return Err("inputs must not be NULL".into());
+    }
+    let raw = std::slice::from_raw_parts(inputs, nb_inputs as usize);
+    let mut frames = Vec::with_capacity(raw.len());
+    for (i, f) in raw.iter().enumerate() {
+        frames.push(frame_arg(f, &format!("input {i}"))?);
+    }
+    Ok(frames)
+}
+
+/// Outputs of a frame call, checked.
+unsafe fn outs_arg<'a>(outs: *const GpufxFrameOut, nb_outputs: u32) -> Result<Vec<FrameMut<'a>>, String> {
+    if outs.is_null() || nb_outputs == 0 {
+        return Err("outs must not be NULL".into());
+    }
+    let raw = std::slice::from_raw_parts(outs, nb_outputs as usize);
+    let mut frames = Vec::with_capacity(raw.len());
+    for (k, f) in raw.iter().enumerate() {
+        frames.push(frame_out_arg(f, &if raw.len() == 1 { "out".to_string() } else { format!("out {k}") })?);
+    }
+    Ok(frames)
+}
+
+/// The single-output functions refuse a graph with several outputs.
+fn single(fx: &GpufxEffect) -> Result<(), String> {
+    match fx.graph.output_count() {
+        1 => Ok(()),
+        n => Err(format!("the graph has {n} outputs; use gpufx_effect_process_graph()")),
+    }
+}
+
+fn frame_info(info: &GpufxFrameInfo) -> FrameInfo {
+    FrameInfo { time: info.time, frame: info.frame, pixel_aspect: info.pixel_aspect }
 }
 
 #[no_mangle]
@@ -500,21 +601,30 @@ pub unsafe extern "C" fn gpufx_effect_process_frames(
     out: *const GpufxFrameOut,
     info: *const GpufxFrameInfo,
 ) -> c_int {
+    if let Some(fx) = fx.as_ref() {
+        if guard(true, || single(fx).map(|()| false)) {
+            return -1;
+        }
+    }
+    gpufx_effect_process_graph(fx, inputs, nb_inputs, out, 1, info)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_process_graph(
+    fx: *mut GpufxEffect,
+    inputs: *const GpufxFrame,
+    nb_inputs: u32,
+    outs: *const GpufxFrameOut,
+    nb_outputs: u32,
+    info: *const GpufxFrameInfo,
+) -> c_int {
     guard(-1, || {
         let fx = fx.as_mut().ok_or("effect is NULL")?;
-        let (out, info) = (out.as_ref().ok_or("out is NULL")?, info.as_ref().ok_or("info is NULL")?);
-        if inputs.is_null() || nb_inputs == 0 {
-            return Err("inputs must not be NULL".into());
-        }
-        let raw = std::slice::from_raw_parts(inputs, nb_inputs as usize);
-        let mut frames = Vec::with_capacity(raw.len());
-        for (i, f) in raw.iter().enumerate() {
-            frames.push(frame_arg(f, &format!("input {i}"))?);
-        }
-        let info = FrameInfo { time: info.time, frame: info.frame, pixel_aspect: info.pixel_aspect };
-        let out = frame_out_arg(out)?;
-        check_no_alias(&frames, &out)?;
-        fx.chain.process_frames(&frames, out, &info).map_err(|e| e.to_string())?;
+        let info = frame_info(info.as_ref().ok_or("info is NULL")?);
+        let frames = frames_arg(inputs, nb_inputs)?;
+        let mut outs = outs_arg(outs, nb_outputs)?;
+        check_no_alias(&frames, &outs)?;
+        fx.graph.process_frames(&frames, &mut outs, &info).map_err(|e| e.to_string())?;
         Ok(0)
     })
 }
@@ -523,10 +633,29 @@ pub unsafe extern "C" fn gpufx_effect_process_frames(
 pub unsafe extern "C" fn gpufx_effect_convert_frame(fx: *mut GpufxEffect, input: *const GpufxFrame, out: *const GpufxFrameOut) -> c_int {
     guard(-1, || {
         let fx = fx.as_mut().ok_or("effect is NULL")?;
+        single(fx)?;
         let input = frame_arg(input.as_ref().ok_or("input is NULL")?, "input")?;
-        let out = frame_out_arg(out.as_ref().ok_or("out is NULL")?)?;
-        check_no_alias(std::slice::from_ref(&input), &out)?;
-        fx.chain.convert(&input, out).map_err(|e| e.to_string())?;
+        let mut outs = outs_arg(out, 1)?;
+        check_no_alias(std::slice::from_ref(&input), &outs)?;
+        fx.graph.convert(std::slice::from_ref(&input), &mut outs).map_err(|e| e.to_string())?;
+        Ok(0)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_convert_graph(
+    fx: *mut GpufxEffect,
+    inputs: *const GpufxFrame,
+    nb_inputs: u32,
+    outs: *const GpufxFrameOut,
+    nb_outputs: u32,
+) -> c_int {
+    guard(-1, || {
+        let fx = fx.as_mut().ok_or("effect is NULL")?;
+        let frames = frames_arg(inputs, nb_inputs)?;
+        let mut outs = outs_arg(outs, nb_outputs)?;
+        check_no_alias(&frames, &outs)?;
+        fx.graph.convert(&frames, &mut outs).map_err(|e| e.to_string())?;
         Ok(0)
     })
 }
@@ -571,7 +700,7 @@ mod tests {
         // Parameters stay per effect.
         let (name, value) = (CString::new("amount").unwrap(), CString::new("0.25").unwrap());
         assert_eq!(unsafe { gpufx_effect_set_param(a, name.as_ptr(), value.as_ptr()) }, 0);
-        let (pa, pb) = unsafe { ((*a).chain.first().params().bytes(), (*b).chain.first().params().bytes()) };
+        let (pa, pb) = unsafe { ((*a).graph.effects()[0].params().bytes(), (*b).graph.effects()[0].params().bytes()) };
         assert_ne!(pa, pb);
 
         let other = open(&examples.join("vignette"));
@@ -685,5 +814,68 @@ mod tests {
         assert!(unsafe { gpufx_effect_convert_frame(fx, &small, &over) } < 0);
         assert!(unsafe { CStr::from_ptr(gpufx_last_error()) }.to_str().unwrap().contains("overlaps"));
         unsafe { gpufx_effect_free(fx) };
+    }
+
+    #[test]
+    fn a_graph_has_several_outputs() {
+        let _serial = serial();
+        if GpuContext::new(Backend::Auto).is_err() {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        }
+        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects");
+        let invert = examples.join("invert");
+        let text = CString::new(format!("[0]split[a][keep]; [a]{}[inv]", invert.display())).unwrap();
+        let fx = unsafe { gpufx_effect_open_graph(text.as_ptr(), ptr::null()) };
+        assert!(!fx.is_null(), "{:?}", unsafe { CStr::from_ptr(gpufx_last_error()) });
+        let name = |s: *const c_char| unsafe { CStr::from_ptr(s) }.to_str().unwrap().to_string();
+        unsafe {
+            assert_eq!((gpufx_effect_input_count(fx), gpufx_effect_output_count(fx)), (1, 2));
+            assert_eq!(name(gpufx_effect_input_name(fx, 0)), "in0");
+            assert_eq!(name(gpufx_effect_output_name(fx, 0)), "keep");
+            assert_eq!(name(gpufx_effect_output_name(fx, 1)), "inv");
+            assert_eq!(gpufx_effect_output_source(fx, 1), 0);
+            assert!(gpufx_effect_output_source(fx, 2) < 0);
+            assert!(gpufx_effect_output_pad_format_count(fx, 1) > 0);
+            assert_eq!(name(gpufx_effect_param_name(fx, 0)), "amount");
+            assert!(gpufx_effect_find_param(fx, c"inv.amount".as_ptr()) == 0);
+        }
+        let src = [200u8; 4 * 4 * 4];
+        let (mut keep, mut inv) = ([0u8; 64], [0u8; 64]);
+        let input = GpufxFrame {
+            format: c"rgba".as_ptr(),
+            width: 4,
+            height: 4,
+            data: [src.as_ptr(), ptr::null(), ptr::null(), ptr::null()],
+            stride: [16, 0, 0, 0],
+            color: GpufxColor { matrix: 0, range: 1, chroma_location: 0, flags: 0 },
+        };
+        let out = |data: &mut [u8; 64]| GpufxFrameOut {
+            format: c"rgba".as_ptr(),
+            width: 4,
+            height: 4,
+            data: [data.as_mut_ptr(), ptr::null_mut(), ptr::null_mut(), ptr::null_mut()],
+            stride: [16, 0, 0, 0],
+            color: input.color,
+        };
+        let outs = [out(&mut keep), out(&mut inv)];
+        let info = GpufxFrameInfo { time: 0.0, frame: 0, pixel_aspect: 1.0 };
+        assert_eq!(unsafe { gpufx_effect_process_graph(fx, &input, 1, outs.as_ptr(), 2, &info) }, 0, "{:?}", unsafe {
+            CStr::from_ptr(gpufx_last_error())
+        });
+        assert_eq!((keep[0], inv[0], inv[3]), (200, 55, 200));
+        // The single output functions refuse it, and so do overlapping outputs.
+        assert!(unsafe { gpufx_effect_process_frames(fx, &input, 1, &outs[0], &info) } < 0);
+        assert!(name(gpufx_last_error()).contains("use gpufx_effect_process_graph()"), "{}", name(gpufx_last_error()));
+        assert!(unsafe { gpufx_effect_convert_frame(fx, &input, &outs[0]) } < 0);
+        let same = [out(&mut keep), out(&mut keep)];
+        assert!(unsafe { gpufx_effect_process_graph(fx, &input, 1, same.as_ptr(), 2, &info) } < 0);
+        assert_eq!(unsafe { gpufx_effect_convert_graph(fx, &input, 1, outs.as_ptr(), 2) }, 0);
+        assert_eq!((keep[0], inv[0]), (200, 200));
+        unsafe { gpufx_effect_free(fx) };
+        // Mistakes come back as errors.
+        let bad = CString::new("[0]split[a]; [a]nothing.zip[b]").unwrap();
+        assert!(unsafe { gpufx_effect_open_graph(bad.as_ptr(), ptr::null()) }.is_null());
+        assert!(name(gpufx_last_error()).contains("nothing.zip"), "{}", name(gpufx_last_error()));
     }
 }

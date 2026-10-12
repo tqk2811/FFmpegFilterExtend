@@ -89,6 +89,10 @@ How the rules apply:
   `formats` receives the stream's format as is; if it is not in the list, configuring the filter graph fails.
   To make it work, change the format first with `format=yuv420p,gpufx=...`. The size is checked
   at configuration and whenever the frame size changes. A misspelled format name is also an error.
+- **Chains and graphs** (`effect='a|b'`, `graph='...'`): every effect is checked where it sits. An effect
+  reading another sees that effect's size (the size of its first input) and the first format of its
+  `output.formats` that the reader accepts; an input pad read by several effects must have a format
+  all of them accept. `same_size` therefore also holds between two branches of a graph.
 - **`gpufx run`:** the format comes from the PNG (`rgba`, `rgb24`, `gray`, `ya8`, and the 16-bit versions
   `rgba64be`, `rgb48be`, `gray16be`, `ya16be`). The CLI always writes an RGBA PNG, so it does not check
   `output.formats`.
