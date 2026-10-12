@@ -188,8 +188,8 @@ fn uniform(format: PixelFormat, w: u32, h: u32, color: &ColorInfo, plane: Option
     }
     words.resize(UNIFORM_SIZE as usize / 4, 0);
     let mut out = [0u8; UNIFORM_SIZE as usize];
-    for (dst, word) in out.chunks_exact_mut(4).zip(words) {
-        dst.copy_from_slice(&word.to_le_bytes());
+    for (dst, word) in out.as_chunks_mut::<4>().0.iter_mut().zip(words) {
+        *dst = word.to_le_bytes();
     }
     out
 }
