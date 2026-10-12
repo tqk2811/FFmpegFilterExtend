@@ -1,0 +1,15 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.gaussian-blur",
+  "name": "Gaussian Blur",
+  "version": "1.0.0",
+  "description": "Separable gaussian blur in two passes.",
+  "inputs": [{ "name": "src" }],
+  "params": [
+    { "name": "radius", "type": "float", "default": 6, "min": 0, "max": 48, "description": "Blur radius in pixels" }
+  ],
+  "passes": [
+    { "shader": "shaders/blur_h.wgsl", "inputs": ["src"], "output": "tmp" },
+    { "shader": "shaders/blur_v.wgsl", "inputs": ["tmp"], "output": "out" }
+  ]
+}

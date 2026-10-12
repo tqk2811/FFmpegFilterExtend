@@ -1,0 +1,67 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: Software Vulkan driver (lavapipe)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --release --all-targets -- -D warnings
+      # GPU tests skip themselves when the runner has no usable adapter.
+      - run: cargo test --release
+      - name: Check every example shader
+        if: runner.os == 'Linux'
+        shell: bash
+        run: for e in examples/effects/*/; do ./target/release/gpufx check "$e"; done
+
+  ffmpeg:
+    name: FFmpeg n9.0.2 + gpufx filter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers nasm
+      - run: scripts/install-libgpufx.sh "$RUNNER_TEMP/gpufx" && cargo build --release -p gpufx-cli
+      - run: git clone --depth 1 --branch n9.0.2 https://github.com/FFmpeg/FFmpeg "$RUNNER_TEMP/FFmpeg"
+      - run: ffmpeg/integrate.sh "$RUNNER_TEMP/FFmpeg"
+      - name: Build a small FFmpeg with the gpufx filter
+        working-directory: ${{ runner.temp }}/FFmpeg
+        run: |
+          PKG_CONFIG_PATH="$RUNNER_TEMP/gpufx/lib/pkgconfig" ./configure \
+            --disable-everything --disable-doc --disable-debug --enable-libgpufx \
+            --enable-filter=gpufx,testsrc2,smptebars,sendcmd,scale,format \
+            --enable-muxer=null --enable-encoder=wrapped_avframe --enable-protocol=file,pipe \
+            --extra-ldflags="-Wl,-rpath,$RUNNER_TEMP/gpufx/lib"
+          make -j"$(nproc)" ffmpeg
+      - name: Run effects in a filter graph
+        run: |
+          FF="$RUNNER_TEMP/FFmpeg/ffmpeg"
+          E=examples/effects
+          ./target/release/gpufx pack $E/vignette vignette.zip
+          "$FF" -hide_banner -filter_complex \
+            "testsrc2=s=320x180:d=1,gpufx=effect=vignette.zip:params='strength=clip(t\,0\,1)|color=#ff0000'" -f null -
+          "$FF" -hide_banner -filter_complex \
+            "testsrc2=s=320x180:d=1[a];smptebars=s=320x180:d=1[b];[a][b]gpufx=effect=$E/wipe-transition:params='progress=t'" -f null -
+          "$FF" -hide_banner -filter_complex \
+            "testsrc2=s=320x180:d=1,gpufx=effect=$E/gaussian-blur,sendcmd=c='0.5 gpufx@g params intensity=0.2',gpufx@g=effect=$E/gradient-map,gpufx=effect=$E/rgb-split" -f null -

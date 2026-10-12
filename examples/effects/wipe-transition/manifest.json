@@ -1,0 +1,17 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.wipe-transition",
+  "name": "Soft Wipe",
+  "version": "1.0.0",
+  "description": "Transition from the first input to the second with a soft moving edge. Drive `progress` from 0 to 1.",
+  "inputs": [
+    { "name": "first", "description": "Outgoing clip" },
+    { "name": "second", "description": "Incoming clip" }
+  ],
+  "params": [
+    { "name": "progress", "type": "float", "default": 0.5, "min": 0, "max": 1, "description": "0 = first clip, 1 = second clip" },
+    { "name": "angle", "type": "float", "default": 0, "description": "Wipe direction in degrees" },
+    { "name": "softness", "type": "float", "default": 0.15, "min": 0.001, "max": 1, "description": "Edge width" }
+  ],
+  "passes": [{ "shader": "shaders/wipe.wgsl" }]
+}
