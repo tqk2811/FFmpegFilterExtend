@@ -3,7 +3,10 @@ name: CI
 on:
   push:
     branches: [main, master]
+    # Documentation only: nothing to build or test.
+    paths-ignore: ['docs/**', '**.md']
   pull_request:
+    paths-ignore: ['docs/**', '**.md']
   workflow_dispatch:
 
 env:
