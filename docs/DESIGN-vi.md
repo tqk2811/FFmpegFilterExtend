@@ -297,6 +297,24 @@ VRAM có hạn, nên bộ nhớ GPU giữ ở mức thấp nhất và không nh�
   kích thước frame đổi.
 - Texture của gói (PNG) thuộc `Program` dùng chung, nạp một lần cho mỗi device.
 
+### Cache shader trên đĩa (`GPUFX_SHADER_CACHE`)
+- `GPUFX_SHADER_CACHE=<thư mục>` giữ pipeline đã biên dịch giữa các process; không đặt thì không ghi gì.
+  Thư mục chưa có thì tạo; không ghi được thì cảnh báo một lần rồi chạy tiếp không cache.
+- Mỗi pipeline một file (`<sha256>.gpucache`), hash gồm nguồn shader cuối cùng (có prelude), ngôn ngữ,
+  entry point, format output (`rgba8unorm`/`rgba16float`), phiên bản gpufx và wgpu, backend và adapter
+  (name, vendor, device, driver, driver_info). Không kiểm mtime.
+- Chỉ Vulkan: device xin `Features::PIPELINE_CACHE` khi adapter có, mỗi pipeline của pass được tạo với
+  một `wgpu::PipelineCache` nạp từ file của nó (`fallback: true`, dữ liệu của driver/wgpu khác bị wgpu
+  bỏ qua khi kiểm header) rồi bỏ ngay sau đó, không giữ gì trong bộ nhớ. Ghi qua file tạm + rename;
+  file không đọc được hoặc hỏng thì bỏ qua và ghi lại. `GPUFX_SHADER_CACHE_MAX_MB` (mặc định 256)
+  giới hạn dung lượng thư mục, xoá file lâu không dùng nhất trước.
+- Mỗi file là blob của wgpu kèm SHA-256 của nó ở cuối, kiểm trước khi đưa cho wgpu (không khớp thì bỏ
+  qua, biên dịch lại, ghi lại). Thư mục phải riêng của người dùng: trên Unix thư mục mà người khác ghi
+  được sẽ bị từ chối kèm cảnh báo, vì file đi thẳng tới driver. File tạm cũ (quá 1 giờ) và giới hạn
+  dung lượng được dọn một lần mỗi device.
+- D3D12, Metal, GL: wgpu 30 không có cache pipeline ra đĩa, chỉ dựa vào cache của driver (giới hạn đã
+  biết, cache DXIL nằm trong [Backlog-vi.md](Backlog-vi.md)). Pipeline chuyển đổi dựng sẵn không được cache.
+
 ## 7. Bảo mật gói hiệu ứng
 
 Gói zip là dữ liệu không tin cậy (tải từ chợ hiệu ứng):

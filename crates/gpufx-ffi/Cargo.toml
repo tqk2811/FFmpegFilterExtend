@@ -3,6 +3,7 @@ name = "gpufx-ffi"
 description = "C ABI for gpufx (libgpufx), consumed by the FFmpeg gpufx filter"
 version.workspace = true
 edition.workspace = true
+rust-version = "1.88"
 license.workspace = true
 repository.workspace = true
 

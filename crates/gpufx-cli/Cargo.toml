@@ -3,6 +3,7 @@ name = "gpufx-cli"
 description = "Inspect, pack and run gpufx effect packages without FFmpeg"
 version.workspace = true
 edition.workspace = true
+rust-version = "1.88"
 license.workspace = true
 repository.workspace = true
 

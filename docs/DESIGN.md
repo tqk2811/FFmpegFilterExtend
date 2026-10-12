@@ -299,6 +299,25 @@ VRAM is limited, so GPU memory is kept as low as possible and nothing is duplica
 - Staging and readback buffers are shared, not per effect: one readback buffer holds every output of a graph. Textures are freed when the frame size changes.
 - Package textures (PNG) belong to the shared `Program` and are loaded once per device.
 
+### On-disk shader cache (`GPUFX_SHADER_CACHE`)
+- `GPUFX_SHADER_CACHE=<dir>` keeps compiled pipelines across processes; unset, nothing is written.
+  The directory is created if missing; if it cannot be written, gpufx warns once and runs without cache.
+- One file per pipeline (`<sha256>.gpucache`), the hash covering the final shader source (prelude
+  included), language, entry point, output format (`rgba8unorm`/`rgba16float`), gpufx and wgpu
+  versions, backend and adapter (name, vendor, device, driver, driver_info). No mtime checks.
+- Vulkan only: the device requests `Features::PIPELINE_CACHE` when the adapter has it, and each pass
+  pipeline is created with a `wgpu::PipelineCache` seeded from its file (`fallback: true`, so data of
+  another driver or wgpu version is dropped by wgpu's header check) and dropped right after; nothing
+  stays in memory. Files are written through a temporary file + rename; unreadable or corrupt files are
+  ignored and rewritten. `GPUFX_SHADER_CACHE_MAX_MB` (default 256) caps the directory, the least
+  recently used files are removed first.
+- Each file is the wgpu blob followed by its SHA-256, checked before the blob reaches wgpu (mismatch:
+  ignored, recompiled, rewritten). The directory must be private to the user: on Unix a directory
+  writable by other users is refused with a warning, since the files reach the driver. Stale temp
+  files (over 1 h) and the size limit are handled once per device.
+- D3D12, Metal, GL: wgpu 30 has no on-disk pipeline cache; only driver caches apply (known limit,
+  DXIL caching is in [Backlog-vi.md](Backlog-vi.md)). The built-in conversion pipelines are not cached.
+
 ## 7. Effect package security
 
 A zip package is untrusted data (downloaded from an effect marketplace):

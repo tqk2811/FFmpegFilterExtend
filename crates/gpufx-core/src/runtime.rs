@@ -9,6 +9,7 @@ use crate::graph::{run, FrameIo, Topology};
 use crate::manifest::{PassDef, ShaderLanguage};
 use crate::package::Package;
 use crate::params::ParamBlock;
+use crate::shader_cache::{ShaderCache, ShaderCacheStats};
 use crate::Error;
 
 /// Graphics API to run on. `Auto` lets wgpu pick the best one for the platform.
@@ -54,10 +55,18 @@ pub struct GpuContext {
     pub(crate) queue: wgpu::Queue,
     info: wgpu::AdapterInfo,
     pub(crate) conv: Converter,
+    shader_cache: Option<ShaderCache>,
 }
 
 impl GpuContext {
+    /// A device on `backend`; `GPUFX_SHADER_CACHE` names the on-disk shader cache.
     pub fn new(backend: Backend) -> Result<Arc<Self>, Error> {
+        Self::with_shader_cache(backend, None)
+    }
+
+    /// [`GpuContext::new`] with the shader cache in `cache_dir` (falls back to
+    /// `GPUFX_SHADER_CACHE` when `None`).
+    pub fn with_shader_cache(backend: Backend, cache_dir: Option<&std::path::Path>) -> Result<Arc<Self>, Error> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: backend.wgpu(),
             // Honours WGPU_DX12_COMPILER (fxc, dxc) and the other backend variables.
@@ -89,11 +98,20 @@ impl GpuContext {
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some("gpufx"),
             required_limits,
+            // Only Vulkan has it in wgpu 30; it costs nothing until a cache is created.
+            required_features: adapter.features() & wgpu::Features::PIPELINE_CACHE,
             ..Default::default()
         }))
         .map_err(|e| Error::Gpu(e.to_string()))?;
         let conv = Converter::new(&device);
-        Ok(Arc::new(GpuContext { device, queue, info: adapter.get_info(), conv }))
+        let info = adapter.get_info();
+        let shader_cache = ShaderCache::new(cache_dir.map(|d| d.to_path_buf()), &device, &info);
+        Ok(Arc::new(GpuContext { device, queue, info, conv, shader_cache }))
+    }
+
+    /// Counters of the on-disk shader cache, `None` when it is off or the backend has none.
+    pub fn shader_cache_stats(&self) -> Option<ShaderCacheStats> {
+        self.shader_cache.as_ref().map(|c| c.stats())
     }
 
     /// e.g. `"NVIDIA GeForce RTX 4070 (Vulkan)"`.
@@ -552,14 +570,24 @@ fn compile_pass(ctx: &GpuContext, pkg: &Package, params: &ParamBlock, index: usi
         bind_group_layouts: &[Some(&layout)],
         immediate_size: 0,
     });
+    let language = match def.language() {
+        ShaderLanguage::Wgsl => "wgsl",
+        ShaderLanguage::Glsl => "glsl",
+    };
+    let format = if deep { "rgba16float" } else { "rgba8unorm" };
+    let cached = ctx.shader_cache.as_ref().and_then(|c| c.begin(device, &[language, entry, format, &source]));
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
         label: Some(&format!("gpufx pass {index}")),
         layout: Some(&pipeline_layout),
         module: &shader,
         entry_point: Some(entry),
         compilation_options: Default::default(),
-        cache: None,
+        cache: cached.as_ref().map(|e| &e.cache),
     });
+    // The cache object is dropped right after: only the file stays.
+    if let (Some(c), Some(e)) = (&ctx.shader_cache, cached) {
+        c.finish(e);
+    }
     Ok(Pass { pipeline, layout, inputs, output: def.output.clone() })
 }
 

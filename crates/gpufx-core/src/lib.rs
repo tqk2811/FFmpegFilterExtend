@@ -9,12 +9,14 @@ pub mod manifest;
 pub mod package;
 pub mod params;
 pub mod runtime;
+mod shader_cache;
 
 pub use frame::{ChromaLocation, ColorInfo, Frame, FrameMut, Matrix, PixelFormat, Range};
 pub use graph::{EffectChain, EffectGraph, MemoryStats, Source};
 pub use manifest::{Manifest, StreamInfo};
 pub use package::Package;
 pub use runtime::{Backend, Effect, FrameInfo, GpuContext, Image, ImageMut, Program};
+pub use shader_cache::ShaderCacheStats;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

@@ -85,3 +85,9 @@
 - **Vị trí**: [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`init`, `activate`, `process_frame`), [crates/gpufx-core/src/graph.rs](../crates/gpufx-core/src/graph.rs).
 - **Vì sao**: muốn các output độc lập thật thì phải tự viết đồng bộ frame thay framesync (hoặc framesync có hỗ trợ nhiều output); số liệu VRAM nên hiện ra cho người dùng (log verbose hoặc hàm C).
 - **Ngày ghi**: 2026-10-12
+
+### Cache shader: D3D12 (DXIL), `pack --precompile`, pipeline chuyển đổi
+- **Vấn đề**: `GPUFX_SHADER_CACHE` mới chỉ có tác dụng trên Vulkan (`wgpu::PipelineCache`). Chưa làm: D3D12 bước 2 (naga → HLSL → `dxcompiler.dll` ra DXIL, nạp lại bằng `Features::PASSTHROUGH_SHADERS` + `create_shader_module_passthrough`), Metal `metallib`, `gpufx pack --precompile` (thư mục `compiled/`, chỉ dùng khi gói đã ký hoặc `GPUFX_TRUST_PRECOMPILED=1`). Pipeline chuyển đổi YUV dựng sẵn (`convert.rs`) cũng chưa đi qua cache.
+- **Vị trí**: [crates/gpufx-core/src/shader_cache.rs](../crates/gpufx-core/src/shader_cache.rs), [crates/gpufx-core/src/runtime.rs](../crates/gpufx-core/src/runtime.rs) (`compile_pass`), [crates/gpufx-cli/src/main.rs](../crates/gpufx-cli/src/main.rs).
+- **Vì sao**: D3D12 là chỗ biên dịch chậm nhất (FXC/DXC trên WARP), cần gọi DXC trực tiếp và một runner Windows để kiểm; passthrough shader không được wgpu kiểm tra nên phải làm cẩn thận phần ký gói.
+- **Ngày ghi**: 2026-10-12

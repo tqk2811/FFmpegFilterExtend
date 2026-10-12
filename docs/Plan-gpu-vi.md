@@ -14,7 +14,7 @@ DESIGN-vi.md mục 6).
 | B-Vulkan (P3) | Zero-copy `AV_PIX_FMT_VULKAN`: device wgpu từ `AVVulkanDeviceContext`, nhận/trả `VkImage`, semaphore của `AVVKFrame` | Chưa |
 | B-D3D12 (P5) | `AV_PIX_FMT_D3D12` vào backend DX12 của wgpu; chạy thử trên WARP | Chưa |
 | B-D3D11 (P5) | D3D11 qua shared NT handle sang DX12 | Chưa |
-| Cache shader | Lưu shader/pipeline đã biên dịch ra đĩa, thư mục lấy từ biến môi trường `GPUFX_SHADER_CACHE` | Chưa |
+| Cache shader | Lưu shader/pipeline đã biên dịch ra đĩa, thư mục lấy từ biến môi trường `GPUFX_SHADER_CACHE` | Xong bước 1 (Vulkan `PipelineCache`); DXIL D3D12 và `pack --precompile` trong Backlog |
 
 ## B-chung: phạm vi
 - Plane YUV upload thành texture riêng, pass chuyển đổi dựng sẵn trước/sau chuỗi; ma trận 601/709/2020,

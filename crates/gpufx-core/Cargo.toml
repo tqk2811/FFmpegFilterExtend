@@ -3,6 +3,7 @@ name = "gpufx-core"
 description = "Runtime that loads zip effect packages (manifest + WGSL) and runs them on the GPU via wgpu"
 version.workspace = true
 edition.workspace = true
+rust-version = "1.88"
 license.workspace = true
 repository.workspace = true
 
@@ -15,3 +16,4 @@ zip = { version = "9", default-features = false, features = ["deflate"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 thiserror = "2"
 naga = { version = "30", features = ["wgsl-in", "glsl-in"] }
+sha2 = "0.10"

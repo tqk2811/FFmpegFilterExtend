@@ -19,6 +19,8 @@ Video effects powered by **GPU shaders** for FFmpeg, loaded from external **`.zi
   picture-in-picture, fitting a picture over a blurred background, falling maple / ginkgo leaves (PNG images in the package), transitions (crossfade, slide, wipe, circle, clock, collapse, expand,
   dip to black, dissolve, pixelize, zoom, blinds, checkerboard, push box, film strip, photo collection...)
 
+- Optional on-disk shader cache: `GPUFX_SHADER_CACHE=<dir>` (Vulkan; see [design](docs/DESIGN.md)).
+
 ```sh
 ffmpeg -i a.mp4 -i b.mp4 -filter_complex \
   "[0][1]gpufx=effect=wipe-transition.zip:params='progress=clip((t-1)/1.5\,0\,1)|angle=45'" out.mp4
