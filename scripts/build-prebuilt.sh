@@ -109,6 +109,8 @@ if [ "$TARGET" = win64 ]; then
     [ -z "$MISSING" ] || { echo "new $DLL lacks prebuilt exports: $MISSING" >&2; exit 1; }
     cp "libavfilter/$DLL" "$OUT/bin/$DLL"
     cp "$WORK/prefix/bin/gpufx.dll" "$OUT/bin/"
+    # DXC next to ffmpeg.exe: wgpu would fall back to the slow FXC without it.
+    "$ROOT/scripts/fetch-dxc.sh" "$OUT/bin"
 else
     SO=$(cd libavfilter && ls libavfilter.so.* | head -n1)
     [ -e "$OUT/lib/$SO" ] || { echo "prebuilt has no lib/$SO: ABI major differs" >&2; exit 1; }
