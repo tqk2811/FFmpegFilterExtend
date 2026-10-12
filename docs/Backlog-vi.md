@@ -35,3 +35,12 @@
 - **Vị trí**: [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c), [crates/gpufx-core/src/manifest.rs](../crates/gpufx-core/src/manifest.rs), [crates/gpufx-ffi/src/lib.rs](../crates/gpufx-ffi/src/lib.rs), `examples/effects/*`.
 - **Vì sao**: phần negotiate format và chuyển đổi swscale trong `vf_gpufx.c` là logic phức tạp, nên có một lượt review riêng.
 - **Ngày ghi**: 2026-10-12
+
+### Chưa có test cho việc bỏ side data; gray limited range; độ chính xác alpha float
+- **Vấn đề**:
+  - `vf_gpufx.c` bỏ side data phụ thuộc màu (mastering display, content light level, ICC…), motion vector và video enc params, nhưng chưa có clip nào mang side data để test. Với input PQ, output vẫn là PQ nhưng mất HDR10 static metadata (đã có cảnh báo HDR).
+  - swscale luôn coi gray là full range (FIXME trong `libswscale/format.c`), nên gray limited range bị chuyển sai.
+  - Input premultiplied dạng float (EXR `gbrapf32`) bị hạ về 8 bit trước khi bỏ premultiply, nên điểm ảnh alpha thấp mất độ chính xác màu.
+- **Vị trí**: [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`process_frame`, `input_image`, `unpremultiply`).
+- **Vì sao**: sẽ xử lý cùng pipeline trên GPU (YUV/float trên GPU, `rgba16float`) ở bước B-chung của kế hoạch.
+- **Ngày ghi**: 2026-10-12
