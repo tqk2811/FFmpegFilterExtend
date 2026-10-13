@@ -4,7 +4,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::convert::{read_outputs, readback_buffer, work_format, GpuOutputSlot, InputKey, InputSlot, OutputSlot};
+use crate::convert::{read_outputs, readback_key, work_format, GpuOutputSlot, InputKey, InputSlot, OutputSlot};
 use crate::frame::{Frame, FrameMut, GpuFrame, PixelFormat};
 use crate::manifest::StreamInfo;
 use crate::mips::MipChain;
@@ -83,7 +83,11 @@ pub(crate) struct FrameIo {
     outputs: Vec<OutputSlot>,
     /// Outputs written into GPU frames.
     gpu_outputs: Vec<GpuOutputSlot>,
-    readback: Option<wgpu::Buffer>,
+    /// Size of the readback buffer of the outputs, and the pool's id of the one borrowed
+    /// last time. It is borrowed apart from the rest: the CPU maps it after the submission,
+    /// so it is given back only once unmapped.
+    readback_size: u64,
+    readback_id: Option<u64>,
     memory: MemoryStats,
     /// Mip chains of the input pads and effect outputs an effect input wants mipmapped.
     input_mips: Vec<Option<MipChain>>,
@@ -340,7 +344,8 @@ fn prepare(
         io.inputs.clear();
         io.outputs.clear();
         io.gpu_outputs.clear();
-        io.readback = None;
+        io.readback_size = 0;
+        io.readback_id = None;
         io.bound_ids.clear();
         io.out_ids.clear();
         for fx in effects.iter_mut() {
@@ -458,7 +463,8 @@ pub(crate) fn run(
     let (device, queue, conv) = (&ctx.device, &ctx.queue, &ctx.conv);
     if io.outputs.len() != outs.len() || io.outputs.iter().zip(outs.iter()).any(|(slot, o)| slot.key != (o.format, o.width, o.height)) {
         io.outputs.clear();
-        io.readback = None;
+        io.readback_size = 0;
+        io.readback_id = None;
         io.out_ids.clear();
         let mut offset = 0;
         for o in outs.iter() {
@@ -472,10 +478,10 @@ pub(crate) fn run(
             offset = slot.end();
             io.outputs.push(slot);
         }
-        io.readback = Some(readback_buffer(device, offset));
+        io.readback_size = offset;
         io.memory.readback_bytes = offset;
     }
-    // The output words are pooled too: the readback buffer, which the CPU maps, is not.
+    // The output words are pooled too; the readback buffer is borrowed below.
     let keys: Vec<PoolKey> = io.outputs.iter().flat_map(|slot| slot.pool_keys()).collect();
     let wants: Vec<(PoolKey, Option<u64>)> = keys.iter().enumerate().map(|(n, &k)| (k, io.out_ids.get(n).copied())).collect();
     let leases = ctx.pool.take(device, &wants);
@@ -511,14 +517,25 @@ pub(crate) fn run(
             slot.encode(queue, conv, &mut cpass, &out.color, bypass);
         }
     }
-    let readback = io.readback.clone().expect("made above");
+    let readback = ctx.pool.take(device, &[(readback_key(io.readback_size), io.readback_id)]).remove(0);
+    io.readback_id = Some(readback.id);
     for slot in &io.outputs {
-        slot.copy(&mut enc, &readback);
+        slot.copy(&mut enc, readback.buffer());
     }
     queue.submit([enc.finish()]);
     // Later submissions may reuse the pooled resources: the GPU runs them after this one.
     io.release();
-    read_outputs(device, &readback, &io.outputs, outs)
+    let read = read_outputs(device, readback.buffer(), &io.outputs, outs);
+    // Mapped by this graph alone: back to the pool once unmapped, or dropped when a failed
+    // read may have left it mapped or a map pending.
+    match read {
+        Ok(()) => ctx.pool.put_back(&[readback.id]),
+        Err(_) => {
+            ctx.pool.forget(&[readback.id]);
+            io.readback_id = None;
+        }
+    }
+    read
 }
 
 /// Encodes the conversion of the first `given` inputs and, unless bypassed (no `info`),

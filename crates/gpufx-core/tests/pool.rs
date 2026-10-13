@@ -53,10 +53,32 @@ fn run(g: &mut EffectGraph, data: &[u8], w: u32, h: u32, frame: u64) -> Vec<u8> 
 }
 
 /// What a graph borrows per frame: pass textures, upload textures and output words (as
-/// many bytes as its readback buffer, which stays its own).
+/// many bytes as its readback buffer, borrowed too).
 fn own_bytes(g: &EffectGraph) -> u64 {
     let m = g.memory();
     m.pass_texture_bytes + m.input_texture_bytes + m.readback_bytes
+}
+
+#[test]
+fn graphs_in_a_row_share_one_readback_buffer() {
+    let _serial = serial();
+    let Some(ctx) = own_gpu() else { return };
+    let (w, h) = (64, 36);
+    let src = gradient(w, h, 2);
+    let mut first = graph(&ctx, "[0]invert.zip[out]");
+    let want = run(&mut first, &src, w, h, 0);
+    let one = ctx.pool_stats();
+    // The readback buffer is pooled with the output words of the same size.
+    assert!(one.idle_bytes >= own_bytes(&first) + first.memory().readback_bytes, "{one:?}");
+    let mut graphs: Vec<EffectGraph> = (0..7).map(|_| graph(&ctx, "[0]invert.zip[out]")).collect();
+    for f in 0..3 {
+        for g in &mut graphs {
+            assert_eq!(run(g, &src, w, h, f), want);
+        }
+    }
+    let all = ctx.pool_stats();
+    assert_eq!(all.borrowed, 0, "the readback buffer is given back once unmapped");
+    assert_eq!(all.created, one.created, "the later graphs borrow the first one's buffers");
 }
 
 const EFFECTS: [&str; 8] = ["gaussian-blur", "invert", "sharpen", "vignette", "gaussian-blur", "grayscale", "pixelate", "sepia"];

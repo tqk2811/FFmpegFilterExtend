@@ -677,14 +677,9 @@ impl OutputSlot {
     }
 }
 
-/// The one mappable buffer every output of a graph is read back through.
-pub(crate) fn readback_buffer(device: &wgpu::Device, size: u64) -> wgpu::Buffer {
-    device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("gpufx readback"),
-        size,
-        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-        mapped_at_creation: false,
-    })
+/// The pool key of the one mappable buffer every output of a graph is read back through.
+pub(crate) fn readback_key(size: u64) -> PoolKey {
+    PoolKey::Buffer { size, usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ }
 }
 
 /// Waits for the GPU, maps `readback` once and copies every output into its frame.

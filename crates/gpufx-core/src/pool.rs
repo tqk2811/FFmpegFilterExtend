@@ -195,6 +195,31 @@ impl Pool {
         inner.held_bytes -= freed;
     }
 
+    /// Gives back resources borrowed past the submission (a readback buffer, once unmapped)
+    /// without counting a frame: [`Pool::give_back`] of the same frame did.
+    pub fn put_back(&self, ids: &[u64]) {
+        let mut inner = self.lock();
+        let tick = inner.tick;
+        for e in inner.entries.iter_mut().filter(|e| ids.contains(&e.id)) {
+            e.borrowed = false;
+            e.idle_since = tick;
+        }
+    }
+
+    /// Drops borrowed resources that must not be handed out again.
+    pub fn forget(&self, ids: &[u64]) {
+        let mut inner = self.lock();
+        let mut freed = 0;
+        inner.entries.retain(|e| {
+            let keep = !ids.contains(&e.id);
+            if !keep {
+                freed += e.bytes;
+            }
+            keep
+        });
+        inner.held_bytes -= freed;
+    }
+
     pub fn stats(&self) -> PoolStats {
         let inner = self.lock();
         let mut s = PoolStats { peak_bytes: inner.peak_bytes, created: inner.created, ..Default::default() };
