@@ -114,3 +114,24 @@ fn world_writable_directory_is_refused() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn conversion_pipelines_go_through_the_cache() {
+    // A context compiles its conversion passes before any effect is opened.
+    let dir = cache_dir("convert");
+    let open = || match GpuContext::with_shader_cache(Backend::Auto, Some(&dir)) {
+        Ok(ctx) => ctx.shader_cache_stats(),
+        Err(e) => {
+            eprintln!("skipping: {e}");
+            None
+        }
+    };
+    let Some(first) = open() else { return };
+    assert_eq!(first.loaded, 0, "{first:?}");
+    assert!(first.written >= 3, "{first:?}");
+    let written = files(&dir).len() as u64;
+    let second = open().unwrap();
+    assert!(second.loaded >= first.written, "{second:?}");
+    assert_eq!(files(&dir).len() as u64, written);
+    let _ = std::fs::remove_dir_all(&dir);
+}

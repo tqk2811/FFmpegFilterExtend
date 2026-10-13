@@ -77,7 +77,7 @@ pub struct GpuContext {
     pub(crate) mips: MipGen,
     /// Per-frame textures and buffers shared by every graph on this device (see `pool.rs`).
     pub(crate) pool: crate::pool::Pool,
-    shader_cache: Option<ShaderCache>,
+    shader_cache: Option<Arc<ShaderCache>>,
     /// Queue family of a shared Vulkan device (see `vulkan.rs`), `None` for devices
     /// gpufx made itself.
     #[cfg_attr(not(any(windows, all(unix, not(target_vendor = "apple")))), allow(dead_code))]
@@ -166,8 +166,8 @@ impl GpuContext {
         info: wgpu::AdapterInfo,
         cache_dir: Option<&std::path::Path>,
     ) -> Arc<Self> {
-        let conv = Converter::new(&device);
-        let shader_cache = ShaderCache::new(cache_dir.map(|d| d.to_path_buf()), &device, &info);
+        let shader_cache = ShaderCache::new(cache_dir.map(|d| d.to_path_buf()), &device, &info).map(Arc::new);
+        let conv = Converter::new(&device, shader_cache.clone());
         Arc::new(GpuContext {
             device,
             queue,
@@ -812,19 +812,19 @@ fn compile_pass(ctx: &GpuContext, pkg: &Package, params: &ParamBlock, index: usi
         ShaderLanguage::Glsl => "glsl",
     };
     let format = if deep { "rgba16float" } else { "rgba8unorm" };
-    let cached = ctx.shader_cache.as_ref().and_then(|c| c.begin(device, &[language, entry, format, &source]));
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some(&format!("gpufx pass {index}")),
-        layout: Some(&pipeline_layout),
-        module: &shader,
-        entry_point: Some(entry),
-        compilation_options: Default::default(),
-        cache: cached.as_ref().map(|e| &e.cache),
-    });
-    // The cache object is dropped right after: only the file stays.
-    if let (Some(c), Some(e)) = (&ctx.shader_cache, cached) {
-        c.finish(e);
-    }
+    let pipeline = ShaderCache::compute_pipeline(
+        ctx.shader_cache.as_deref(),
+        device,
+        &wgpu::ComputePipelineDescriptor {
+            label: Some(&format!("gpufx pass {index}")),
+            layout: Some(&pipeline_layout),
+            module: &shader,
+            entry_point: Some(entry),
+            compilation_options: Default::default(),
+            cache: None,
+        },
+        &[language, entry, format, &source],
+    );
     Ok(Pass { pipeline, layout, inputs, output: def.output.clone() })
 }
 

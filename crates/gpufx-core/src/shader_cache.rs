@@ -173,6 +173,24 @@ impl ShaderCache {
         }
     }
 
+    /// A compute pipeline of `desc`, seeded from and written back to `cache` when there
+    /// is one. `parts` name every input of the compilation besides the adapter.
+    pub(crate) fn compute_pipeline(
+        cache: Option<&Self>,
+        device: &wgpu::Device,
+        desc: &wgpu::ComputePipelineDescriptor<'_>,
+        parts: &[&str],
+    ) -> wgpu::ComputePipeline {
+        let entry = cache.and_then(|c| c.begin(device, parts));
+        let pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { cache: entry.as_ref().map(|e| &e.cache), ..desc.clone() });
+        // The cache object is dropped right after: only the file stays.
+        if let (Some(c), Some(e)) = (cache, entry) {
+            c.finish(e);
+        }
+        pipeline
+    }
+
     /// Removes temp files older than an hour, then the least recently used files while
     /// the directory is above the limit.
     fn prune(&self) {

@@ -9,11 +9,12 @@
 //! On output a pass encodes each plane into a storage buffer of packed words, which is
 //! copied into a mappable buffer and from there into the caller's planes.
 
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use crate::frame::{ColorInfo, FrameMut, Layout, PixelFormat, PlaneKind};
 use crate::lru::Lru;
 use crate::pool::PoolKey;
+use crate::shader_cache::ShaderCache;
 use crate::Error;
 
 /// RGBA texture format that keeps the precision of `format`: `rgba16float` (about 11
@@ -50,6 +51,8 @@ const UNIFORM_SIZE: u64 = 112;
 /// already on the GPU are compiled the first time such a frame comes.
 pub(crate) struct Converter {
     device: wgpu::Device,
+    /// The on-disk shader cache of the context, if any.
+    cache: Option<Arc<ShaderCache>>,
     /// Integer planes uploaded from the CPU, writing `rgba8unorm` and `rgba16float`.
     to_rgba: [(wgpu::ComputePipeline, wgpu::BindGroupLayout); 2],
     /// Unorm planes of GPU frames, writing `rgba8unorm` and `rgba16float`.
@@ -88,14 +91,15 @@ fn texture(sample_type: wgpu::TextureSampleType) -> wgpu::BindingType {
 
 fn pipeline(
     device: &wgpu::Device,
+    cache: Option<&ShaderCache>,
     label: &str,
     body: &str,
     entries: &[wgpu::BindGroupLayoutEntry],
 ) -> (wgpu::ComputePipeline, wgpu::BindGroupLayout) {
-    let common = include_str!("convert.wgsl");
+    let source = format!("{}{body}", include_str!("convert.wgsl"));
     let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some(label),
-        source: wgpu::ShaderSource::Wgsl(format!("{common}{body}").into()),
+        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(&source)),
     });
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -103,14 +107,19 @@ fn pipeline(
         bind_group_layouts: &[Some(&layout)],
         immediate_size: 0,
     });
-    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-        label: Some(label),
-        layout: Some(&pipeline_layout),
-        module: &module,
-        entry_point: Some("main"),
-        compilation_options: Default::default(),
-        cache: None,
-    });
+    let pipeline = ShaderCache::compute_pipeline(
+        cache,
+        device,
+        &wgpu::ComputePipelineDescriptor {
+            label: Some(label),
+            layout: Some(&pipeline_layout),
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        },
+        &["convert", "main", &source],
+    );
     (pipeline, layout)
 }
 
@@ -144,11 +153,16 @@ fn convert_in_source(deep: bool, unorm: bool) -> String {
     s
 }
 
-fn to_rgba_pipelines(device: &wgpu::Device, unorm: bool) -> [(wgpu::ComputePipeline, wgpu::BindGroupLayout); 2] {
+fn to_rgba_pipelines(
+    device: &wgpu::Device,
+    cache: Option<&ShaderCache>,
+    unorm: bool,
+) -> [(wgpu::ComputePipeline, wgpu::BindGroupLayout); 2] {
     let plane = texture(if unorm { wgpu::TextureSampleType::Float { filterable: false } } else { wgpu::TextureSampleType::Uint });
     [false, true].map(|deep| {
         pipeline(
             device,
+            cache,
             "gpufx convert in",
             &convert_in_source(deep, unorm),
             &[
@@ -171,10 +185,11 @@ fn to_rgba_pipelines(device: &wgpu::Device, unorm: bool) -> [(wgpu::ComputePipel
 }
 
 impl Converter {
-    pub fn new(device: &wgpu::Device) -> Self {
-        let to_rgba = to_rgba_pipelines(device, false);
+    pub fn new(device: &wgpu::Device, cache: Option<Arc<ShaderCache>>) -> Self {
+        let to_rgba = to_rgba_pipelines(device, cache.as_deref(), false);
         let (from_rgba, from_rgba_layout) = pipeline(
             device,
+            cache.as_deref(),
             "gpufx convert out",
             &format!("{}{}", include_str!("convert_out.wgsl"), include_str!("convert_out_buffer.wgsl")),
             &[
@@ -195,6 +210,7 @@ impl Converter {
             .create_view(&Default::default());
         Converter {
             device: device.clone(),
+            cache,
             to_rgba,
             to_rgba_gpu: OnceLock::new(),
             from_rgba,
@@ -208,7 +224,7 @@ impl Converter {
 
     fn to_rgba(&self, gpu: bool, deep: bool) -> &(wgpu::ComputePipeline, wgpu::BindGroupLayout) {
         if gpu {
-            &self.to_rgba_gpu.get_or_init(|| to_rgba_pipelines(&self.device, true))[deep as usize]
+            &self.to_rgba_gpu.get_or_init(|| to_rgba_pipelines(&self.device, self.cache.as_deref(), true))[deep as usize]
         } else {
             &self.to_rgba[deep as usize]
         }
@@ -238,6 +254,7 @@ impl Converter {
             );
             pipeline(
                 &self.device,
+                self.cache.as_deref(),
                 "gpufx convert out (gpu)",
                 &body,
                 &[
@@ -264,7 +281,7 @@ impl Converter {
         Ok(self.to_yuv[format as usize].get_or_init(|| {
             let (decl, entries) = fused_source(format);
             let body = format!("{}{decl}{}", include_str!("convert_out.wgsl"), include_str!("convert_out_fused.wgsl"));
-            pipeline(&self.device, "gpufx convert out (gpu yuv)", &body, &entries)
+            pipeline(&self.device, self.cache.as_deref(), "gpufx convert out (gpu yuv)", &body, &entries)
         }))
     }
 }
