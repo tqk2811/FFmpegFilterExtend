@@ -182,7 +182,8 @@
   - (1) Graph còn sống nhưng ngừng chạy (hoặc vừa đổi kích thước) vẫn giữ texture trong bind group/`InputSlot`/mip chain. Trim bỏ entry khỏi pool nhưng VRAM chưa được giải phóng, và `pool_stats` báo thấp hơn thực tế.
   - (2) Ở `vulkan.rs`/`d3d12.rs`, các đường lỗi nằm giữa `encode_gpu` và `release_frame` giữ lease tới lần encode sau.
   - (3) Trim chỉ chạy khi có `give_back`; khi mọi graph cùng dừng thì phần rảnh giữ mãi. Ngưỡng `IDLE_FRAMES × số user` lâu với nhiều graph.
-  - (4) Texture tạm của D3D12 chưa vào pool.
+  - (4) Texture tạm của D3D12 chưa vào pool. Nếu `read_outputs` panic thì buffer readback giữ `borrowed` mãi (rò bộ nhớ, không dùng sai).
+  - (6) Effect mở trên device noop chỉ có format mặc định của WebGPU: package cần format riêng của adapter bị từ chối lúc open dù GPU thật chạy được ([crates/gpufx-core/src/runtime.rs](../crates/gpufx-core/src/runtime.rs) `GpuContext::noop`). Hướng gọn hơn: chỉ kiểm WGSL bằng naga lúc open, dựng graph một lần khi có device.
   - (5) Pool frame đầu ra (`VkImage`) FFmpeg cấp riêng cho mỗi filter chiếm phần chênh còn lại: 8 filter riêng 322 MB so với 260 MB của graph; với `out_format=rgba` là 442 MB. Pool trước `crossfade` lên tới 10 frame.
 - **Vị trí**: [crates/gpufx-core/src/pool.rs](../crates/gpufx-core/src/pool.rs) (`give_back`), [crates/gpufx-core/src/graph.rs](../crates/gpufx-core/src/graph.rs) (`acquire`, `FrameIo`), [crates/gpufx-core/src/vulkan.rs](../crates/gpufx-core/src/vulkan.rs), [crates/gpufx-core/src/d3d12.rs](../crates/gpufx-core/src/d3d12.rs), [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`initial_pool_size` của frames ctx đầu ra).
 - **Vì sao**: (1) nên để pool sở hữu bind group theo id lease, hoặc đánh dấu id bị trim để graph bỏ binding; (5) giới hạn pool đầu ra sẽ đưa 8 filter riêng về gần mức của graph.
