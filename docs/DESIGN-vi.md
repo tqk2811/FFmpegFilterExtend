@@ -327,7 +327,7 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   format khác, ví dụ `rgba`. sw_format của output là của input nguồn nếu effect
   được phép xuất, không thì format đầu tiên của pad output mà libgpufx chuyển được và ghi được.
   `out_format` thay cho cách chọn đó (đúng format ấy, hoặc lỗi lúc configure). Chuỗi nhiều filter rời giữ
-  RGBA ở giữa bằng `out_format=rgba` trên mọi filter trừ cái cuối (số đo ở mục Benchmark của README).
+  RGBA ở giữa bằng `out_format=rgba` trên mọi filter trừ cái cuối (số đo ở [BENCHMARK-vi.md](BENCHMARK-vi.md)).
 - **Mỗi frame**, CPU không chờ: filter khoá mỗi `AVVkFrame` một lần (`lock_frame`; một frame `split` phía
   trước có thể nằm trên hai pad), libgpufx bọc mỗi image thành texture wgpu (`texture_from_raw`, bộ nhớ
   ngoài, callback drop rỗng) hoặc dùng lại wrapper đã tạo ở frame trước (LRU 16 frame mỗi pad, khoá theo
@@ -427,7 +427,7 @@ copy (`ff_vk_exec_wait`), nên CPU và GPU chạy lần lượt.
   vẫn ra đủ frame. Kiểm tay thêm: p010, validation layer (bản copy không sinh VUID nào; `hwupload`/`hwdownload`
   gốc sinh VUID-00174/00191).
 
-Số đo trên clip 90 s (RTX 4060 Laptop, GPU rảnh): xem mục Benchmark của README.
+Số đo trên clip 90 s (RTX 4060 Laptop, GPU rảnh): xem [BENCHMARK-vi.md](BENCHMARK-vi.md).
 
 ### Frame D3D12 và D3D11 (C API v7; đã build và cross-compile, chỉ job CI Windows chạy thử)
 

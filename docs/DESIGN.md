@@ -332,7 +332,7 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   sw_format is the source input's when the effect may output it, else the first format of the output pad
   that libgpufx converts and that FFmpeg can make storage images of. `out_format` replaces that choice
   (that format or a configuration error). Chains of separate filters keep RGBA in between with
-  `out_format=rgba` on all but the last (numbers in the README benchmark: faster than without it, still
+  `out_format=rgba` on all but the last (numbers in [BENCHMARK.md](BENCHMARK.md): faster than without it, still
   slower than one `graph=`).
 - **Per frame**, no CPU wait: the filter locks each `AVVkFrame` once (`lock_frame`; a frame split upstream
   may sit on two pads), libgpufx wraps every image as a wgpu texture (`texture_from_raw`, external memory,
@@ -438,7 +438,7 @@ for every copy (`ff_vk_exec_wait`), so CPU and GPU take turns.
   path; every frame comes out with `latency=4`. Also checked by hand: p010, the Vulkan validation layer
   (no VUID from the copies; plain `hwupload`/`hwdownload` give VUID-00174/00191 there).
 
-Measured on the 90 s clips (RTX 4060 Laptop, idle GPU): see the README benchmark.
+Measured on the 90 s clips (RTX 4060 Laptop, idle GPU): see [BENCHMARK.md](BENCHMARK.md).
 
 ### D3D12 and D3D11 frames (C API v7; built and cross-compiled, run only by the Windows CI job)
 
