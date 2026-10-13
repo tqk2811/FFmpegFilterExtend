@@ -49,6 +49,53 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
 
 Docs: [design](docs/DESIGN.md) · [package format and how to write shaders](docs/EFFECT_FORMAT.md)
 
+## Benchmark
+
+Build `a4296b2` (win64 release package), measured on 2026-10-13.
+
+- **Machine**: Intel Core i9-14900HX, 32 GiB DDR5-5600 (2 × 16 GiB), NVIDIA GeForce RTX 4060 Laptop GPU
+  8 GiB VRAM (driver 617.42), Windows 11 Pro.
+- **Input**: two H.264 clips, 1920×1080, 23.976 fps, 90 s each (2158 frames), software decode, output to
+  `-f null`. gpufx picks Vulkan by default on Windows (`backend=auto`).
+- **Comparison**: FFmpeg 8.0.1 (gpl-shared build) with its own CPU filters. The transition runs over
+  the first 60 s (`xfade` refuses `duration` above 60 s); gpufx uses `progress=clip(t/60,0,1)`.
+- Time is the best of 3 runs. RAM is the peak working set; VRAM is the peak of the Windows
+  "GPU Process Memory" counters (dedicated / shared).
+
+**One transition**
+
+| Filter | Time | Peak RAM | VRAM ded. / shared |
+|---|---|---|---|
+| Decode only (no filter) | 2.18 s | 309 MB | 0 |
+| `xfade` fade (CPU) | 3.49 s | 587 MB | 0 |
+| `xfade` wipeleft (CPU) | 3.12 s | – | 0 |
+| `xfade` circleopen (CPU) | 8.00 s | 549 MB | 0 |
+| `xfade_vulkan` fade (hwupload/hwdownload) | 5.33 s | – | 399 / 80 MB |
+| gpufx `crossfade.zip`, Vulkan | 5.47 s | 451 MB | 199 / 76 MB |
+| gpufx `crossfade.zip`, DX12 | 7.26 s | 546 MB | 173 / 154 MB |
+| gpufx `wipe-transition.zip`, Vulkan | 5.46 s | – | – |
+| gpufx `circle-reveal.zip`, Vulkan | 5.53 s | 450 MB | 199 / 76 MB |
+
+**A chain of effects**: clip A blur → color adjust → vignette, clip B sepia → sharpen → vignette, crossfade,
+then sharpen. The CPU side uses `gblur`, `eq`, `vignette`, `colorchannelmixer`, `unsharp`, `xfade`.
+
+| Filter | Time | Peak RAM | VRAM ded. / shared |
+|---|---|---|---|
+| CPU filters | 34.95 s | 655 MB | 0 |
+| 8 separate `gpufx` filters | 29.06 s | 601 MB | 459 / 84 MB |
+| one `gpufx=graph=...` | **7.13 s** | 536 MB | 203 / 82 MB |
+
+What the numbers say:
+
+- With frames in system memory each `gpufx` instance costs about 1.5 ms per frame whatever the shader does:
+  upload, YUV → RGBA on the GPU, readback and the wait for the GPU. The pixel format conversion runs in a shader,
+  FFmpeg inserts no `scale` filter. A light transition alone is therefore slower than `xfade` on a fast CPU.
+- Put the whole chain in one `gpufx` (`graph=` or `effect='a.zip|b.zip'`): the frames cross the bus once and
+  extra effects are nearly free (8 effects: 7.1 s against 5.5 s for one crossfade, about 5× faster than CPU).
+- Starting a `gpufx` costs about 1 s (device creation and shader compilation), so short clips gain less.
+- Not measured yet: Vulkan hw frames end to end (`-hwaccel vulkan` → gpufx → GPU encode), which skips the
+  upload and readback.
+
 ## Build
 
 You need Rust (stable) and a GPU driver (on Linux without a GPU you can use `mesa-vulkan-drivers`/lavapipe).

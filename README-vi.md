@@ -46,6 +46,52 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
 
 Tài liệu: [thiết kế](docs/DESIGN-vi.md) · [định dạng gói và cách viết shader](docs/EFFECT_FORMAT-vi.md) · [English](README.md)
 
+## Đo tốc độ
+
+Bản build `a4296b2` (gói release win64), đo ngày 2026-10-13.
+
+- **Máy**: Intel Core i9-14900HX, RAM 32 GiB DDR5-5600 (2 × 16 GiB), NVIDIA GeForce RTX 4060 Laptop GPU
+  8 GiB VRAM (driver 617.42), Windows 11 Pro.
+- **Input**: hai clip H.264, 1920×1080, 23.976 fps, mỗi clip 90 s (2158 frame), decode bằng CPU, ghi ra
+  `-f null`. Trên Windows gpufx mặc định chọn Vulkan (`backend=auto`).
+- **So với**: FFmpeg 8.0.1 (bản gpl-shared) với filter CPU có sẵn. Chuyển cảnh chạy trong 60 s đầu (`xfade` không
+  nhận `duration` quá 60 s); gpufx dùng `progress=clip(t/60,0,1)`.
+- Thời gian lấy lần nhanh nhất trong 3 lần. RAM là working set đỉnh; VRAM là đỉnh của counter Windows
+  "GPU Process Memory" (dedicated / shared).
+
+**Một hiệu ứng chuyển cảnh**
+
+| Filter | Thời gian | RAM đỉnh | VRAM ded. / shared |
+|---|---|---|---|
+| Chỉ decode (không filter) | 2.18 s | 309 MB | 0 |
+| `xfade` fade (CPU) | 3.49 s | 587 MB | 0 |
+| `xfade` wipeleft (CPU) | 3.12 s | – | 0 |
+| `xfade` circleopen (CPU) | 8.00 s | 549 MB | 0 |
+| `xfade_vulkan` fade (hwupload/hwdownload) | 5.33 s | – | 399 / 80 MB |
+| gpufx `crossfade.zip`, Vulkan | 5.47 s | 451 MB | 199 / 76 MB |
+| gpufx `crossfade.zip`, DX12 | 7.26 s | 546 MB | 173 / 154 MB |
+| gpufx `wipe-transition.zip`, Vulkan | 5.46 s | – | – |
+| gpufx `circle-reveal.zip`, Vulkan | 5.53 s | 450 MB | 199 / 76 MB |
+
+**Chuỗi nhiều hiệu ứng**: clip A blur → chỉnh màu → vignette, clip B sepia → sharpen → vignette, crossfade, rồi
+sharpen. Phía CPU dùng `gblur`, `eq`, `vignette`, `colorchannelmixer`, `unsharp`, `xfade`.
+
+| Filter | Thời gian | RAM đỉnh | VRAM ded. / shared |
+|---|---|---|---|
+| Filter CPU | 34.95 s | 655 MB | 0 |
+| 8 filter `gpufx` riêng | 29.06 s | 601 MB | 459 / 84 MB |
+| một `gpufx=graph=...` | **7.13 s** | 536 MB | 203 / 82 MB |
+
+Nhận xét:
+
+- Frame nằm trong RAM thì mỗi filter `gpufx` tốn khoảng 1.5 ms mỗi frame dù shader làm gì: upload, đổi YUV → RGBA
+  trên GPU, readback và chờ GPU. Việc đổi pixel format chạy bằng shader, FFmpeg không chèn filter `scale`. Vì vậy
+  một chuyển cảnh nhẹ đứng riêng chậm hơn `xfade` trên CPU mạnh.
+- Gom cả chuỗi vào một `gpufx` (`graph=` hoặc `effect='a.zip|b.zip'`): frame chỉ qua bus một lần, thêm hiệu ứng gần
+  như không tốn (8 hiệu ứng: 7.1 s so với 5.5 s của một crossfade, nhanh khoảng 5 lần so với CPU).
+- Khởi động một `gpufx` mất khoảng 1 s (tạo device, biên dịch shader), nên clip ngắn được lợi ít hơn.
+- Chưa đo: frame Vulkan suốt đường (`-hwaccel vulkan` → gpufx → encode trên GPU), bỏ được upload và readback.
+
 ## Build
 
 Cần Rust (stable) và một driver GPU (Linux không có GPU có thể dùng `mesa-vulkan-drivers`/lavapipe).
