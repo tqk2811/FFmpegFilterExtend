@@ -161,7 +161,9 @@ jobs:
         # The D3D12/D3D11 frame tests run only where FFmpeg can create a d3d12va/d3d11va
         # device (e.g. a GPU runner); on hosted WARP-only runners they are skipped with a warning
         # and the job passes without D3D coverage. REQUIRE_D3D=1 fails
-        # when a device exists but gpufx rejects or skips it.
+        # when a device exists but gpufx rejects or skips it. gpufx outputs GPU frames only, so the
+        # effect tests need FFmpeg's Vulkan device: without one (hosted runners) they are skipped
+        # with a warning too, and only the device-free checks run here.
         run: REQUIRE_D3D=1 scripts/test-bundle.sh dist/win64 build/test-clips
 
   release:
