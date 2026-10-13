@@ -676,9 +676,10 @@ fn record_gpu(
         }
     }
     if let Some(prof) = &mut io.prof {
-        prof.finish(enc);
+        // Before `finish`, which may wait for the timestamps of an earlier frame.
         prof.cpu(crate::profile::Cpu::Bind, t1 - t0);
         prof.cpu(crate::profile::Cpu::Record, t1.elapsed());
+        prof.finish(enc);
     }
     Ok(())
 }
