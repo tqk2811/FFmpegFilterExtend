@@ -166,6 +166,50 @@ jobs:
         # with a warning too, and only the device-free checks run here.
         run: REQUIRE_D3D=1 scripts/test-bundle.sh dist/win64 build/test-clips
 
+  # FFmpeg 9.0 from the external/FFmpeg submodule with gpufx and VideoToolbox (no prebuilt
+  # macOS FFmpeg to swap libavfilter into). Test only: nothing is released.
+  ffmpeg-macos:
+    name: FFmpeg 9.0 + gpufx (macOS, VideoToolbox frames)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos
+      - name: Tools
+        # Homebrew's ffmpeg only makes the test clips.
+        run: brew install nasm pkg-config ffmpeg
+      - name: Build
+        run: |
+          set -eu
+          W=$PWD/build/macos OUT=$PWD/dist/macos
+          scripts/install-libgpufx.sh "$W/prefix"
+          # Found through the executable's rpath, wherever the bundle is unpacked.
+          install_name_tool -id @rpath/libgpufx.dylib "$W/prefix/lib/libgpufx.dylib"
+          rm -rf "$W/ffmpeg" "$OUT" && mkdir -p "$W/ffmpeg" "$OUT/bin"
+          tar -C external/FFmpeg --exclude=.git -cf - . | tar -C "$W/ffmpeg" -xf -
+          ffmpeg/integrate.sh "$W/ffmpeg"
+          FILTERS=$(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' docker/keep-filters.txt | tr '\n' ',' | sed 's/,$//')
+          cd "$W/ffmpeg"
+          # Static FFmpeg libraries; libgpufx.dylib (@rpath) next to the executable.
+          PKG_CONFIG_PATH="$W/prefix/lib/pkgconfig" ./configure --disable-doc --disable-debug \
+            --disable-ffplay --disable-ffprobe --enable-libgpufx --enable-videotoolbox \
+            --disable-filters --enable-filter="$FILTERS" --extra-ldflags='-Wl,-rpath,@executable_path' \
+            > "$W/configure.log" || { tail -20 "$W/configure.log"; exit 1; }
+          grep -q '^#define CONFIG_VIDEOTOOLBOX 1' config.h || { echo "configure did not enable VideoToolbox" >&2; exit 1; }
+          make -j"$(sysctl -n hw.ncpu)" > "$W/make.log" 2>&1 || { tail -40 "$W/make.log"; exit 1; }
+          cp ffmpeg "$W/prefix/lib/libgpufx.dylib" "$OUT/bin/"
+          cd - > /dev/null
+          scripts/pack-effects.sh -o "$OUT/effects" > /dev/null
+      - name: Run effects in ffmpeg
+        # gpufx outputs GPU frames: here VideoToolbox frames on Metal (no Vulkan in this
+        # build, so those tests are skipped). REQUIRE_VT=1 fails when the VideoToolbox tests
+        # are skipped for another reason than a missing device or Metal adapter.
+        run: REQUIRE_VT=1 scripts/test-bundle.sh dist/macos
+
   release:
     # Temporary pre-release of every green build, tagged with the commit id (7 chars).
     # Only the newest KEEP_RELEASES pre-releases are kept. PRs from forks and Dependabot

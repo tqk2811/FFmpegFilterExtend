@@ -7,6 +7,8 @@
 # Clips and logs default to build/test-<bundle name>, outside the bundle.
 # TEST_CLIPS_ONLY=1 only writes the clips (for a runner that has no reference ffmpeg).
 # REQUIRE_D3D=1 fails when the D3D12 or D3D11 frame tests are skipped.
+# REQUIRE_VT=1 fails when the VideoToolbox frame tests (macOS) are skipped, unless FFmpeg
+# cannot create a videotoolbox device or there is no Metal adapter.
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DIST=$(cd "${1:?usage: test-bundle.sh <bundle dir> [clips dir]}" && pwd)
@@ -627,5 +629,104 @@ for api in d3d12va d3d11va; do
     DEV=$GPU
 done
 echo "  D3D frames tested:${dx_ran:- none}; skipped:${dx_skipped:- none}"
+
+echo "VideoToolbox frames:"
+# macOS only: hwupload -> gpufx -> hwdownload on FFmpeg's VideoToolbox device (gpufx runs
+# on Metal and reads/writes the IOSurfaces in place), same pixels as the software frames
+# gpufx uploads to that device itself, and as the Vulkan run when there is one.
+# REQUIRE_VT=1 fails when the tests are skipped, unless FFmpeg cannot create the device.
+VTDEV="-init_hw_device videotoolbox=vt -filter_hw_device vt"
+vt_ran=
+vt_skip() {
+    echo "  skip  VideoToolbox: $1"
+    if [ "${2:-}" = nodevice ]; then
+        if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::warning::VideoToolbox frames not tested: $1"; fi
+    elif [ "${REQUIRE_VT:-0}" = 1 ]; then
+        fail "REQUIRE_VT=1: VideoToolbox frames were not tested"
+    fi
+}
+vt_tests() {
+    VKN=vt
+    # shellcheck disable=SC2086
+    if ! "$FF" -hide_banner -nostdin -v error $VTDEV -i "$A" -frames:v 1 -an \
+        -vf "format=nv12,hwupload,hwdownload,format=nv12" -f null - > "$CLIPS/last.log" 2>&1; then
+        vt_skip "FFmpeg cannot create a videotoolbox device ($(head -n1 "$CLIPS/last.log"))" nodevice; return
+    fi
+    # shellcheck disable=SC2086
+    if ! "$FF" -hide_banner -nostdin -v error $VTDEV -i "$A" -frames:v 1 -an \
+        -vf "format=nv12,hwupload,gpufx=effect=$FX/invert.zip,hwdownload,format=nv12" -f null - > "$CLIPS/last.log" 2>&1; then
+        cp "$CLIPS/last.log" "$CLIPS/vt-probe.log"
+        # A gpufx without these frames, or a machine without a Metal adapter.
+        if grep -q "Impossible to convert\|No format\|negotiat\|only supported on macOS" "$CLIPS/last.log"; then
+            vt_skip "this gpufx is built without VideoToolbox frames"
+        elif grep -q "no Metal adapter\|no GPU adapter" "$CLIPS/last.log"; then
+            vt_skip "no Metal adapter ($(grep -m1 "adapter" "$CLIPS/last.log"))" nodevice
+        else
+            fail "VideoToolbox: gpufx takes VideoToolbox frames"; cat "$CLIPS/last.log"
+        fi
+        return
+    fi
+    vt_ran=1
+    DEV=$VTDEV
+    vt_md5() {
+        f=$1; shift
+        gpu_ff -i "$A" -frames:v 3 -an -vf "format=$f,hwupload,$1,hwdownload,format=$f" -pix_fmt "$f" -f framemd5 - \
+            2> "$CLIPS/last.log" | grep -v '^#' | awk -F, '{print $NF}'
+    }
+    # Within one step (as for D3D) of the Vulkan run, else of software frames uploaded by gpufx.
+    for f in nv12 p010le; do
+        V="gpufx=effect=$FX/vignette.zip:params='strength=0.7'"
+        if [ $f = nv12 ]; then bytes=1 step=1; else bytes=2 step=64; fi  # p010le: 10 bits << 6
+        rm -f "$CLIPS/vt.yuv" "$CLIPS/sw.yuv"
+        raw "$CLIPS/vt.yuv" -i "$A" -vf "format=$f,hwupload,$V,hwdownload,format=$f" -pix_fmt $f || true
+        cp "$CLIPS/last.log" "$CLIPS/vt-$f.log"
+        if [ -n "$VK" ]; then ref="the Vulkan run"; DEV=$GPU; else ref="software frames"; fi
+        raw "$CLIPS/sw.yuv" -i "$A" -vf "format=$f,$V,hwdownload,format=$f" -pix_fmt $f || true
+        DEV=$VTDEV
+        DMAX=-
+        if [ -s "$CLIPS/vt.yuv" ] && [ "$(wc -c < "$CLIPS/vt.yuv")" = "$(wc -c < "$CLIPS/sw.yuv")" ]; then
+            DMAX=$(diff_stats "$CLIPS/vt.yuv" "$CLIPS/sw.yuv" $bytes | cut -d' ' -f1); DMAX=${DMAX:--}
+        fi
+        if [ "$DMAX" != - ] && [ "$DMAX" -le $step ]; then pass "VideoToolbox $f: vignette within one step of $ref"
+        else
+            # p010le outputs need R16/RG16 storage textures, which some (non-Apple) GPUs lack.
+            if [ $f = p010le ] && grep -q "cannot write" "$CLIPS/vt-$f.log"; then
+                echo "  skip  VideoToolbox p010le output: $(grep -m1 "cannot write" "$CLIPS/vt-$f.log")"
+            else
+                fail "VideoToolbox $f: vignette within one step of $ref (max difference $DMAX)"; cat "$CLIPS/vt-$f.log"
+            fi
+        fi
+    done
+    same "VideoToolbox: software input equals hwupload" \
+        "$(vt_md5 nv12 "gpufx=effect=$FX/vignette.zip:params='strength=0.7'")" \
+        "$(sw_md5 nv12 "gpufx=effect=$FX/vignette.zip:params='strength=0.7'")"
+    # Two gpufx in a row: the second reads what the first wrote (no fence: each waits).
+    same "VideoToolbox: invert twice equals software frames" \
+        "$(vt_md5 nv12 "gpufx=effect=$FX/invert.zip,gpufx=effect=$FX/invert.zip")" \
+        "$(sw_md5 nv12 "gpufx=effect=$FX/invert.zip,gpufx=effect=$FX/invert.zip")"
+    G="[0]split[a][b]; [a]$FX/gaussian-blur.zip[ba]; [b]$FX/grayscale.zip|$FX/vignette.zip[gb]; [ba][gb]$FX/crossfade.zip[x]; [x][1]$FX/wipe-transition.zip[out]"
+    same "VideoToolbox: graph equals software frames" \
+        "$(vt_md5 nv12 "split[p][q];[p][q]gpufx=graph='$G':params='x.progress=0.4|out.progress=0.6'")" \
+        "$(sw_md5 nv12 "split[p][q];[p][q]gpufx=graph='$G':params='x.progress=0.4|out.progress=0.6'")"
+    LATE_VT=$(gpu_ff -i "$A" -itsoffset 0.5 -i "$B" -an -filter_complex \
+        "[0]format=nv12,hwupload[a];[1]format=nv12[b];[a][b]gpufx=effect=$FX/crossfade.zip:params='progress=0.5',hwdownload,format=nv12" \
+        -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | wc -l | tr -d ' ')
+    if [ "$LATE_VT" = "$MAIN_N" ]; then pass "VideoToolbox: late second software input keeps all $MAIN_N frames"
+    else fail "VideoToolbox: late second software input (want $MAIN_N, got $LATE_VT)"; cat "$CLIPS/last.log"; fi
+    # bgra VideoToolbox frames are not read by gpufx: refused with the formats it takes.
+    rejects "VideoToolbox: bgra frames are refused" "gpufx reads VideoToolbox frames of nv12, p010le" \
+        -i "$A" -an -vf "format=bgra,hwupload,gpufx=effect=$FX/invert.zip,hwdownload,format=nv12" $NULL
+    DEV=$GPU
+}
+if [ "$(uname -s)" != Darwin ]; then
+    echo "  skip  VideoToolbox: not macOS"
+elif ! grep -qw hwupload "$CLIPS/filters.txt"; then
+    vt_skip "this bundle has no hwupload"
+elif ! "$FF" -hide_banner -init_hw_device list 2>&1 | grep -qx videotoolbox; then
+    vt_skip "this ffmpeg has no videotoolbox hwdevice"
+else
+    vt_tests
+fi
+echo "  VideoToolbox frames tested: ${vt_ran:+yes}${vt_ran:-no}"
 
 [ "$fails" -eq 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }
