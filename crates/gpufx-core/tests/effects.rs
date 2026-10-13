@@ -496,3 +496,39 @@ fn every_example_opens_on_the_noop_device() {
     }
     assert!(opened > 10, "{opened} examples");
 }
+
+#[test]
+fn pack_skips_compiled_folder_and_its_own_output() {
+    let tmp = std::env::temp_dir().join(format!("gpufx-pack-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let dir = tmp.join("invert");
+    std::fs::create_dir_all(&dir).unwrap();
+    fn copy(from: &std::path::Path, to: &std::path::Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for e in std::fs::read_dir(from).unwrap() {
+            let e = e.unwrap();
+            if e.file_type().unwrap().is_dir() {
+                copy(&e.path(), &to.join(e.file_name()));
+            } else {
+                std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
+            }
+        }
+    }
+    copy(&examples().join("invert"), &dir);
+    // Stale blobs in a top-level `Compiled` folder (any case) never ship...
+    std::fs::create_dir_all(dir.join("Compiled/dx12")).unwrap();
+    std::fs::write(dir.join("Compiled/dx12/stale.dxil"), b"stale").unwrap();
+    // ...but a nested `compiled` folder is ordinary content.
+    std::fs::create_dir_all(dir.join("assets/compiled")).unwrap();
+    std::fs::write(dir.join("assets/compiled/keep.txt"), b"keep").unwrap();
+    // An older output inside the directory is not packed into the new one.
+    let out = dir.join("out.zip");
+    std::fs::write(&out, b"old zip").unwrap();
+    Package::pack(&dir, &out, false).unwrap();
+    let pkg = Package::open(&out).unwrap();
+    assert!(pkg.file("Compiled/dx12/stale.dxil").is_err());
+    assert!(pkg.file("compiled/dx12/stale.dxil").is_err());
+    assert_eq!(pkg.file("assets/compiled/keep.txt").unwrap(), b"keep");
+    assert!(pkg.file("out.zip").is_err());
+    let _ = std::fs::remove_dir_all(&tmp);
+}

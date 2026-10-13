@@ -1,6 +1,5 @@
 //! `gpufx` command line: inspect, pack and test effect packages without FFmpeg.
 
-use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
@@ -11,7 +10,8 @@ const USAGE: &str = "\
 usage:
   gpufx info  <package>
   gpufx check <package> [--backend ...]   compile every shader and report errors
-  gpufx pack <dir> <out.zip>
+  gpufx pack [--precompile] <dir> <out.zip>
+             --precompile adds D3D12 shaders, used when GPUFX_TRUST_PRECOMPILED=1
   gpufx run  <package> -i <in.png> [-i <in2.png>...] -o <out.png>
              [-p name=value]... [--backend auto|vulkan|dx12|metal|gl] [--time seconds]";
 
@@ -20,7 +20,8 @@ fn main() -> ExitCode {
     let result = match args.first().map(String::as_str) {
         Some("info") if args.len() == 2 => info(&args[1]),
         Some("check") if args.len() >= 2 => check(&args[1], &args[2..]),
-        Some("pack") if args.len() == 3 => pack(Path::new(&args[1]), Path::new(&args[2])),
+        Some("pack") if args.len() == 3 => pack(Path::new(&args[1]), Path::new(&args[2]), false),
+        Some("pack") if args.len() == 4 && args[1] == "--precompile" => pack(Path::new(&args[2]), Path::new(&args[3]), true),
         Some("run") if args.len() >= 2 => run(&args[1], &args[2..]),
         _ => Err(USAGE.to_string()),
     };
@@ -114,32 +115,13 @@ fn check(path: &str, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
-fn pack(dir: &Path, out: &Path) -> Result<(), String> {
-    // Validate the manifest and file references before writing anything.
-    Package::open(dir).map_err(|e| e.to_string())?;
-    let file = std::fs::File::create(out).map_err(|e| e.to_string())?;
-    let mut zip = zip::ZipWriter::new(file);
-    let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
-    let mut stack = vec![dir.to_path_buf()];
-    let mut files = Vec::new();
-    while let Some(d) = stack.pop() {
-        for entry in std::fs::read_dir(&d).map_err(|e| e.to_string())? {
-            let path = entry.map_err(|e| e.to_string())?.path();
-            if path.is_dir() {
-                stack.push(path);
-            } else {
-                files.push(path);
-            }
-        }
+fn pack(dir: &Path, out: &Path, precompile: bool) -> Result<(), String> {
+    let compiled = Package::pack(dir, out, precompile).map_err(|e| e.to_string())?;
+    if precompile {
+        println!("wrote {} with {compiled} D3D12 shader(s)", out.display());
+    } else {
+        println!("wrote {}", out.display());
     }
-    files.sort();
-    for path in files {
-        let rel = path.strip_prefix(dir).expect("walked from dir").to_string_lossy().replace('\\', "/");
-        zip.start_file(rel, opts).map_err(|e| e.to_string())?;
-        zip.write_all(&std::fs::read(&path).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
-    }
-    zip.finish().map_err(|e| e.to_string())?;
-    println!("wrote {}", out.display());
     Ok(())
 }
 

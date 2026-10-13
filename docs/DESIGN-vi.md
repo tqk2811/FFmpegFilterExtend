@@ -524,7 +524,7 @@ VRAM có hạn, nên bộ nhớ GPU giữ ở mức thấp nhất và không nh�
 - Mỗi pipeline một file (`<sha256>.gpucache`), hash gồm nguồn shader cuối cùng (có prelude), ngôn ngữ,
   entry point, format output (`rgba8unorm`/`rgba16float`), phiên bản gpufx và wgpu, backend và adapter
   (name, vendor, device, driver, driver_info). Không kiểm mtime.
-- Chỉ Vulkan: device xin `Features::PIPELINE_CACHE` khi adapter có, mỗi pipeline của pass được tạo với
+- Vulkan: device xin `Features::PIPELINE_CACHE` khi adapter có, mỗi pipeline của pass được tạo với
   một `wgpu::PipelineCache` nạp từ file của nó (`fallback: true`, dữ liệu của driver/wgpu khác bị wgpu
   bỏ qua khi kiểm header) rồi bỏ ngay sau đó, không giữ gì trong bộ nhớ. Ghi qua file tạm + rename;
   file không đọc được hoặc hỏng thì bỏ qua và ghi lại. `GPUFX_SHADER_CACHE_MAX_MB` (mặc định 256)
@@ -533,8 +533,24 @@ VRAM có hạn, nên bộ nhớ GPU giữ ở mức thấp nhất và không nh�
   qua, biên dịch lại, ghi lại). Thư mục phải riêng của người dùng: trên Unix thư mục mà người khác ghi
   được sẽ bị từ chối kèm cảnh báo, vì file đi thẳng tới driver. File tạm cũ (quá 1 giờ) và giới hạn
   dung lượng được dọn một lần mỗi device.
-- D3D12, Metal, GL: wgpu 30 không có cache pipeline ra đĩa, chỉ dựa vào cache của driver (giới hạn đã
-  biết, cache DXIL nằm trong [Backlog-vi.md](Backlog-vi.md)). Pipeline chuyển đổi dựng sẵn không được cache.
+- Khoá còn gồm phiên bản chính xác của naga, wgpu-core và wgpu-hal (`build.rs` đọc từ `Cargo.lock`).
+  Pass của hiệu ứng và pipeline chuyển đổi dựng sẵn đều đi qua cache.
+- D3D12: wgpu 30 không có cache pipeline ra đĩa ở đây. Khi tìm thấy `dxcompiler.dll` trên đường tìm DLL,
+  gpufx tự sinh HLSL bằng naga (register khớp root signature của wgpu-hal, `dxil.rs`), biên dịch ra DXIL
+  (`cs_6_0`), lưu thành `<sha256>.dxil` (khoá thêm phiên bản DXC và shader model) rồi nạp lại bằng
+  `Features::PASSTHROUGH_SHADERS` (chỉ xin trên D3D12 khi có cấu hình cache). Blob bị D3D12 từ chối thì
+  biên dịch lại; nếu DXIL vừa biên dịch cũng bị từ chối (thiếu `dxil.dll`...) thì xoá file; đủ hai shader
+  khác nhau bị từ chối như vậy thì device đó thôi dùng DXIL. Không có DXC thì đi đường thường.
+- `gpufx pack --precompile <dir> <out.zip>` biên dịch mọi pass (output 8 bit và `rgba16float`, giá trị
+  `expr` mặc định) trên device D3D12 (WARP là đủ) và lưu `compiled/dx12/<sha256>.dxil` (kèm checksum)
+  vào gói; khoá không có adapter, driver hay phiên bản DXC nên máy không có DXC vẫn dùng được. Thư mục
+  `compiled/` có sẵn trong `<dir>` không bao giờ được chép. Lúc chạy chỉ dùng blob khi
+  `GPUFX_TRUST_PRECOMPILED=1` (khi đó không cần `GPUFX_SHADER_CACHE`): gói chưa được ký và passthrough
+  shader không được wgpu kiểm. Biến này được đọc lúc tạo context, sau đó tin mọi gói context đó mở;
+  SHA-256 nối cuối chỉ chứng minh file nguyên vẹn, không chứng minh ai dựng gói. Blob thiếu hoặc bị từ
+  chối thì đi đường thường (blob bị từ chối được log một lần);
+  `ShaderCacheStats::precompiled` đếm số lần dùng được.
+- Metal, GL: wgpu 30 không có cache ra đĩa, chỉ dựa vào cache của driver.
 
 ## 7. Bảo mật gói hiệu ứng
 

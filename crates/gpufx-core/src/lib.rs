@@ -5,6 +5,8 @@
 mod convert;
 #[cfg(windows)]
 pub mod d3d12;
+#[cfg(windows)]
+mod dxil;
 pub mod expr;
 pub mod frame;
 pub mod graph;
@@ -27,7 +29,7 @@ pub use manifest::{Manifest, StreamInfo};
 pub use package::Package;
 pub use pool::PoolStats;
 pub use runtime::{Backend, Effect, FrameInfo, GpuContext, Image, ImageMut, Program};
-pub use shader_cache::ShaderCacheStats;
+pub use shader_cache::{precompile, ShaderCacheStats};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
