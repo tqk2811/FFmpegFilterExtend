@@ -512,3 +512,57 @@ fn yuv_gpu_frames_match_cpu_frames_across_tiles() {
         }
     }
 }
+
+/// Frames of a pool come back in turn: the bindings made for their textures (conversion
+/// passes, effects reading or writing them in place) are made once per texture set, and
+/// the results stay those of a graph binding everything anew (new textures each frame).
+#[test]
+fn bindings_of_pooled_gpu_frames_are_made_once() {
+    use PixelFormat::*;
+    let info = FrameInfo::new(0.5, 3);
+    for (text, fin, fout, direct) in [
+        ("[0]vignette.zip|grayscale.zip[out]", Nv12, Nv12, false),
+        ("[0]vignette.zip|grayscale.zip[out]", Rgba, Rgba, true),
+        ("[0]split[a][b]; [a]gaussian-blur.zip[x]; [x][b]crossfade.zip[out]", Rgba, Yuv420p, true),
+    ] {
+        let Some(ctx) = own_gpu() else { return };
+        if !supported(&ctx, fin) || !supported(&ctx, fout) {
+            continue;
+        }
+        let (w, h) = (37, 22);
+        let mut pooled = graph(&ctx, text);
+        let mut fresh = graph(&ctx, text);
+        if direct {
+            pooled.allow_direct_gpu();
+            fresh.allow_direct_gpu();
+        }
+        // A pool of three frames on each side, used in turn.
+        let pool_in: Vec<GpuFrame> = (0..3).map(|_| upload(&ctx, fin, &pattern(fin, w, h, 0), w, h)).collect();
+        let pool_out: Vec<GpuFrame> = (0..3).map(|_| target(&ctx, fout, w, h)).collect();
+        let mut after_first_round = 0;
+        for frame in 0..9u32 {
+            let data = pattern(fin, w, h, frame);
+            let k = frame as usize % 3;
+            // New content in the pooled texture, as FFmpeg would upload it.
+            for (p, tex) in pool_in[k].planes.iter().enumerate() {
+                let (pw, ph) = fin.plane_texture_size(p, w, h);
+                ctx.queue().write_texture(
+                    tex.as_image_copy(),
+                    &data[p],
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(fin.plane_size(p, w, h).0), rows_per_image: Some(ph) },
+                    wgpu::Extent3d { width: pw, height: ph, depth_or_array_layers: 1 },
+                );
+            }
+            let info = if frame == 4 { None } else { Some(&info) };
+            let got = gpu_run(&ctx, &mut pooled, &[pool_in[k].clone()], &[pool_out[k].clone()], info);
+            let want = gpu_run(&ctx, &mut fresh, &[upload(&ctx, fin, &data, w, h)], &[target(&ctx, fout, w, h)], info);
+            assert_eq!(got, want, "`{text}` {} -> {}, frame {frame}", fin.name(), fout.name());
+            if frame == 5 {
+                after_first_round = pooled.frame_binds();
+            }
+        }
+        assert!(after_first_round > 0, "`{text}`: frames are bound");
+        assert_eq!(pooled.frame_binds(), after_first_round, "`{text}`: no binding made once every pooled frame was seen");
+        assert!(fresh.frame_binds() > after_first_round, "`{text}`: new textures are bound anew");
+    }
+}

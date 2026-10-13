@@ -114,6 +114,10 @@ typedef struct GpufxContext {
     GpufxVulkanFrame *vk_in;
     GpufxVulkanFrame *vk_out;
     uint32_t vk_queue_family;
+    /* Frames contexts of the inputs and outputs, held until the effect is freed: libgpufx
+     * keeps wrappers of their images from frame to frame. */
+    AVBufferRef **vk_frames;
+    int nb_vk_frames;
 #endif
 #if CONFIG_D3D12VA
     GpufxD3D12Frame *d12_in;
@@ -438,6 +442,12 @@ static av_cold void uninit(AVFilterContext *ctx)
 #endif
     gpufx_effect_free(s->fx);
     s->fx = NULL;
+#if CONFIG_VULKAN
+    /* After the effect, which may still hold wrappers of their images. */
+    for (int i = 0; i < s->nb_vk_frames; i++)
+        av_buffer_unref(&s->vk_frames[i]);
+    av_freep(&s->vk_frames);
+#endif
     /* After the effect: libgpufx runs on this device until it is freed. */
     av_buffer_unref(&s->hw_device);
 }
@@ -767,6 +777,23 @@ static int vulkan_ok(void)
     return gpufx_vulkan_supported();
 }
 
+/* Holds a frames context until the effect is freed (see GpufxContext.vk_frames). */
+static int hold_vk_frames(GpufxContext *s, AVBufferRef *frames)
+{
+    AVBufferRef *ref, **list;
+
+    for (int i = 0; i < s->nb_vk_frames; i++)
+        if (s->vk_frames[i]->data == frames->data)
+            return 0;
+    if (!(list = av_realloc_array(s->vk_frames, s->nb_vk_frames + 1, sizeof(*list))))
+        return AVERROR(ENOMEM);
+    s->vk_frames = list;
+    if (!(ref = av_buffer_ref(frames)))
+        return AVERROR(ENOMEM);
+    s->vk_frames[s->nb_vk_frames++] = ref;
+    return 0;
+}
+
 /* Moves the effect to the Vulkan device of the inputs; once, from config_inputs(). */
 static int config_vulkan(AVFilterContext *ctx)
 {
@@ -775,7 +802,7 @@ static int config_vulkan(AVFilterContext *ctx)
     AVHWDeviceContext *dev;
     AVVulkanDeviceContext *hwctx;
     GpufxVulkanDevice d = { 0 };
-    int family = -1;
+    int family = -1, ret;
 
     for (unsigned i = 0; i < s->nb_inputs; i++) {
         FilterLink *l = ff_filter_link(ctx->inputs[i]);
@@ -815,6 +842,8 @@ static int config_vulkan(AVFilterContext *ctx)
                    ctx->input_pads[i].name, av_get_pix_fmt_name(fc->sw_format));
             return AVERROR(ENOSYS);
         }
+        if ((ret = hold_vk_frames(s, l->hw_frames_ctx)) < 0)
+            return ret;
     }
     dev   = (AVHWDeviceContext *)fc0->device_ref->data;
     hwctx = dev->hwctx;
@@ -895,7 +924,7 @@ static int config_vulkan_output(AVFilterLink *outlink, unsigned k)
         }
         av_buffer_unref(&ff_filter_link(outlink)->hw_frames_ctx);
         ff_filter_link(outlink)->hw_frames_ctx = ref;
-        return 0;
+        return hold_vk_frames(s, ref);
     }
     if (s->out_format != AV_PIX_FMT_NONE) {
         av_log(ctx, AV_LOG_ERROR, "Output '%s': out_format=%s cannot be written into Vulkan frames "

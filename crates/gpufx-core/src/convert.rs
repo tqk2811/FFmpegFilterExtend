@@ -12,6 +12,7 @@
 use std::sync::OnceLock;
 
 use crate::frame::{ColorInfo, FrameMut, Layout, PixelFormat, PlaneKind};
+use crate::lru::Lru;
 use crate::pool::PoolKey;
 use crate::Error;
 
@@ -436,8 +437,10 @@ pub(crate) struct InputSlot {
     pub texture: wgpu::Texture,
     /// Uniforms of the conversion pass, unless direct.
     uniform: Option<wgpu::Buffer>,
-    /// Made once for uploads, per frame for GPU frames (their textures change).
+    /// Made once for uploads; for GPU frames, the one of the frame's planes.
     bind_group: Option<wgpu::BindGroup>,
+    /// GPU frames: the bind groups of the planes of recent frames.
+    gpu_binds: Lru<Vec<wgpu::Texture>, wgpu::BindGroup>,
     deep: bool,
 }
 
@@ -485,25 +488,40 @@ impl InputSlot {
     ) -> Self {
         if key.direct && key.gpu {
             let texture = frame.cloned().unwrap_or_else(|| stand_in(device, wgpu::TextureUsages::TEXTURE_BINDING));
-            return InputSlot { key, planes: Vec::new(), texture, uniform: None, bind_group: None, deep };
+            return InputSlot { key, planes: Vec::new(), texture, uniform: None, bind_group: None, gpu_binds: Lru::default(), deep };
         }
         if key.direct {
             let tex = textures.pop().expect("one texture");
-            return InputSlot { key, planes: vec![tex.clone()], texture: tex, uniform: None, bind_group: None, deep };
+            return InputSlot {
+                key,
+                planes: vec![tex.clone()],
+                texture: tex,
+                uniform: None,
+                bind_group: None,
+                gpu_binds: Lru::default(),
+                deep,
+            };
         }
         let texture = textures.pop().expect("the converted frame");
         let planes = textures;
-        let mut slot =
-            InputSlot { key, planes, texture, uniform: Some(uniform_buffer(device, "gpufx convert in")), bind_group: None, deep };
+        let mut slot = InputSlot {
+            key,
+            planes,
+            texture,
+            uniform: Some(uniform_buffer(device, "gpufx convert in")),
+            bind_group: None,
+            gpu_binds: Lru::default(),
+            deep,
+        };
         if !key.gpu {
             let planes = slot.planes.clone();
-            slot.bind_planes(device, conv, &planes);
+            slot.bind_group = Some(slot.bind_group_of(device, conv, &planes));
         }
         slot
     }
 
-    /// Makes the conversion pass read `planes`.
-    fn bind_planes(&mut self, device: &wgpu::Device, conv: &Converter, planes: &[wgpu::Texture]) {
+    /// A bind group of the conversion pass reading `planes`.
+    fn bind_group_of(&self, device: &wgpu::Device, conv: &Converter, planes: &[wgpu::Texture]) -> wgpu::BindGroup {
         let buf = self.uniform.as_ref().expect("a conversion pass");
         let dst = self.texture.create_view(&wgpu::TextureViewDescriptor { mip_level_count: Some(1), ..Default::default() });
         let views: Vec<wgpu::TextureView> = planes.iter().map(|t| t.create_view(&Default::default())).collect();
@@ -515,11 +533,11 @@ impl InputSlot {
             let view = views.get(i).unwrap_or(conv.dummy(self.key.gpu));
             entries.push(wgpu::BindGroupEntry { binding: 2 + i as u32, resource: wgpu::BindingResource::TextureView(view) });
         }
-        self.bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("gpufx convert in"),
             layout: &conv.to_rgba(self.key.gpu, self.deep).1,
             entries: &entries,
-        }));
+        })
     }
 
     /// Textures this slot holds: the planes, and the converted frame unless direct.
@@ -554,7 +572,8 @@ impl InputSlot {
         }
     }
 
-    /// Points the conversion pass at the planes of a GPU frame matching the key.
+    /// Points the conversion pass at the planes of a GPU frame matching the key. Returns
+    /// whether a bind group was made (the planes of a recent frame reuse theirs).
     pub fn use_gpu_frame(
         &mut self,
         device: &wgpu::Device,
@@ -562,9 +581,15 @@ impl InputSlot {
         conv: &Converter,
         planes: &[wgpu::Texture],
         color: &ColorInfo,
-    ) {
-        self.bind_planes(device, conv, planes);
+    ) -> bool {
+        let mut binds = std::mem::take(&mut self.gpu_binds);
+        let (bg, made) = binds
+            .get_or_make(planes.to_vec(), |p| Ok::<_, std::convert::Infallible>(self.bind_group_of(device, conv, p)))
+            .unwrap_or_else(|e| match e {});
+        self.bind_group = Some(bg.clone());
+        self.gpu_binds = binds;
         self.upload(queue, &[&[]; 4], &[0; 4], color);
+        made
     }
 
     pub fn encode(&self, conv: &Converter, cpass: &mut wgpu::ComputePass) {
@@ -584,6 +609,8 @@ pub(crate) struct GpuOutputSlot {
     pub key: (PixelFormat, u32, u32),
     uniforms: Vec<wgpu::Buffer>,
     bind_groups: Vec<wgpu::BindGroup>,
+    /// The bind groups of recent (source, planes), as the frames of a pool come back.
+    binds: Lru<(wgpu::Texture, Vec<wgpu::Texture>), Vec<wgpu::BindGroup>>,
 }
 
 /// Whether the planes of a `format` GPU output are written by one fused pass.
@@ -595,10 +622,11 @@ impl GpuOutputSlot {
     pub fn new(device: &wgpu::Device, format: PixelFormat, w: u32, h: u32) -> Self {
         let passes = if fused(format) { 1 } else { format.plane_count() };
         let uniforms = (0..passes).map(|_| uniform_buffer(device, "gpufx convert out")).collect();
-        GpuOutputSlot { key: (format, w, h), uniforms, bind_groups: Vec::new() }
+        GpuOutputSlot { key: (format, w, h), uniforms, bind_groups: Vec::new(), binds: Lru::default() }
     }
 
     /// Makes the passes read `source` and write `planes`, with the colours of `color`.
+    /// Returns whether bind groups were made (a recent source and planes reuse theirs).
     pub fn bind(
         &mut self,
         device: &wgpu::Device,
@@ -607,32 +635,54 @@ impl GpuOutputSlot {
         source: &wgpu::Texture,
         planes: &[wgpu::Texture],
         color: &ColorInfo,
-    ) -> Result<(), Error> {
+    ) -> Result<bool, Error> {
         let (format, w, h) = self.key;
-        let view = source.create_view(&wgpu::TextureViewDescriptor { mip_level_count: Some(1), ..Default::default() });
-        self.bind_groups.clear();
         if fused(format) {
-            let buf = &self.uniforms[0];
-            queue.write_buffer(buf, 0, &uniform(format, w, h, color, None));
+            queue.write_buffer(&self.uniforms[0], 0, &uniform(format, w, h, color, None));
+        } else {
+            for (i, buf) in self.uniforms.iter().enumerate() {
+                queue.write_buffer(buf, 0, &uniform(format, w, h, color, Some(i)));
+            }
+        }
+        let mut binds = std::mem::take(&mut self.binds);
+        let made =
+            binds.get_or_make((source.clone(), planes.to_vec()), |(source, planes)| self.bind_groups_of(device, conv, source, planes));
+        let made = made.map(|(groups, made)| {
+            self.bind_groups = groups.clone();
+            made
+        });
+        self.binds = binds;
+        made
+    }
+
+    fn bind_groups_of(
+        &self,
+        device: &wgpu::Device,
+        conv: &Converter,
+        source: &wgpu::Texture,
+        planes: &[wgpu::Texture],
+    ) -> Result<Vec<wgpu::BindGroup>, Error> {
+        let format = self.key.0;
+        let view = source.create_view(&wgpu::TextureViewDescriptor { mip_level_count: Some(1), ..Default::default() });
+        if fused(format) {
             let views: Vec<wgpu::TextureView> = planes.iter().map(|p| p.create_view(&Default::default())).collect();
             let mut entries = vec![
-                wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 0, resource: self.uniforms[0].as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
             ];
             for (i, v) in views.iter().enumerate() {
                 entries.push(wgpu::BindGroupEntry { binding: 2 + i as u32, resource: wgpu::BindingResource::TextureView(v) });
             }
-            self.bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            return Ok(vec![device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("gpufx convert out (gpu yuv)"),
                 layout: &conv.to_yuv(format)?.1,
                 entries: &entries,
-            }));
-            return Ok(());
+            })]);
         }
-        for (i, (buf, plane)) in self.uniforms.iter().zip(planes).enumerate() {
-            queue.write_buffer(buf, 0, &uniform(format, w, h, color, Some(i)));
+        let mut groups = Vec::new();
+        for (buf, plane) in self.uniforms.iter().zip(planes) {
             let dst = plane.create_view(&Default::default());
-            self.bind_groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
+            groups.push(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("gpufx convert out (gpu)"),
                 layout: &conv.to_plane(plane.format())?.1,
                 entries: &[
@@ -642,7 +692,7 @@ impl GpuOutputSlot {
                 ],
             }));
         }
-        Ok(())
+        Ok(groups)
     }
 
     /// No pass until bound again: the output is written by an effect.

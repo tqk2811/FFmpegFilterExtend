@@ -111,6 +111,9 @@ pub(crate) struct FrameIo {
     frame_ins: Vec<Option<wgpu::Texture>>,
     /// The output textures of that frame, for the effects writing them in place.
     frame_outs: Vec<Option<wgpu::Texture>>,
+    /// Bind groups made for the textures of GPU frames (input and output passes, effects
+    /// bound to frames in place); those of a recent frame are reused.
+    frame_binds: usize,
 }
 
 /// The planned textures of a graph for one set of inputs.
@@ -727,7 +730,7 @@ fn record_gpu(
             slot.texture = f.planes[0].clone();
             direct[i] = true;
         } else {
-            slot.use_gpu_frame(device, queue, conv, &f.planes, &f.color);
+            io.frame_binds += slot.use_gpu_frame(device, queue, conv, &f.planes, &f.color) as usize;
         }
     }
     let direct_out = io.layout.as_ref().map(|l| l.direct_out.clone()).unwrap_or_default();
@@ -737,7 +740,7 @@ fn record_gpu(
             let writes = direct_out[k].map(|j| &outs[j].planes[0]);
             if reads || writes.is_some() {
                 let sources: Vec<wgpu::Texture> = topo.node_inputs[k].iter().map(|&s| source_texture(effects, &io.inputs, s)).collect();
-                effects[k].rebind(&sources.iter().collect::<Vec<_>>(), writes)?;
+                io.frame_binds += effects[k].rebind(&sources.iter().collect::<Vec<_>>(), writes)? as usize;
             }
         }
     }
@@ -749,7 +752,7 @@ fn record_gpu(
         }
         let src = if bypass { Source::Input(topo.pad_of(topo.outputs[k])) } else { topo.outputs[k] };
         let tex = source_texture(effects, &io.inputs, src);
-        io.gpu_outputs[k].bind(device, queue, conv, &tex, &out.planes, &out.color)?;
+        io.frame_binds += io.gpu_outputs[k].bind(device, queue, conv, &tex, &out.planes, &out.color)? as usize;
     }
     let t1 = std::time::Instant::now();
     match &io.prof {
@@ -886,6 +889,9 @@ pub struct EffectGraph {
     /// Copies and the last submission of D3D12/D3D11 frames (see `d3d12.rs`).
     #[cfg(windows)]
     pub(crate) dx: crate::d3d12::GraphState,
+    /// Wrappers of the images of recent Vulkan frames (see `vulkan.rs`).
+    #[cfg(any(windows, all(unix, not(target_vendor = "apple"))))]
+    pub(crate) vk: crate::vulkan::ImportCache,
 }
 
 impl EffectGraph {
@@ -1148,6 +1154,8 @@ impl EffectGraph {
             io: FrameIo::default(),
             #[cfg(windows)]
             dx: Default::default(),
+            #[cfg(any(windows, all(unix, not(target_vendor = "apple"))))]
+            vk: Default::default(),
         })
     }
 
@@ -1411,6 +1419,13 @@ impl EffectGraph {
     /// size or format, never per frame. For tests and diagnostics.
     pub fn allocations(&self) -> usize {
         self.io.allocations
+    }
+
+    /// How many times bindings of GPU frame textures were made. The frames of a pool come
+    /// back in turn and reuse theirs, so this stops growing once each was seen. For tests.
+    #[doc(hidden)]
+    pub fn frame_binds(&self) -> usize {
+        self.io.frame_binds
     }
 }
 

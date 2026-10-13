@@ -336,8 +336,13 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   slower than one `graph=`).
 - **Per frame**, no CPU wait: the filter locks each `AVVkFrame` once (`lock_frame`; a frame split upstream
   may sit on two pads), libgpufx wraps every image as a wgpu texture (`texture_from_raw`, external memory,
-  first state taken from the image layout; a layout wgpu has no state for gets a raw
-  barrier to `GENERAL` in a command buffer submitted first), records the input conversion (planes read as
+  no-op drop callback) or reuses the wrapper made on an earlier frame (an LRU of 16 frames per pad, keyed
+  by image, semaphore, format and size; the bind groups made from them are cached the same way, so a
+  pool of frames coming back in turn is bound once). wgpu sees every wrapper in `GENERAL` between calls;
+  an image left in another layout (by `hwupload`, `hwdownload`, another filter) gets a raw barrier to
+  `GENERAL` in a command buffer submitted first (from `UNDEFINED` for outputs). The filter holds the
+  frames contexts of its inputs and outputs until the effect is freed, so no image is freed before its
+  wrapper. It then records the input conversion (planes read as
   unorm textures), the effects and the output conversion (planes written as storage textures), moves every
   image to `GENERAL`, and submits once with a wait on every image's timeline semaphore at `sem_value` and a
   signal at `sem_value + 1` (`add_wait_semaphore`/`add_signal_semaphore`, each semaphore once). The filter

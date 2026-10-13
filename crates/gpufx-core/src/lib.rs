@@ -8,6 +8,7 @@ pub mod d3d12;
 pub mod expr;
 pub mod frame;
 pub mod graph;
+mod lru;
 pub mod manifest;
 mod mips;
 pub mod package;

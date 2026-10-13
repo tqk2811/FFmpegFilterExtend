@@ -287,6 +287,7 @@ pub(crate) struct Pass {
 }
 
 /// Pass outputs and bind groups of one effect, for one set of input textures.
+#[derive(Clone)]
 pub(crate) struct Bound {
     /// The input textures, to bind again when the pipelines change.
     inputs: Vec<wgpu::Texture>,
@@ -417,6 +418,8 @@ pub struct Effect {
     /// Pipelines built for this effect's own `expr` values, when they differ from the
     /// package defaults the program was compiled with.
     own: Option<OwnPasses>,
+    /// Bindings of recent frame textures made by [`Effect::rebind`], until the next `bind`.
+    rebinds: crate::lru::Lru<(Vec<wgpu::Texture>, Option<wgpu::Texture>), Bound>,
 }
 
 /// Pipelines of an effect whose `expr` parameters were changed.
@@ -448,7 +451,7 @@ impl Effect {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        Ok(Effect { program, params, globals, params_buf, bound: None, io: None, own: None })
+        Ok(Effect { program, params, globals, params_buf, bound: None, io: None, own: None, rebinds: Default::default() })
     }
 
     pub fn program(&self) -> &Arc<Program> {
@@ -559,6 +562,18 @@ impl Effect {
         size: (u32, u32),
         deep: bool,
     ) -> Result<(), Error> {
+        self.rebinds.clear();
+        self.bound = Some(self.make_bound(inputs, outputs, size, deep)?);
+        Ok(())
+    }
+
+    fn make_bound(
+        &self,
+        inputs: &[&wgpu::Texture],
+        outputs: HashMap<String, wgpu::Texture>,
+        size: (u32, u32),
+        deep: bool,
+    ) -> Result<Bound, Error> {
         let program = &self.program;
         let device = &program.ctx.device;
         let passes = self.passes(deep)?;
@@ -599,21 +614,29 @@ impl Effect {
             })
             .collect();
         let inputs = inputs.iter().map(|&t| t.clone()).collect();
-        self.bound = Some(Bound { inputs, size, deep, outputs, bind_groups });
-        Ok(())
+        Ok(Bound { inputs, size, deep, outputs, bind_groups })
     }
 
     /// The texture the last pass writes. Only valid after `bind`.
     /// Binds the effect again on `inputs`, keeping its pass textures, with the texture of
-    /// its last pass replaced by `output` when given (a frame written in place).
-    pub(crate) fn rebind(&mut self, inputs: &[&wgpu::Texture], output: Option<&wgpu::Texture>) -> Result<(), Error> {
+    /// its last pass replaced by `output` when given (a frame written in place). The
+    /// bindings of recent textures are reused (the frames of a pool come back in turn);
+    /// returns whether new ones were made.
+    pub(crate) fn rebind(&mut self, inputs: &[&wgpu::Texture], output: Option<&wgpu::Texture>) -> Result<bool, Error> {
         let bound = self.bound.as_ref().ok_or_else(|| Error::Gpu("the effect is not bound".into()))?;
         let mut outputs = bound.outputs.clone();
         if let Some(t) = output {
             outputs.insert(self.program.package.manifest.passes.last().expect("validated").output.clone(), t.clone());
         }
         let (size, deep) = (bound.size, bound.deep);
-        self.bind(inputs, outputs, size, deep)
+        let key = (inputs.iter().map(|&t| t.clone()).collect(), output.cloned());
+        let mut rebinds = std::mem::take(&mut self.rebinds);
+        let made = rebinds.get_or_make(key, |_| self.make_bound(inputs, outputs, size, deep)).map(|(bound, made)| {
+            self.bound = Some(bound.clone());
+            made
+        });
+        self.rebinds = rebinds;
+        made
     }
 
     pub(crate) fn output(&self) -> &wgpu::Texture {

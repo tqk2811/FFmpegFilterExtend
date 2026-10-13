@@ -110,7 +110,7 @@
 - **Vấn đề**:
   - Chỉ nhận mỗi plane một `VkImage` (`disable_multiplane=1`). Image multiplane (mặc định của FFmpeg cho nv12, p010, yuv420p… khi driver hỗ trợ) bị từ chối; muốn nhận thì cần view từng plane (wgpu có `TEXTURE_FORMAT_NV12`/`P010` cho 2 plane, chưa có cho 3 plane) hoặc tự tạo `VkImageView` theo aspect.
   - FFmpeg 9.0 mặc định tạo frames context `yuva420p`/`yuva444p` không có usage nào (`AVVulkanFramesContext.usage` = 0): output Vulkan của gpufx không thể là các format đó (chuyển sang format khác của manifest, ví dụ `rgba`), input có frames context như vậy bị từ chối (frame của `hwupload` thì dùng được).
-  - Đọc/ghi tại chỗ (input và output `rgba` thẳng) dựng lại bind group của các hiệu ứng liên quan mỗi frame, vì wrapper wgpu của image đổi mỗi frame; có thể cache theo `VkImage` của pool FFmpeg. Output mà hiệu ứng khác cũng đọc thì vẫn copy-out; có thể ghi thẳng nếu frames context của output có `SAMPLED` (thêm `TEXTURE_BINDING` khi import, [vulkan.rs:667](../crates/gpufx-core/src/vulkan.rs#L667)). Graph deep (p010, rgba64…) vẫn copy cả hai đầu.
+  - Output ghi tại chỗ mà hiệu ứng khác cũng đọc thì vẫn copy-out; có thể ghi thẳng nếu frames context của output có `SAMPLED` (thêm `TEXTURE_BINDING` khi import, [vulkan.rs:699](../crates/gpufx-core/src/vulkan.rs#L699)). Graph deep (p010, rgba64…) vẫn copy cả hai đầu.
   - Frame của decoder Vulkan (`-hwaccel vulkan`) là image multiplane nên bị từ chối lúc configure: cần copy trên GPU sang image từng plane (hoặc hỗ trợ view multiplane) mới dùng được; hiện phải `hwdownload,hwupload`. Đường barrier thô cho layout lạ có sẵn nhưng chưa có test.
   - Struct feature chỉ có trong extension mà FFmpeg không đưa vào chuỗi tạo device đọc thành false; struct không có trong bảng của `vulkan.rs` thì giữ giá trị của driver (bảng theo wgpu-hal 30, phải cập nhật khi nâng wgpu).
   - Submit bị wgpu từ chối làm device dùng chung không dùng được cho frame Vulkan tới hết process (an toàn, không signal giá trị cũ, nhưng không tự phục hồi).
@@ -207,13 +207,14 @@
 - **Vì sao nên làm**: test đỏ giả che lỗi thật; sửa giống `tests/gpu_frames.rs` (`own_gpu()`: một device riêng cho test đếm cấp phát).
 - **Ngày ghi**: 2026-10-13
 
-### [Vừa] Đọc/ghi frame Vulkan tại chỗ: wrapper image giữ quá frame, pass cuối ghi thiếu pixel
+### [Vừa] Đọc/ghi frame Vulkan tại chỗ: wrapper giữ qua frame, pass cuối ghi thiếu pixel
 - **Vấn đề**:
-  - Sau `process_vulkan`, `Bound` của hiệu ứng (view, bind group, `outputs`) và `InputSlot.texture` vẫn giữ wrapper wgpu của image FFmpeg của frame vừa xong tới frame sau hoặc tới khi graph bị huỷ. Nếu FFmpeg giải phóng `AVVkFrame` trước (hết stream, pool co lại), wgpu huỷ `VkImageView` của image đã mất. Kiểu giữ này đã có từ trước với bind group của pass chuyển đổi (`InputSlot::use_gpu_frame`, `GpuOutputSlot::bind`), giờ có thêm ở hiệu ứng.
-  - Output ghi tại chỗ được import với trạng thái `UNINITIALIZED`: pass cuối mà không ghi đủ mọi pixel thì phần thiếu là nội dung cũ của frame trong pool FFmpeg (trước đây là nội dung cũ của texture trong pool gpufx).
+  - Wrapper wgpu của image FFmpeg (và view, bind group dựng từ chúng) được cache theo `VkImage` (16 frame mỗi pad, `ImportCache` trong `vulkan.rs`, `Lru` trong `InputSlot`, `GpuOutputSlot`, `Effect::rebind`), nên được giữ qua frame tới khi bị đẩy khỏi cache hoặc graph bị huỷ. Filter giữ ref các frames context Vulkan của input/output (`hold_vk_frames` trong `vf_gpufx.c`) tới sau `gpufx_effect_free`, nên image không bị giải phóng trước wrapper. Còn hở: frames context bị thay giữa chừng (cấu hình lại link) thì ref cũ vẫn giữ tới khi filter bị huỷ (tốn VRAM, không sai); dùng `process_vulkan` từ Rust mà không giữ image như vậy thì wrapper có thể sống lâu hơn image. Đường D3D12/D3D11 chưa có cache, vẫn giữ wrapper của frame cuối tới frame sau.
+  - Output ghi tại chỗ được rào layout từ `UNDEFINED` (bỏ nội dung cũ) khi chưa ở `GENERAL`: pass cuối mà không ghi đủ mọi pixel thì phần thiếu là nội dung cũ của frame trong pool FFmpeg (trước đây là nội dung cũ của texture trong pool gpufx).
+  - Một frame `split` nằm trên hai pad có hai wrapper wgpu cho cùng `VkImage` (cache theo pad), mỗi wrapper wgpu theo dõi trạng thái riêng: trong một submit hai wrapper có thể chuyển image sang hai layout khác nhau. Có từ trước, cache làm nó kéo dài qua frame; nên khoá cache theo image cho mọi pad (`vulkan.rs` `ImportKey`).
   - Cách làm hiện tại rải điều kiện qua ba chỗ phải khớp nhau (`prepare`/`direct_outputs`, `acquire` với stand-in, `record_gpu` bind lại).
-- **Vị trí**: [crates/gpufx-core/src/graph.rs](../crates/gpufx-core/src/graph.rs) (`direct_outputs`, `acquire`, `record_gpu`), [crates/gpufx-core/src/runtime.rs](../crates/gpufx-core/src/runtime.rs) (`Effect::rebind`).
-- **Vì sao nên làm**: an toàn lifetime và dễ bảo trì hơn nếu bind group chứa image của frame chỉ dựng lúc encode và bỏ sau submit, tách khỏi binding của texture trong pool (hoặc bind lại sang stand-in sau submit). Chưa có test với `VkImage` thật (test dùng texture wgpu thường).
+- **Vị trí**: [crates/gpufx-core/src/graph.rs](../crates/gpufx-core/src/graph.rs) (`direct_outputs`, `acquire`, `record_gpu`), [crates/gpufx-core/src/runtime.rs](../crates/gpufx-core/src/runtime.rs) (`Effect::rebind`), [crates/gpufx-core/src/vulkan.rs](../crates/gpufx-core/src/vulkan.rs) (`ImportCache`), [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`hold_vk_frames`).
+- **Vì sao nên làm**: dễ bảo trì hơn nếu gom ba chỗ điều kiện về một; cache import Vulkan và rào layout thô mỗi frame chưa có test với `VkImage` thật (test Rust dùng texture wgpu thường, chỉ kiểm qua bundle FFmpeg).
 - **Ngày ghi**: 2026-10-13
 
 ### [Thấp] Pass chuyển đổi YUV vẫn chậm gấp ~3 lần một pass hiệu ứng

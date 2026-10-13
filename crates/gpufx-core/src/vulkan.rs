@@ -17,6 +17,7 @@ use wgpu::hal::{self, api::Vulkan};
 
 use crate::frame::{ColorInfo, GpuFrame, PixelFormat};
 use crate::graph::EffectGraph;
+use crate::lru::Lru;
 use crate::runtime::{device_limits, FrameInfo, GpuContext};
 use crate::Error;
 
@@ -527,21 +528,37 @@ impl GpuContext {
     }
 }
 
-/// wgpu state matching a layout, or `None` when wgpu has no state for it.
-fn state_of(layout: vk::ImageLayout) -> Option<wgpu::TextureUses> {
-    use wgpu::TextureUses as U;
-    Some(match layout {
-        vk::ImageLayout::UNDEFINED => U::UNINITIALIZED,
-        vk::ImageLayout::GENERAL => U::STORAGE_READ_WRITE,
-        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL => U::RESOURCE,
-        vk::ImageLayout::TRANSFER_SRC_OPTIMAL => U::COPY_SRC,
-        vk::ImageLayout::TRANSFER_DST_OPTIMAL => U::COPY_DST,
-        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL => U::COLOR_TARGET,
-        _ => return None,
-    })
+/// What a plane image was wrapped as: a new image, semaphore, format or size is a new
+/// wrapper. FFmpeg keeps the images of a frames context until it is freed, and the filter
+/// holds the frames contexts it was configured with until the effect is freed, so a
+/// cached wrapper never outlives its image.
+#[derive(PartialEq)]
+struct ImportKey {
+    image: u64,
+    semaphore: u64,
+    format: wgpu::TextureFormat,
+    size: (u32, u32),
+    output: bool,
+}
+
+/// wgpu wrappers of the images of recent Vulkan frames, per input then output pad: the
+/// frames of a pool come back in turn, so wrappers, views and bind groups are made once
+/// per image (see `process_vulkan`). Dropping one leaves the image alone.
+#[derive(Default)]
+pub(crate) struct ImportCache {
+    pads: Vec<Lru<ImportKey, wgpu::Texture>>,
+    /// Wrappers made, for tests.
+    made: usize,
 }
 
 impl EffectGraph {
+    /// How many wgpu wrappers of Vulkan images were made; those of recent frames are
+    /// reused. For tests and diagnostics.
+    #[doc(hidden)]
+    pub fn vulkan_wrappers_made(&self) -> usize {
+        self.vk.made
+    }
+
     /// Runs the graph on Vulkan frames of the device the graph's context shares
     /// ([`GpuContext::from_vulkan`]), without copying them: each plane image is read or
     /// written in place. The submission waits on every image's semaphore at its value and
@@ -553,6 +570,9 @@ impl EffectGraph {
     /// The images must be valid images of that device as described (one per plane, with
     /// `SAMPLED` usage for inputs and `STORAGE` for outputs), and the caller must hold
     /// the frames (FFmpeg's `lock_frame`) and the queue while this runs.
+    /// Wrappers of the images (views, bind groups) are kept for the next frames until the
+    /// graph is dropped: every image must stay valid until then, and a destroyed image must
+    /// not come back under the same image and semaphore handles meanwhile.
     pub unsafe fn process_vulkan(
         &mut self,
         inputs: &mut [VulkanFrame],
@@ -569,17 +589,26 @@ impl EffectGraph {
             ctx.vulkan_queue_family.ok_or_else(|| Error::Gpu("Vulkan frames need a graph opened on a shared Vulkan device".into()))?;
         let device = &ctx.device;
 
-        // Wrap every image (no copy, nothing owned) and note those wgpu cannot take as
-        // they are: their layout has no wgpu state, a raw barrier moves them to GENERAL.
+        // Wrap every image (no copy, nothing owned), or take the wrapper made for it on an
+        // earlier frame. wgpu's state of every wrapper is GENERAL (STORAGE_READ_WRITE)
+        // between calls: a new one is made in that state and every call ends there. The
+        // image itself may be in another layout (another filter used it since): a raw
+        // barrier moves it to GENERAL first, once per image.
         struct Wrapped {
             frames: Vec<GpuFrame>,
             textures: Vec<wgpu::Texture>,
         }
         let mut barriers: Vec<vk::ImageMemoryBarrier> = Vec::new();
+        let pads = inputs.len() + outs.len();
+        if self.vk.pads.len() != pads {
+            self.vk.pads = (0..pads).map(|_| Lru::new(crate::lru::FRAMES * 4)).collect();
+        }
         let (ins, outs_w, raw_device) = {
             let hal_device = device.as_hal::<Vulkan>().ok_or_else(|| Error::Gpu("the device is not a Vulkan device".into()))?;
             let raw_device = hal_device.raw_device().clone();
-            let mut hal_textures = Vec::new();
+            // Per plane: the cached wrapper, or a new hal texture to wrap.
+            type Plane = (bool, usize, ImportKey, Result<wgpu::Texture, hal::vulkan::Texture>);
+            let mut planes: Vec<Plane> = Vec::new();
             for (output, list) in [(false, &*inputs), (true, &*outs)] {
                 for (n, f) in list.iter().enumerate() {
                     let what = format!("{} {n}", if output { "output" } else { "input" });
@@ -609,31 +638,15 @@ impl EffectGraph {
                             )));
                         }
                         let (w, h) = f.format.plane_texture_size(p, f.width, f.height);
-                        let usage = if output { wgpu::TextureUses::STORAGE_WRITE_ONLY } else { wgpu::TextureUses::RESOURCE };
-                        let hal_desc = hal::TextureDescriptor {
-                            label: Some("gpufx vulkan plane"),
-                            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-                            mip_level_count: 1,
-                            sample_count: 1,
-                            dimension: wgpu::TextureDimension::D2,
-                            format,
-                            usage,
-                            memory_flags: hal::MemoryFlags::empty(),
-                            view_formats: Vec::new(),
-                        };
                         let image = vk::Image::from_raw(plane.image);
                         let layout = vk::ImageLayout::from_raw(plane.layout);
-                        let initial = if output {
-                            // Written whole: the old content may go.
-                            wgpu::TextureUses::UNINITIALIZED
-                        } else if let Some(s) = state_of(layout) {
-                            s
-                        } else {
+                        if layout != vk::ImageLayout::GENERAL && !barriers.iter().any(|b| b.image == image) {
                             barriers.push(
                                 vk::ImageMemoryBarrier::default()
                                     .src_access_mask(vk::AccessFlags::MEMORY_WRITE)
                                     .dst_access_mask(vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE)
-                                    .old_layout(layout)
+                                    // Outputs are written whole: their old content may go.
+                                    .old_layout(if output { vk::ImageLayout::UNDEFINED } else { layout })
                                     .new_layout(vk::ImageLayout::GENERAL)
                                     .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
                                     .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -646,11 +659,29 @@ impl EffectGraph {
                                         layer_count: 1,
                                     }),
                             );
-                            wgpu::TextureUses::STORAGE_READ_WRITE
+                        }
+                        let key = ImportKey { image: plane.image, semaphore: plane.semaphore, format, size: (w, h), output };
+                        let pad = if output { inputs.len() + n } else { n };
+                        if let Some(t) = self.vk.pads[pad].get(&key) {
+                            planes.push((output, n, key, Ok(t.clone())));
+                            continue;
+                        }
+                        let usage = if output { wgpu::TextureUses::STORAGE_WRITE_ONLY } else { wgpu::TextureUses::RESOURCE };
+                        let hal_desc = hal::TextureDescriptor {
+                            label: Some("gpufx vulkan plane"),
+                            size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+                            mip_level_count: 1,
+                            sample_count: 1,
+                            dimension: wgpu::TextureDimension::D2,
+                            format,
+                            usage,
+                            memory_flags: hal::MemoryFlags::empty(),
+                            view_formats: Vec::new(),
                         };
+                        // The drop callback keeps wgpu from destroying the image (FFmpeg owns it).
                         let tex =
                             hal_device.texture_from_raw(image, &hal_desc, Some(Box::new(|| ())), hal::vulkan::TextureMemory::External);
-                        hal_textures.push((output, n, tex, format, (w, h), initial));
+                        planes.push((output, n, key, Err(tex)));
                     }
                 }
             }
@@ -663,22 +694,31 @@ impl EffectGraph {
             for f in outs.iter() {
                 outs_w.frames.push(GpuFrame { format: f.format, width: f.width, height: f.height, planes: Vec::new(), color: f.color });
             }
-            for (output, n, tex, format, (w, h), initial) in hal_textures {
-                let usage = if output { wgpu::TextureUsages::STORAGE_BINDING } else { wgpu::TextureUsages::TEXTURE_BINDING };
-                let t = device.create_texture_from_hal::<Vulkan>(
-                    tex,
-                    &wgpu::TextureDescriptor {
-                        label: Some("gpufx vulkan plane"),
-                        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-                        mip_level_count: 1,
-                        sample_count: 1,
-                        dimension: wgpu::TextureDimension::D2,
-                        format,
-                        usage,
-                        view_formats: &[],
-                    },
-                    initial,
-                );
+            for (output, n, key, tex) in planes {
+                let t = match tex {
+                    Ok(t) => t,
+                    Err(tex) => {
+                        let usage = if output { wgpu::TextureUsages::STORAGE_BINDING } else { wgpu::TextureUsages::TEXTURE_BINDING };
+                        let t = device.create_texture_from_hal::<Vulkan>(
+                            tex,
+                            &wgpu::TextureDescriptor {
+                                label: Some("gpufx vulkan plane"),
+                                size: wgpu::Extent3d { width: key.size.0, height: key.size.1, depth_or_array_layers: 1 },
+                                mip_level_count: 1,
+                                sample_count: 1,
+                                dimension: wgpu::TextureDimension::D2,
+                                format: key.format,
+                                usage,
+                                view_formats: &[],
+                            },
+                            wgpu::TextureUses::STORAGE_READ_WRITE,
+                        );
+                        let pad = if output { inputs.len() + n } else { n };
+                        self.vk.made += 1;
+                        self.vk.pads[pad].insert(key, t.clone());
+                        t
+                    }
+                };
                 let w = if output { &mut outs_w } else { &mut ins };
                 w.frames[n].planes.push(t.clone());
                 w.textures.push(t);

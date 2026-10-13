@@ -369,6 +369,10 @@ typedef struct GpufxVulkanFrame {
  * sem_value of every image are updated, and the caller stores them in its frames
  * (AVVkFrame) while it still holds them (lock_frame). With info NULL the effects are
  * bypassed as in gpufx_effect_convert_graph().
+ * The effect keeps wrappers (image views, bind groups) of the images of recent frames
+ * until gpufx_effect_free(): every image passed here must stay valid until then (keep a
+ * reference to its frames context), and a destroyed image must not come back under the
+ * same VkImage and semaphore handles while the effect lives.
  */
 int gpufx_effect_process_vulkan(GpufxEffect *fx, GpufxVulkanFrame *inputs, uint32_t nb_inputs,
                                 GpufxVulkanFrame *outs, uint32_t nb_outputs,

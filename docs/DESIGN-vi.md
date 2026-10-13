@@ -330,8 +330,12 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   RGBA ở giữa bằng `out_format=rgba` trên mọi filter trừ cái cuối (số đo ở mục Benchmark của README).
 - **Mỗi frame**, CPU không chờ: filter khoá mỗi `AVVkFrame` một lần (`lock_frame`; một frame `split` phía
   trước có thể nằm trên hai pad), libgpufx bọc mỗi image thành texture wgpu (`texture_from_raw`, bộ nhớ
-  ngoài, trạng thái đầu lấy từ layout của image; layout wgpu không có trạng thái tương ứng
-  được chuyển sang `GENERAL` bằng barrier thô trong command buffer submit trước), ghi pass chuyển đổi input
+  ngoài, callback drop rỗng) hoặc dùng lại wrapper đã tạo ở frame trước (LRU 16 frame mỗi pad, khoá theo
+  image, semaphore, format, kích thước; bind group dựng từ chúng cũng cache như vậy, nên pool frame quay
+  vòng chỉ bind một lần). Giữa các lần gọi wgpu thấy mọi wrapper ở `GENERAL`; image bị để ở layout khác
+  (bởi `hwupload`, `hwdownload`, filter khác) được chuyển sang `GENERAL` bằng barrier thô trong command
+  buffer submit trước (output thì từ `UNDEFINED`). Filter giữ frames context của input và output tới khi
+  effect bị giải phóng, nên image không bị giải phóng trước wrapper. Rồi libgpufx ghi pass chuyển đổi input
   (plane đọc như texture unorm), các hiệu ứng và pass chuyển đổi output (plane ghi như storage texture),
   chuyển mọi image về `GENERAL`, rồi submit một lần, chờ timeline semaphore của mọi image ở `sem_value` và
   signal `sem_value + 1` (`add_wait_semaphore`/`add_signal_semaphore`, mỗi semaphore một lần). Sau đó filter
