@@ -84,6 +84,18 @@ fn cpu_run(
     info: Option<&FrameInfo>,
 ) -> Vec<Vec<Vec<u8>>> {
     let color = ColorInfo { matrix: Matrix::Bt709, range: Range::Limited, ..Default::default() };
+    cpu_run_color(g, inputs, outs, w, h, info, color)
+}
+
+fn cpu_run_color(
+    g: &mut EffectGraph,
+    inputs: &[(PixelFormat, Vec<Vec<u8>>)],
+    outs: &[PixelFormat],
+    w: u32,
+    h: u32,
+    info: Option<&FrameInfo>,
+    color: ColorInfo,
+) -> Vec<Vec<Vec<u8>>> {
     let frames: Vec<Frame> = inputs
         .iter()
         .map(|(format, planes)| {
@@ -315,7 +327,10 @@ struct MipPackage(PathBuf);
 
 impl MipPackage {
     fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!("gpufx-direct-mips-{}", std::process::id()));
+        // One directory per package: tests run in parallel and each removes its own.
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("gpufx-direct-mips-{}-{n}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let manifest =
@@ -457,6 +472,43 @@ fn rgba_gpu_outputs_are_copied_when_they_cannot_be_written_in_place() {
     for out in [Rgba64, Nv12] {
         if let Some((direct, copied)) = in_place_matches_copies("[0]grayscale.zip[out]", &[Rgba], &[out], &on) {
             assert_eq!(direct.pass_textures, copied.pass_textures, "{}", out.name());
+        }
+    }
+}
+
+/// The YUV conversion passes of GPU frames (one pass writing every output plane, 16x16
+/// input tiles sharing their chroma samples) over frames larger than one workgroup, with
+/// odd sizes, every chroma siting and range, and several frames: same bytes as the CPU
+/// path.
+#[test]
+fn yuv_gpu_frames_match_cpu_frames_across_tiles() {
+    let Some(ctx) = gpu() else { return };
+    use gpufx_core::ChromaLocation as L;
+    use PixelFormat::*;
+    let info = FrameInfo::new(0.5, 3);
+    let formats = [Nv12, Yuv420p, Yuv422p, Yuv444p, Yuva420p, Yuva444p, P010, Yuv422p10];
+    let mut g = graph(&ctx, "[0]vignette.zip|grayscale.zip[out]");
+    for (n, (fin, fout)) in formats.iter().zip(formats.iter().cycle().skip(1)).chain(formats.iter().zip(formats.iter())).enumerate() {
+        let (fin, fout) = (*fin, *fout);
+        if !supported(&ctx, fin) || !supported(&ctx, fout) {
+            eprintln!("skipping {} -> {}: the adapter lacks the format features", fin.name(), fout.name());
+            continue;
+        }
+        let loc = [L::Left, L::Center, L::TopLeft, L::Top, L::BottomLeft, L::Bottom][n % 6];
+        let range = if n % 2 == 0 { Range::Limited } else { Range::Full };
+        let color = ColorInfo { matrix: Matrix::Bt709, range, chroma_location: loc, ..Default::default() };
+        let (w, h) = [(70, 45), (33, 17), (49, 50)][n % 3];
+        for seed in 0..3 {
+            let data = pattern(fin, w, h, seed + n as u32);
+            for info in [Some(&info), None] {
+                let want = cpu_run_color(&mut g, &[(fin, data.clone())], &[fout], w, h, info, color);
+                let mut input = upload(&ctx, fin, &data, w, h);
+                input.color = color;
+                let mut out = target(&ctx, fout, w, h);
+                out.color = color;
+                let got = gpu_run(&ctx, &mut g, &[input], &[out], info);
+                assert_eq!(got, want, "{} -> {} {w}x{h} {loc:?} {range:?} seed {seed} bypass {}", fin.name(), fout.name(), info.is_none());
+            }
         }
     }
 }

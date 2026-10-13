@@ -350,6 +350,17 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   (`out_format=rgba`) of such a graph is written by the last pass of the effect making it, with no pooled
   texture and no copy-out pass, when nothing else reads that effect's output (no other effect or graph
   output, no mip chain, no other pass of the effect). Anything else, and bypassed frames, keep the copies.
+- **Conversion passes of GPU frames** (Vulkan and D3D12): the input pass of a YUV frame converts 16x16
+  pixels per workgroup, from the chroma samples they read loaded once into workgroup memory (not four
+  clamped loads per pixel). A YUV output is written by one pass for all its planes: each invocation writes
+  one chroma sample and the luma (and alpha) samples of its block, from a tile of pixels converted to YUV
+  once, with the weights of the chroma filter computed per row and column. The RGBA plane pass picks
+  channels with `select`, not a vector index known only when running (which NVIDIA moves to local memory).
+  The bytes are the same as before (tests compare with the CPU path). Measured with one vignette on 1080p
+  wgpu textures (RTX 4060 Laptop, 3000 frames): nv12 copy-in 0.108 → 0.087 ms, copy-out 0.130 → 0.105 ms;
+  rgba copy-out 0.087 → 0.049 ms. The conversion is not fused into the effects' first and last passes:
+  effects sample their inputs through a linear sampler (filtering the YUV planes does not give the RGB
+  the copy gives) and every effect pass would need a pipeline per frame format.
 - **Profiling:** `GPUFX_PROFILE=1` asks the device for timestamp queries and prints, when each graph is
   freed, its GPU time per frame for copy-in, effects and copy-out, and its CPU time per frame (prepare, bind,
   record, import, submit). It splits the frame into three compute passes and waits for frames four behind,

@@ -215,3 +215,9 @@
 - **Vị trí**: [crates/gpufx-core/src/graph.rs](../crates/gpufx-core/src/graph.rs) (`direct_outputs`, `acquire`, `record_gpu`), [crates/gpufx-core/src/runtime.rs](../crates/gpufx-core/src/runtime.rs) (`Effect::rebind`).
 - **Vì sao nên làm**: an toàn lifetime và dễ bảo trì hơn nếu bind group chứa image của frame chỉ dựng lúc encode và bỏ sau submit, tách khỏi binding của texture trong pool (hoặc bind lại sang stand-in sau submit). Chưa có test với `VkImage` thật (test dùng texture wgpu thường).
 - **Ngày ghi**: 2026-10-13
+
+### [Thấp] Pass chuyển đổi YUV vẫn chậm gấp ~3 lần một pass hiệu ứng
+- **Vấn đề**: sau đợt tối ưu (tile chroma trong workgroup, một pass ghi mọi plane, chọn kênh bằng `select`), với frame nv12 1080p trên RTX 4060 copy-in còn ~0.087 ms và copy-out ~0.105 ms, trong khi một pass vignette đọc/ghi RGBA chỉ ~0.033 ms. Thử thêm: mỗi invocation một khối 2x2 với 3x3 mẫu chroma trong thanh ghi (chậm hơn, 0.100 ms), workgroup 16x16 cho pass ra (không đổi), nạp luma trước barrier (chậm hơn). Phần còn lại của copy-out là nạp tile pixel và đổi sang YUV (~0.07 ms khi bỏ bộ lọc chroma). Đường frame từ CPU (`convert_in_plain.wgsl`, `convert_out_buffer.wgsl`) chưa đổi, vẫn đọc chroma từng pixel và chỉ số vector lúc chạy.
+- **Vị trí**: [crates/gpufx-core/src/convert_in_tiled.wgsl](../crates/gpufx-core/src/convert_in_tiled.wgsl), [crates/gpufx-core/src/convert_out_fused.wgsl](../crates/gpufx-core/src/convert_out_fused.wgsl), [crates/gpufx-core/src/convert_out_buffer.wgsl](../crates/gpufx-core/src/convert_out_buffer.wgsl).
+- **Vì sao nên làm**: với 8 filter riêng, copy vẫn chiếm phần lớn thời gian GPU; đường CPU có thể dùng chung các pass mới (byte ra giống hệt) nếu được duyệt đổi.
+- **Ngày ghi**: 2026-10-13

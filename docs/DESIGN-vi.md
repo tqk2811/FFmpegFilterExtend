@@ -344,6 +344,16 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   của hiệu ứng tạo ra nó ghi thẳng, không texture trong pool và không pass copy-out, khi không gì khác đọc
   output của hiệu ứng đó (hiệu ứng khác hay output khác của graph, mip chain, pass khác của chính hiệu ứng).
   Mọi trường hợp khác, và frame bị bypass, vẫn đi đường copy.
+- **Pass chuyển đổi của frame GPU** (Vulkan và D3D12): pass vào của frame YUV chuyển 16x16 pixel mỗi
+  workgroup, các mẫu chroma mà chúng đọc được nạp một lần vào bộ nhớ workgroup (thay vì bốn lần load có
+  clamp mỗi pixel). Output YUV được ghi bằng một pass cho mọi plane: mỗi invocation ghi một mẫu chroma và
+  các mẫu luma (và alpha) của khối của nó, từ một tile pixel đã đổi sang YUV một lần, trọng số bộ lọc
+  chroma tính theo hàng và cột. Pass ghi plane RGBA chọn kênh bằng `select`, không dùng chỉ số vector chỉ
+  biết lúc chạy (NVIDIA đẩy sang local memory). Byte ra giống hệt trước (test so với đường CPU). Đo với
+  một vignette trên texture wgpu 1080p (RTX 4060 Laptop, 3000 frame): nv12 copy-in 0.108 → 0.087 ms,
+  copy-out 0.130 → 0.105 ms; rgba copy-out 0.087 → 0.049 ms. Không gộp chuyển đổi vào pass đầu/cuối của
+  hiệu ứng: hiệu ứng lấy mẫu input qua sampler tuyến tính (lọc trên plane YUV không ra cùng RGB như bản
+  copy) và mỗi pass hiệu ứng sẽ cần một pipeline cho mỗi format frame.
 - **Đo thời gian:** `GPUFX_PROFILE=1` xin device timestamp query và khi giải phóng mỗi graph thì in thời gian GPU
   mỗi frame của copy-in, hiệu ứng, copy-out, cùng thời gian CPU mỗi frame (prepare, bind, record, import,
   submit). Nó tách frame thành ba compute pass và chờ frame trễ bốn frame, nên khi bật thì thời gian chạy
