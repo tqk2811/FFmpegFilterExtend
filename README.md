@@ -58,7 +58,7 @@ Docs: [design](docs/DESIGN.md) · [package format and how to write shaders](docs
 
 ## Benchmark
 
-Build `a4296b2` (win64 release package), measured on 2026-10-13.
+Build `b1531dc` (win64 release package), measured on 2026-10-13.
 
 - **Machine**: Intel Core i9-14900HX, 32 GiB DDR5-5600 (2 × 16 GiB), NVIDIA GeForce RTX 4060 Laptop GPU
   8 GiB VRAM (driver 617.42), Windows 11 Pro.
@@ -78,10 +78,10 @@ Build `a4296b2` (win64 release package), measured on 2026-10-13.
 | `xfade` wipeleft (CPU) | 3.12 s | – | 0 |
 | `xfade` circleopen (CPU) | 8.00 s | 549 MB | 0 |
 | `xfade_vulkan` fade (hwupload/hwdownload) | 5.33 s | – | 399 / 80 MB |
-| gpufx `crossfade.zip`, Vulkan | 5.47 s | 451 MB | 199 / 76 MB |
+| gpufx `crossfade.zip`, Vulkan | 5.19 s | 491 MB | 201 / – |
 | gpufx `crossfade.zip`, DX12 | 7.26 s | 546 MB | 173 / 154 MB |
-| gpufx `wipe-transition.zip`, Vulkan | 5.46 s | – | – |
-| gpufx `circle-reveal.zip`, Vulkan | 5.53 s | 450 MB | 199 / 76 MB |
+| gpufx `wipe-transition.zip`, Vulkan | 5.22 s | 490 MB | 201 / – |
+| gpufx `circle-reveal.zip`, Vulkan | 5.16 s | 488 MB | 202 / – |
 
 **A chain of effects**: clip A blur → color adjust → vignette, clip B sepia → sharpen → vignette, crossfade,
 then sharpen. The CPU side uses `gblur`, `eq`, `vignette`, `colorchannelmixer`, `unsharp`, `xfade`.
@@ -89,25 +89,25 @@ then sharpen. The CPU side uses `gblur`, `eq`, `vignette`, `colorchannelmixer`, 
 | Filter | Time | Peak RAM | VRAM ded. / shared |
 |---|---|---|---|
 | CPU filters | 34.95 s | 655 MB | 0 |
-| 8 separate `gpufx` filters | 29.06 s | 601 MB | 459 / 84 MB |
-| one `gpufx=graph=...` | **7.13 s** | 536 MB | 203 / 82 MB |
+| 8 separate `gpufx` filters | 29.77 s | 586 MB | 202 / – |
+| one `gpufx=graph=...` | **7.05 s** | 491 MB | 202 / – |
 
-**Vulkan frames and the transfer filters** (same machine, idle GPU, 2026-10-13, range of 3 runs; RAM is
-the peak working set, VRAM the dedicated peak of the 3rd run). Transfers: clip A only, nv12, 90 s.
+**Vulkan frames and the transfer filters** (same machine, 2026-10-13, range of 3 runs, normal desktop running (browser, Discord, Steam; a few % GPU load), so spread is wide; RAM is
+the peak working set, VRAM the dedicated peak of the 3rd run). Rows of the first two tables that name gpufx were re-measured on this build (VRAM shared not re-measured); CPU, `xfade_vulkan` and DX12 rows are from the earlier build. Transfers: clip A only, nv12, 90 s.
 
 | Filter | Time | Peak RAM | VRAM ded. |
 |---|---|---|---|
-| Decode only (nv12) | 1.82–2.09 s | 261 MB | 16 MB |
-| `hwupload,hwdownload` | 3.49–4.09 s | 280 MB | 26 MB |
-| `gpufx_upload,hwdownload` | 3.27–4.11 s | 284 MB | 32 MB |
-| `hwupload,gpufx_download` | 2.52–3.10 s | 297 MB | 35 MB |
-| `gpufx_upload,gpufx_download` | 2.34–3.11 s | 291 MB | 32 MB |
-| Chain, 8 separate `gpufx`, hwupload/hwdownload | 11.73–12.18 s | 578 MB | 578 MB |
-| Chain, 8 separate `gpufx`, gpufx_upload/download | 10.23–10.31 s | 617 MB | 578 MB |
-| Chain, 8 separate, `out_format=rgba`, hwupload/hwdownload | 10.31–11.18 s | 612 MB | 679 MB |
-| Chain, 8 separate, `out_format=rgba`, gpufx_upload/download | 8.51–9.12 s | 590 MB | 681 MB |
-| Chain, one `graph=`, hwupload/hwdownload | 8.54–9.13 s | 577 MB | 257 MB |
-| Chain, one `graph=`, gpufx_upload/download | **6.25–6.53 s** | 545 MB | 260 MB |
+| Decode only (nv12) | 1.92–2.07 s | 262 MB | 16 MB |
+| `hwupload,hwdownload` | 3.63–4.11 s | 280 MB | 26 MB |
+| `gpufx_upload,hwdownload` | 3.28–4.09 s | 284 MB | 32 MB |
+| `hwupload,gpufx_download` | 2.39–3.07 s | 297 MB | 35 MB |
+| `gpufx_upload,gpufx_download` | 2.23–3.07 s | 289 MB | 32 MB |
+| Chain, 8 separate `gpufx`, hwupload/hwdownload | 9.83–13.27 s | 547 MB | 316 MB |
+| Chain, 8 separate `gpufx`, gpufx_upload/download | 8.97–15.51 s | 559 MB | 320 MB |
+| Chain, 8 separate, `out_format=rgba`, hwupload/hwdownload | 9.19–15.23 s | 542 MB | 419 MB |
+| Chain, 8 separate, `out_format=rgba`, gpufx_upload/download | 5.95–8.26 s | 527 MB | 421 MB |
+| Chain, one `graph=`, hwupload/hwdownload | 8.88–10.82 s | 509 MB | 253 MB |
+| Chain, one `graph=`, gpufx_upload/download | **5.32–6.13 s** | 479 MB | 256 MB |
 
 `gpufx_download` removes most of the readback cost (`hwdownload` waits for every copy); the upload side
 gains little since `hwupload` does not wait either.
@@ -118,7 +118,7 @@ What the numbers say:
   upload, YUV → RGBA on the GPU, readback and the wait for the GPU. The pixel format conversion runs in a shader,
   FFmpeg inserts no `scale` filter. A light transition alone is therefore slower than `xfade` on a fast CPU.
 - Put the whole chain in one `gpufx` (`graph=` or `effect='a.zip|b.zip'`): the frames cross the bus once and
-  extra effects are nearly free (8 effects: 7.1 s against 5.5 s for one crossfade, about 5× faster than CPU).
+  extra effects are nearly free (8 effects: 7.1 s against 5.2 s for one crossfade, about 5× faster than CPU).
 - Starting a `gpufx` costs about 1 s (device creation and shader compilation), so short clips gain less.
 - Not measured yet: Vulkan hw frames end to end (`-hwaccel vulkan` → gpufx → GPU encode), which skips the
   upload and readback.
