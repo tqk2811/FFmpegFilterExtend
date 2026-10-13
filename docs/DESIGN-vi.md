@@ -152,15 +152,15 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   hiệu ứng có nó. Dấu cách quanh `|` được bỏ qua.
 - **graph**: cả đồ thị hiệu ứng với nhiều input và output, thay cho `effect`; xem "Đồ thị GPU trong
   một filter" ở mục 6.
-- **Chỉ trả ra frame GPU**, giống các filter `*_cuda`: mọi output là frame Vulkan, D3D12 hoặc D3D11, nên trước
+- **Chỉ trả ra frame GPU**, giống các filter `*_cuda`: mọi output là frame Vulkan, D3D12, D3D11 hoặc VideoToolbox, nên trước
   filter CPU và encoder phải có `hwdownload,format=<fmt>` hoặc `gpufx_download,format=<fmt>`. Input có thể là frame
   GPU của API đó hoặc frame CPU; frame CPU được filter tự upload (`av_hwframe_transfer_data` vào frames context
   riêng của từng input): giữ nguyên format khi device nhận format đó, không thì thành nv12/p010le (YUV 4:2:0)
   hoặc RGBA do swscale chuyển; frame có ma trận màu mà GPU không chuyển được thì lên dạng RGBA. Device là device
   của các input GPU (kiểm khớp với `-filter_hw_device` khi có cả hai), không thì là `-filter_hw_device`
   (`AVFILTER_FLAG_HWDEVICE`), loại device quyết định API; chỉ có input CPU mà không có device thì filter báo lỗi
-  kèm các option cần thêm. `backend=gl|metal` bị từ chối (thư viện và CLI vẫn giữ). Thêm một API (VideoToolbox
-  trên macOS, hiện còn thiếu) là thêm một dòng vào `hw_apis[]` và các nhánh trong các switch theo API của
+  kèm các option cần thêm. `backend=gl` bị từ chối, `backend=metal` cũng vậy trừ trên macOS (thư viện và CLI vẫn giữ).
+  Thêm một API là thêm một dòng vào `hw_apis[]` và các nhánh trong các switch theo API của
   `vf_gpufx.c`.
 - **out_format**: ép pixel format của mọi output (với frame Vulkan/D3D: sw_format của frames context đầu
   ra). Format phải nằm trong danh sách output của effect, libgpufx phải chuyển được trên GPU
@@ -168,7 +168,7 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   filter báo lỗi lúc configure. Mặc định: format của input nguồn (input CPU: format nó được upload) nếu effect
   được trả ra format đó, không thì format output đầu tiên GPU ghi được (xem "Frame Vulkan"). Dùng: `out_format=rgba` giữa các `gpufx` rời để filter ở giữa bỏ qua chuyển
   đổi YUV ↔ RGBA (filter cuối quay về bằng `out_format=nv12`).
-  Giới hạn: một format cho mọi output của filter; với frame D3D chỉ nv12, p010le, rgba, rgba64le.
+  Giới hạn: một format cho mọi output của filter; với frame D3D chỉ nv12, p010le, rgba, rgba64le; với frame VideoToolbox chỉ nv12, p010le.
 - **params**: `tên=giá trị` cách nhau bởi `|`. Giá trị là literal (`0.5`, `1,0,0`, `#ff8800`)
   hoặc **biểu thức FFmpeg** theo `t`, `n`, `w`, `h`, `a` (`w/h`), `sar`, `dar` (`a*sar`),
   tính lại mỗi frame. Đây là cách làm keyframe/transition không cần tool ngoài.
@@ -255,7 +255,7 @@ Chi phí chính là upload/readback và chuyển màu trên CPU. Lộ trình b�
 | P3 (xong) | **Zero-copy** với `AV_PIX_FMT_VULKAN`: wgpu device tạo từ `AVVulkanDeviceContext` (`wgpu-hal` `device_from_raw`), đọc và ghi thẳng các `VkImage` của `AVVkFrame` (xem "Frame Vulkan" dưới đây) | Không qua RAM khi decode/encode bằng Vulkan |
 | P4 | Interop **CUDA** (NVDEC/NVENC): `hwmap` CUDA → Vulkan (external memory) hoặc `VK_KHR_external_memory` trực tiếp | Dùng được với `-hwaccel cuda` |
 | P5 (xong, chưa chạy trên phần cứng) | Frame **D3D12** tại chỗ trên `ID3D12Device` của FFmpeg; **D3D11** qua shared NT handle sang DX12 của wgpu (xem "Frame D3D12 và D3D11" bên dưới) | Dùng được với `hwupload` trên d3d12va/d3d11va; frame decoder tốn một lần copy GPU |
-| P6 | VAAPI/DRM-PRIME (Linux), VideoToolbox (`CVPixelBuffer` → `MTLTexture`) | Phủ hết hwaccel phổ biến |
+| P6 (xong VideoToolbox, chưa chạy trên máy Mac) | VideoToolbox (`CVPixelBuffer` → IOSurface → `MTLTexture`, xem "Frame VideoToolbox" bên dưới); VAAPI/DRM-PRIME (Linux) | Phủ hết hwaccel phổ biến |
 
 Ở mọi giai đoạn, **định dạng gói và shader không đổi**: tác giả không cần biết frame đến từ
 CPU hay CUDA.
@@ -505,6 +505,38 @@ ffmpeg -init_hw_device d3d11va=dx -filter_hw_device dx -i a.mp4 \
 - Instance DX12 dùng chung bỏ `VALIDATION`, `GPU_BASED_VALIDATION` và `DEBUG` lấy từ biến môi trường: device
   cũng là của FFmpeg.
 
+### Frame VideoToolbox (C API v9; macOS, đã biên dịch nhưng chưa chạy trên máy Mac)
+
+```sh
+ffmpeg -init_hw_device videotoolbox=vt -filter_hw_device vt -i a.mp4 \
+  -vf "format=nv12,hwupload,gpufx=effect=vignette.zip,hwdownload,format=nv12" out.mp4
+```
+
+- Pad nhận thêm `AV_PIX_FMT_VIDEOTOOLBOX` (khi libavfilter build có videotoolbox và libgpufx là bản macOS).
+  sw_format: `nv12` (`420v`/`420f`) và `p010le` (`x420`/`xf20`); pixel format của từng `CVPixelBuffer` được kiểm
+  khớp với frames context. Format khác (BGRA...) bị từ chối lúc configure, và input CPU không phải 4:2:0 thì
+  không upload được (backlog).
+- **Device.** Frame là `IOSurface`, device Metal nào cũng mở được: libgpufx chạy trên adapter Metal của wgpu
+  (ưu tiên hiệu năng cao), một context cho cả process; device VideoToolbox của FFmpeg chỉ được giữ ref.
+- **Tại chỗ.** `CVPixelBufferGetIOSurface`, rồi mỗi plane một texture Metal bằng
+  `newTextureWithDescriptor:iosurface:plane:` (R8 + RG8 hoặc R16 + RG16, usage shader read/write, storage
+  shared; chỉ nhận GPU unified memory vì texture managed cần một blit đồng bộ mà wgpu không ghi), bọc bằng `wgpu_hal::metal::Device::texture_from_raw`
+  và `create_texture_from_hal`. Texture giữ ref tới surface, nên wrapper được cache theo pad bằng `IOSurfaceID`
+  (16 frame × 4) như image Vulkan, bỏ wrapper thì nhả surface. Plane IOSurface lớn hơn frame thì dùng phần góc
+  trên trái.
+- **Không có fence.** Frame VideoToolbox của FFmpeg không có đối tượng đồng bộ GPU (upload/download khoá nó
+  trên CPU), nên mỗi lần gọi chờ (`device.poll`) tới khi submit xong mới trả về.
+- **Ghi p010le** cần storage texture R16/RG16 (`TEXTURE_FORMAT_16BIT_NORM` và format feature của adapter): GPU
+  Apple có; GPU không có thì output p010le báo lỗi kèm tên format (chưa có đường dự phòng: backlog).
+- Rust: `GpuContext::from_videotoolbox`, `EffectGraph::process_videotoolbox`
+  (`gpufx_core::videotoolbox`, `cfg(target_vendor = "apple")`, dựng trên `encode_gpu`). C API (v9, chỉ thêm):
+  `gpufx_videotoolbox_supported`, `gpufx_effect_use_videotoolbox`, `GpufxVtFrame`,
+  `gpufx_effect_process_videotoolbox`; hệ điều hành khác thì báo lỗi.
+- Test: `test-bundle.sh` chỉ trên macOS chạy vignette nv12/p010le so với lượt Vulkan hoặc frame CPU, hai filter
+  liền nhau, graph có một frame split, input CPU đến muộn và việc từ chối BGRA. Job CI `ffmpeg-macos` build FFmpeg
+  từ submodule có VideoToolbox và chạy với `REQUIRE_VT=1`: bị bỏ qua là hỏng, trừ khi FFmpeg không tạo được
+  device hoặc không có adapter Metal.
+
 ### Ngân sách VRAM (quy tắc cho mọi giai đoạn)
 
 VRAM có hạn, nên bộ nhớ GPU giữ ở mức thấp nhất và không nhân bản:
@@ -631,8 +663,8 @@ nguyên), chạy `integrate.sh`, rồi configure FFmpeg với:
 - `libgpufx` được link động: Linux dùng `rpath=$ORIGIN` để tìm `libgpufx.so` cạnh `ffmpeg`,
   Windows đặt `gpufx.dll` cạnh `ffmpeg.exe`. DLL chỉ phụ thuộc DLL hệ thống
   (đã kiểm tra bằng `objdump`).
-- win64 cross-compile bằng mingw-w64 như BtbN/FFmpeg-Builds. macOS chưa có (cần build
-  native trên máy Mac).
+- win64 cross-compile bằng mingw-w64 như BtbN/FFmpeg-Builds. Chưa có bản build macOS; job CI `ffmpeg-macos` build FFmpeg từ
+  mã nguồn trên runner macOS chỉ để kiểm đường VideoToolbox.
 
 ## 10. Lộ trình
 

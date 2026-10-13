@@ -153,15 +153,15 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   effect has it. Spaces around `|` are ignored.
 - **graph**: a whole effect graph with several inputs and outputs, in place of `effect`; see
   "GPU graph inside one filter" in section 6.
-- **GPU frames out only**, like the `*_cuda` filters: every output is a Vulkan, D3D12 or D3D11 frame, so
+- **GPU frames out only**, like the `*_cuda` filters: every output is a Vulkan, D3D12, D3D11 or VideoToolbox frame, so
   `hwdownload,format=<fmt>` or `gpufx_download,format=<fmt>` must come before CPU filters and encoders. Inputs
   may be GPU frames of that API or software frames, which the filter uploads itself (`av_hwframe_transfer_data`
   into its own frames context per input): as they are when the device takes the format, else as nv12/p010le
   (4:2:0 YUV) or RGBA converted by swscale; frames whose matrix the GPU does not convert go up as RGBA. The
   device is the one of the GPU inputs (checked against `-filter_hw_device` when both are set), else
   `-filter_hw_device` (`AVFILTER_FLAG_HWDEVICE`), and its type picks the API; with software inputs only and
-  no device the filter fails and names the options to add. `backend=gl|metal` is refused (the library and the
-  CLI keep them). Adding an API (VideoToolbox on macOS, missing for now) is one entry in `hw_apis[]` plus
+  no device the filter fails and names the options to add. `backend=gl` is refused, `backend=metal` too except on macOS (the library and the
+  CLI keep them). Adding an API is one entry in `hw_apis[]` plus
   its cases in the per-API switches of `vf_gpufx.c`.
 - **out_format**: forces the pixel format of every output (on Vulkan/D3D frames: the sw_format of the
   output frames context). It must be in the effect's output formats and converted on the GPU by libgpufx
@@ -169,7 +169,7 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   filter fails at configuration. Default: the source input's format (for a software input, the format it
   is uploaded in) when the effect may output it, else its first output format the GPU writes (see "Vulkan frames"). Use: `out_format=rgba` between separate `gpufx` filters, so the middle
   ones skip the YUV ↔ RGBA conversions (the last one goes back with `out_format=nv12`).
-  Limits: one format for every output of the filter; on D3D frames only nv12, p010le, rgba and rgba64le.
+  Limits: one format for every output of the filter; on D3D frames only nv12, p010le, rgba and rgba64le; on VideoToolbox frames nv12 and p010le.
 - **params**: `name=value` separated by `|`. A value is a literal (`0.5`, `1,0,0`, `#ff8800`)
   or an **FFmpeg expression** in `t`, `n`, `w`, `h`, `a` (`w/h`), `sar`, `dar` (`a*sar`),
   re-evaluated for every frame. This is how you do keyframes/transitions without external tools.
@@ -258,7 +258,7 @@ The main costs are upload/readback and color conversion on the CPU. The roadmap 
 | P3 (done) | **Zero-copy** with `AV_PIX_FMT_VULKAN`: the wgpu device is made from `AVVulkanDeviceContext` (`wgpu-hal` `device_from_raw`) and the `VkImage`s of `AVVkFrame` are read and written in place (see "Vulkan frames" below) | No trip through RAM when decoding/encoding with Vulkan |
 | P4 | **CUDA** interop (NVDEC/NVENC): `hwmap` CUDA → Vulkan (external memory) or `VK_KHR_external_memory` directly | Works with `-hwaccel cuda` |
 | P5 (done, untested on hardware) | **D3D12** frames in place on FFmpeg's `ID3D12Device`; **D3D11** through shared NT handles into wgpu's DX12 (see "D3D12 and D3D11 frames" below) | Works with `hwupload` on d3d12va/d3d11va; decoder frames with one GPU copy |
-| P6 | VAAPI/DRM-PRIME (Linux), VideoToolbox (`CVPixelBuffer` → `MTLTexture`) | Covers all the common hwaccels |
+| P6 (VideoToolbox done, untested on a Mac) | VideoToolbox (`CVPixelBuffer` → IOSurface → `MTLTexture`, see "VideoToolbox frames" below); VAAPI/DRM-PRIME (Linux) | Covers all the common hwaccels |
 
 In every phase, **the package format and shaders do not change**: authors never need to know whether a frame comes from
 the CPU or from CUDA.
@@ -519,6 +519,39 @@ ffmpeg -init_hw_device d3d11va=dx -filter_hw_device dx -i a.mp4 \
 - The shared DX12 instance ignores `VALIDATION`, `GPU_BASED_VALIDATION` and `DEBUG` from the environment: the
   device is FFmpeg's too.
 
+### VideoToolbox frames (C API v9; macOS, compiled but not yet run on a Mac)
+
+```sh
+ffmpeg -init_hw_device videotoolbox=vt -filter_hw_device vt -i a.mp4 \
+  -vf "format=nv12,hwupload,gpufx=effect=vignette.zip,hwdownload,format=nv12" out.mp4
+```
+
+- Pads also take `AV_PIX_FMT_VIDEOTOOLBOX` (when libavfilter is built with videotoolbox and libgpufx is a
+  macOS build). sw_formats: `nv12` (`420v`/`420f`) and `p010le` (`x420`/`xf20`); the pixel format of each
+  `CVPixelBuffer` is checked against the frames context's. Others (BGRA...) are refused at configuration, and
+  software inputs that are not 4:2:0 cannot be uploaded (backlog).
+- **Device.** The frames are `IOSurface`s, which any Metal device opens: libgpufx runs on wgpu's Metal adapter
+  (high performance first), one context per process, and FFmpeg's VideoToolbox device is only held.
+- **In place.** `CVPixelBufferGetIOSurface`, then one Metal texture per plane with
+  `newTextureWithDescriptor:iosurface:plane:` (R8 + RG8 or R16 + RG16, usage shader read/write, shared storage;
+  only unified-memory GPUs are taken, since managed textures would need a sync blit wgpu does not record), wrapped with `wgpu_hal::metal::Device::texture_from_raw` and
+  `create_texture_from_hal`. The texture retains the surface, so wrappers are cached per pad by `IOSurfaceID`
+  (16 frames × 4) like the Vulkan images, and dropping one releases the surface. An IOSurface plane larger
+  than the frame is used from its top left corner.
+- **No fence.** FFmpeg's VideoToolbox frames have no GPU sync object (uploads and downloads lock them on the
+  CPU), so a call waits (`device.poll`) until its submission is done before returning.
+- **Writing p010le** needs R16/RG16 storage textures (`TEXTURE_FORMAT_16BIT_NORM` and the adapter's format
+  features): Apple GPUs have them; on a GPU without them a p010le output fails with a message naming the
+  formats (no fallback yet: backlog).
+- Rust: `GpuContext::from_videotoolbox`, `EffectGraph::process_videotoolbox`
+  (`gpufx_core::videotoolbox`, `cfg(target_vendor = "apple")`, built on `encode_gpu`). C API (v9, additive):
+  `gpufx_videotoolbox_supported`, `gpufx_effect_use_videotoolbox`, `GpufxVtFrame`,
+  `gpufx_effect_process_videotoolbox`; on other systems they fail with a message.
+- Tests: `test-bundle.sh` runs, on macOS only, nv12/p010le vignette against the Vulkan run or the software
+  frames, two filters in a row, a split-frame graph, a late software input and a BGRA rejection. The CI job
+  `ffmpeg-macos` builds FFmpeg from the submodule with VideoToolbox and runs it with `REQUIRE_VT=1`: a skip
+  fails unless FFmpeg cannot create the device or there is no Metal adapter.
+
 ### VRAM budget (rule for every phase)
 
 VRAM is limited, so GPU memory is kept as low as possible and nothing is duplicated:
@@ -646,8 +679,8 @@ untouched), runs `integrate.sh`, then configures FFmpeg with:
 - `libgpufx` is linked dynamically: on Linux `rpath=$ORIGIN` finds `libgpufx.so` next to `ffmpeg`,
   and on Windows `gpufx.dll` sits next to `ffmpeg.exe`. The DLL depends only on system DLLs
   (checked with `objdump`).
-- win64 is cross-compiled with mingw-w64 like BtbN/FFmpeg-Builds. macOS is not available yet (it needs a
-  native build on a Mac).
+- win64 is cross-compiled with mingw-w64 like BtbN/FFmpeg-Builds. There is no macOS bundle; the CI job `ffmpeg-macos` builds FFmpeg from source on
+  a macOS runner only to test the VideoToolbox path.
 
 ## 10. Roadmap
 

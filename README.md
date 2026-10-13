@@ -59,7 +59,7 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   -vf "format=nv12,gpufx_upload,gpufx=effect=vignette.zip:out_format=rgba,gpufx=effect=sepia.zip:out_format=nv12,gpufx_download,format=nv12" out.mp4
 ```
 
-Like FFmpeg's `*_cuda` filters, `gpufx` outputs **GPU frames only** (Vulkan, D3D12 or D3D11). Inputs may be GPU
+Like FFmpeg's `*_cuda` filters, `gpufx` outputs **GPU frames only** (Vulkan, D3D12, D3D11, or VideoToolbox on macOS). Inputs may be GPU
 frames (`hwupload`, `gpufx_upload`, another `gpufx`) or software frames, which `gpufx` uploads itself on the device
 of its GPU inputs or, when none is on the GPU, on `-filter_hw_device`; without a device it stops and says which
 options to add. Put `hwdownload,format=<fmt>` or `gpufx_download,format=<fmt>` before CPU filters and encoders
@@ -70,8 +70,10 @@ filters therefore uploads each frame once and reads it back once. Fastest first:
 2. separate filters between `gpufx_upload` and `gpufx_download`, `out_format=rgba` on all but the last;
 3. separate filters behind one upload (by the first `gpufx` or `hwupload`), then `hwdownload`.
 
-`backend=gl` and `backend=metal` are refused by the filter (the library and the `gpufx` CLI still take them).
-On macOS the filter cannot run yet: it has no VideoToolbox frames.
+`backend=gl` is refused by the filter, and `backend=metal` too except on macOS (the library and the `gpufx` CLI
+still take them). On macOS the filter works on VideoToolbox frames (nv12, p010le) through Metal, e.g.
+`-init_hw_device videotoolbox=vt -filter_hw_device vt -vf "gpufx=effect=vignette.zip,hwdownload,format=nv12"`;
+this path has not run on a Mac yet (see below).
 
 Docs: [design](docs/DESIGN.md) · [package format and how to write shaders](docs/EFFECT_FORMAT.md) · [benchmark](docs/BENCHMARK.md)
 
@@ -104,8 +106,10 @@ skipped checks: add `-- --nocapture` to see them.
 
 ### What has not been tested
 
-- **macOS**: no Mac device; only `cargo test` on the CI macOS runner (Metal). There is no FFmpeg bundle for
-  macOS, so the `gpufx` filter has never run there.
+- **macOS**: no Mac device; only `cargo test` on the CI macOS runner (Metal). The VideoToolbox frame path of the
+  filter is only compiled (cross-checked from Windows); the CI job `ffmpeg-macos` builds FFmpeg with it and runs
+  `test-bundle.sh`, but it has not run yet, and a hosted runner may have no usable Metal adapter (then the
+  tests are skipped with a warning). There is no macOS bundle to download.
 - **Linux on a real GPU**: Linux only runs on lavapipe (software Vulkan), in CI and in a VM. Vulkan frames
   shared with FFmpeg have been run on real GPUs only on Windows.
 - **D3D12/D3D11 frames in FFmpeg**: only on WARP (CI); not yet on GPU hardware.

@@ -56,7 +56,7 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   -vf "format=nv12,gpufx_upload,gpufx=effect=vignette.zip:out_format=rgba,gpufx=effect=sepia.zip:out_format=nv12,gpufx_download,format=nv12" out.mp4
 ```
 
-Giống các filter `*_cuda` của FFmpeg, `gpufx` **chỉ trả ra frame GPU** (Vulkan, D3D12 hoặc D3D11). Input có thể là
+Giống các filter `*_cuda` của FFmpeg, `gpufx` **chỉ trả ra frame GPU** (Vulkan, D3D12, D3D11, hoặc VideoToolbox trên macOS). Input có thể là
 frame GPU (`hwupload`, `gpufx_upload`, một `gpufx` khác) hoặc frame CPU; frame CPU được `gpufx` tự upload lên device
 của các input GPU, hoặc lên `-filter_hw_device` khi không input nào nằm trên GPU; không có device thì filter dừng và
 báo cần thêm option nào. Trước filter CPU và encoder phải có `hwdownload,format=<fmt>` hoặc
@@ -67,8 +67,10 @@ ra format đó). Vì vậy một chuỗi `gpufx` chỉ upload mỗi frame một 
 2. các filter riêng kẹp giữa `gpufx_upload` và `gpufx_download`, `out_format=rgba` trên mọi filter trừ cái cuối;
 3. các filter riêng sau một lần upload (do `gpufx` đầu tiên hoặc `hwupload`), rồi `hwdownload`.
 
-Filter từ chối `backend=gl` và `backend=metal` (thư viện và CLI `gpufx` vẫn nhận). Trên macOS filter chưa chạy được:
-nó chưa có frame VideoToolbox.
+Filter từ chối `backend=gl`, và cả `backend=metal` trừ trên macOS (thư viện và CLI `gpufx` vẫn nhận). Trên macOS
+filter chạy trên frame VideoToolbox (nv12, p010le) qua Metal, ví dụ
+`-init_hw_device videotoolbox=vt -filter_hw_device vt -vf "gpufx=effect=vignette.zip,hwdownload,format=nv12"`;
+đường này chưa chạy trên máy Mac nào (xem bên dưới).
 
 Tài liệu: [thiết kế](docs/DESIGN-vi.md) · [định dạng gói và cách viết shader](docs/EFFECT_FORMAT-vi.md) · [đo tốc độ](docs/BENCHMARK-vi.md) · [English](README.md)
 
@@ -101,8 +103,10 @@ phần chưa kiểm: thêm `-- --nocapture` để thấy các dòng đó.
 
 ### Những gì chưa được kiểm
 
-- **macOS**: không có máy Mac; chỉ chạy `cargo test` trên runner macOS của CI (Metal). Chưa có bản FFmpeg
-  build cho macOS nên filter `gpufx` chưa từng chạy ở đó.
+- **macOS**: không có máy Mac; chỉ chạy `cargo test` trên runner macOS của CI (Metal). Đường frame VideoToolbox của
+  filter mới chỉ được biên dịch (kiểm chéo từ Windows); job CI `ffmpeg-macos` build FFmpeg kèm nó và chạy
+  `test-bundle.sh` nhưng chưa chạy lần nào, và runner hosted có thể không có adapter Metal dùng được (khi đó
+  test bị bỏ qua kèm cảnh báo). Chưa có bản build macOS để tải.
 - **Linux trên GPU thật**: Linux mới chạy trên lavapipe (Vulkan phần mềm), trong CI và máy ảo. Frame Vulkan
   dùng chung với FFmpeg mới chạy trên GPU thật ở Windows.
 - **Frame D3D12/D3D11 trong FFmpeg**: mới chạy trên WARP (CI), chưa chạy trên GPU thật.
