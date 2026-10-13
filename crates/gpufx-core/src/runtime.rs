@@ -56,7 +56,7 @@ pub(crate) const GPU_FEATURES: wgpu::Features = wgpu::Features::PIPELINE_CACHE
     .union(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES);
 
 /// The high-performance adapter of `backend`, else its software fallback.
-fn request_adapter(backend: Backend) -> Result<wgpu::Adapter, Error> {
+pub(crate) fn request_adapter(backend: Backend) -> Result<wgpu::Adapter, Error> {
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: backend.wgpu(),
         // Honours WGPU_DX12_COMPILER (fxc, dxc) and the other backend variables.
@@ -130,6 +130,9 @@ pub struct GpuContext {
     /// failed (the device is then no longer used for Vulkan frames).
     #[cfg_attr(not(any(windows, all(unix, not(target_vendor = "apple")))), allow(dead_code))]
     pub(crate) vulkan_submit: std::sync::Mutex<bool>,
+    /// What a context for VideoToolbox frames knows of its Metal device (see `videotoolbox.rs`).
+    #[cfg(target_vendor = "apple")]
+    pub(crate) videotoolbox: Option<crate::videotoolbox::Shared>,
 }
 
 impl GpuContext {
@@ -212,6 +215,8 @@ impl GpuContext {
             shader_cache,
             vulkan_queue_family: None,
             vulkan_submit: std::sync::Mutex::new(false),
+            #[cfg(target_vendor = "apple")]
+            videotoolbox: None,
             #[cfg(windows)]
             d3d12: None,
         })

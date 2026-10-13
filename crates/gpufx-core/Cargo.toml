@@ -38,3 +38,18 @@ windows = { version = "0.62", features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_System_LibraryLoader",
 ] }
+
+# VideoToolbox frames (src/videotoolbox.rs): the objc2 crates wgpu-hal's Metal backend uses.
+# CoreVideo is linked directly (three functions).
+[target.'cfg(target_vendor = "apple")'.dependencies]
+objc2 = "0.6"
+objc2-io-surface = { version = "0.3.2", default-features = false, features = ["std", "IOSurfaceRef", "IOSurfaceTypes"] }
+objc2-metal = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "objc2-io-surface",
+    "MTLAllocation",
+    "MTLDevice",
+    "MTLPixelFormat",
+    "MTLResource",
+    "MTLTexture",
+] }

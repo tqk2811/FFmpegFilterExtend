@@ -338,6 +338,9 @@ dependencies = [
  "image",
  "libloading",
  "naga",
+ "objc2",
+ "objc2-io-surface",
+ "objc2-metal",
  "pollster",
  "serde",
  "serde_json",
@@ -691,6 +694,7 @@ dependencies = [
  "block2",
  "objc2",
  "objc2-foundation",
+ "objc2-io-surface",
 ]
 
 [[package]]

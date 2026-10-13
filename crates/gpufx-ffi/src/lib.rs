@@ -21,7 +21,7 @@ use gpufx_core::{
 };
 
 /// Bumped when the C ABI changes incompatibly. Must match `GPUFX_API_VERSION` in gpufx.h.
-const API_VERSION: u32 = 8;
+const API_VERSION: u32 = 9;
 
 thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
@@ -1173,6 +1173,127 @@ pub unsafe extern "C" fn gpufx_effect_process_d3d11(
         let fx = fx.as_mut().ok_or("effect is NULL")?;
         on_host_device(fx, "gpufx_effect_use_d3d11")?;
         dx::process_d3d11(fx, inputs, nb_inputs, outs, nb_outputs, info.as_ref().map(frame_info))?;
+        Ok(0)
+    })
+}
+
+// ---- VideoToolbox frames (since version 9, macOS) ----
+
+#[repr(C)]
+pub struct GpufxVtFrame {
+    pub format: *const c_char,
+    pub width: u32,
+    pub height: u32,
+    pub pixel_buffer: *mut c_void,
+    pub color: GpufxColor,
+}
+
+#[cfg(target_vendor = "apple")]
+mod vt {
+    use super::*;
+    use gpufx_core::videotoolbox::VtFrame;
+
+    /// The context for VideoToolbox frames, while an effect uses it.
+    fn context() -> Result<Arc<GpuContext>, String> {
+        static CACHE: Mutex<Weak<GpuContext>> = Mutex::new(Weak::new());
+        let mut cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(ctx) = cache.upgrade() {
+            return Ok(ctx);
+        }
+        let ctx = GpuContext::from_videotoolbox().map_err(|e| e.to_string())?;
+        *cache = Arc::downgrade(&ctx);
+        Ok(ctx)
+    }
+
+    pub fn use_videotoolbox(fx: &mut GpufxEffect) -> Result<(), String> {
+        let ctx = context()?;
+        let device = format!("{} (VideoToolbox frames)", ctx.description());
+        move_to(fx, &ctx, device)
+    }
+
+    unsafe fn frames(p: *const GpufxVtFrame, n: u32, what: &str) -> Result<Vec<VtFrame>, String> {
+        if p.is_null() || n == 0 {
+            return Err(format!("{what} must not be NULL"));
+        }
+        std::slice::from_raw_parts(p, n as usize)
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let what = format!("{what} {i}");
+                if f.width == 0 || f.height == 0 || f.width > 1 << 16 || f.height > 1 << 16 {
+                    return Err(format!("{what}: bad size {}x{}", f.width, f.height));
+                }
+                Ok(VtFrame {
+                    format: pixel_format(f.format, &what)?,
+                    width: f.width,
+                    height: f.height,
+                    pixel_buffer: f.pixel_buffer,
+                    color: color_info(&f.color)?,
+                })
+            })
+            .collect()
+    }
+
+    pub unsafe fn process(
+        fx: &mut GpufxEffect,
+        inputs: *const GpufxVtFrame,
+        nb_inputs: u32,
+        outs: *const GpufxVtFrame,
+        nb_outputs: u32,
+        info: Option<FrameInfo>,
+    ) -> Result<(), String> {
+        let ins = frames(inputs, nb_inputs, "inputs")?;
+        let os = frames(outs, nb_outputs, "outs")?;
+        fx.graph.process_videotoolbox(&ins, &os, info.as_ref()).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(not(target_vendor = "apple"))]
+mod vt {
+    use super::*;
+    const MSG: &str = "VideoToolbox frames are only supported on macOS";
+    pub fn use_videotoolbox(_: &mut GpufxEffect) -> Result<(), String> {
+        Err(MSG.into())
+    }
+    pub unsafe fn process(
+        _: &mut GpufxEffect,
+        _: *const GpufxVtFrame,
+        _: u32,
+        _: *const GpufxVtFrame,
+        _: u32,
+        _: Option<FrameInfo>,
+    ) -> Result<(), String> {
+        Err(MSG.into())
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn gpufx_videotoolbox_supported() -> c_int {
+    cfg!(target_vendor = "apple") as c_int
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_use_videotoolbox(fx: *mut GpufxEffect) -> c_int {
+    guard(-1, || {
+        let fx = fx.as_mut().ok_or("effect is NULL")?;
+        vt::use_videotoolbox(fx)?;
+        Ok(0)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_process_videotoolbox(
+    fx: *mut GpufxEffect,
+    inputs: *const GpufxVtFrame,
+    nb_inputs: u32,
+    outs: *const GpufxVtFrame,
+    nb_outputs: u32,
+    info: *const GpufxFrameInfo,
+) -> c_int {
+    guard(-1, || {
+        let fx = fx.as_mut().ok_or("effect is NULL")?;
+        on_host_device(fx, "gpufx_effect_use_videotoolbox")?;
+        vt::process(fx, inputs, nb_inputs, outs, nb_outputs, info.as_ref().map(frame_info))?;
         Ok(0)
     })
 }

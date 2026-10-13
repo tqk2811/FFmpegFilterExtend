@@ -20,6 +20,8 @@ mod profile;
 pub mod runtime;
 mod shader_cache;
 mod texture;
+#[cfg(target_vendor = "apple")]
+pub mod videotoolbox;
 #[cfg(any(windows, all(unix, not(target_vendor = "apple"))))]
 pub mod vulkan;
 

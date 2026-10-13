@@ -892,6 +892,9 @@ pub struct EffectGraph {
     /// Wrappers of the images of recent Vulkan frames (see `vulkan.rs`).
     #[cfg(any(windows, all(unix, not(target_vendor = "apple"))))]
     pub(crate) vk: crate::vulkan::ImportCache,
+    /// Wrappers of the IOSurface planes of recent VideoToolbox frames (see `videotoolbox.rs`).
+    #[cfg(target_vendor = "apple")]
+    pub(crate) vt: crate::videotoolbox::ImportCache,
 }
 
 impl EffectGraph {
@@ -1156,6 +1159,8 @@ impl EffectGraph {
             dx: Default::default(),
             #[cfg(any(windows, all(unix, not(target_vendor = "apple"))))]
             vk: Default::default(),
+            #[cfg(target_vendor = "apple")]
+            vt: Default::default(),
         })
     }
 

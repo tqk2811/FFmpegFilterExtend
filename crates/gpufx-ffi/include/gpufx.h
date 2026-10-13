@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define GPUFX_API_VERSION 8
+#define GPUFX_API_VERSION 9
 
 typedef struct GpufxEffect GpufxEffect;
 
@@ -184,7 +184,7 @@ void gpufx_effect_free(GpufxEffect *fx);
 const char *gpufx_effect_name(const GpufxEffect *fx);
 /*
  * Adapter and API in use, e.g. "NVIDIA GeForce RTX 4070 (Vulkan)". An effect is opened
- * without a device: it gets one from gpufx_effect_use_vulkan/d3d12/d3d11(), or else the
+ * without a device: it gets one from gpufx_effect_use_vulkan/d3d12/d3d11/videotoolbox(), or else the
  * backend's own from gpufx_effect_use_default_device() or its first frame (the string
  * says so until then).
  */
@@ -455,6 +455,42 @@ typedef struct GpufxD3D11Frame {
 int gpufx_effect_process_d3d11(GpufxEffect *fx, const GpufxD3D11Frame *inputs, uint32_t nb_inputs,
                                const GpufxD3D11Frame *outs, uint32_t nb_outputs,
                                const GpufxFrameInfo *info);
+
+/*
+ * Since version 9: VideoToolbox frames (macOS; elsewhere the functions fail). A frame is
+ * FFmpeg's AV_PIX_FMT_VIDEOTOOLBOX frame: a CVPixelBufferRef (AVFrame.data[3]) backed by
+ * an IOSurface, in nv12 (420v/420f) or p010le (x420/xf20). The effect runs on the system's
+ * Metal device and reads and writes the IOSurface planes in place (R8 + RG8, R16 + RG16
+ * textures). Writing p010le needs R16/RG16 storage textures, which some GPUs lack: the
+ * call then fails with a message saying so.
+ */
+
+/* 1 when this library takes VideoToolbox frames (macOS), else 0. */
+int gpufx_videotoolbox_supported(void);
+
+/*
+ * Moves an open effect (and its parameter values) to the Metal device used for
+ * VideoToolbox frames, as gpufx_effect_use_vulkan() does.
+ */
+int gpufx_effect_use_videotoolbox(GpufxEffect *fx);
+
+typedef struct GpufxVtFrame {
+    const char *format;  /* nv12 or p010le (FFmpeg's sw_format name), as the buffer's */
+    uint32_t width;
+    uint32_t height;
+    void *pixel_buffer;  /* CVPixelBufferRef (AVFrame.data[3]) */
+    GpufxColor color;
+} GpufxVtFrame;
+
+/*
+ * gpufx_effect_process_graph() on VideoToolbox frames. There is no fence: the call
+ * returns once the GPU work is done, so the buffers can be read (hwdownload) or encoded
+ * right away. The caller keeps other users off the buffers during the call. With info
+ * NULL the effects are bypassed.
+ */
+int gpufx_effect_process_videotoolbox(GpufxEffect *fx, const GpufxVtFrame *inputs, uint32_t nb_inputs,
+                                      const GpufxVtFrame *outs, uint32_t nb_outputs,
+                                      const GpufxFrameInfo *info);
 
 #ifdef __cplusplus
 }
