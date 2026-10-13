@@ -411,12 +411,13 @@ fn globals_hold_precise_time_and_pixel_aspect() {
         [out[0], out[1], out[2]]
     };
     assert_eq!(pixel(3.25, 1.0), [131, 64, 64]);
-    assert_eq!(pixel(-0.75, 2.0), [127, 64, 128]);
+    // pixel_aspect / 4 stays off .5 * 255: GPUs may round 127.5 either way.
+    assert_eq!(pixel(-0.75, 3.0), [127, 64, 191]);
     // Just below an integer the fraction rounds to 1.0 in f32: it carries over.
     assert_eq!(pixel(4.0 - 1e-9, 1.0), [132, 0, 64]);
     // A day into the clip the fraction is still exact.
-    let day = pixel(86400.5, 1.0);
-    assert_eq!(day[1], 128);
+    let day = pixel(86400.25, 1.0);
+    assert_eq!(day[1], 64);
     // Unknown aspect ratios count as square pixels.
     assert_eq!(pixel(0.0, 0.0)[2], 64);
 }

@@ -69,15 +69,16 @@ fn expressions_are_compiled_into_wgsl_and_glsl() {
         let down = red(&mut chain);
         assert!(down.windows(2).all(|w| w[0] > w[1]), "glsl {glsl}: 1 - x: {down:?}");
         // Plain parameters still reach the expression as variables.
-        chain.set_param_str("level", "gain * 0.5").unwrap();
+        // 0.25, not 0.5: 0.5 * 255 = 127.5 rounds either way depending on the GPU.
+        chain.set_param_str("level", "gain * 0.25").unwrap();
         chain.set_param_str("gain", "0").unwrap();
         assert!(red(&mut chain).iter().all(|&r| r == 0), "glsl {glsl}: gain 0");
         chain.set_param_str("gain", "1").unwrap();
-        assert!(red(&mut chain).iter().all(|&r| r == 128), "glsl {glsl}: gain 1");
+        assert!(red(&mut chain).iter().all(|&r| r == 64), "glsl {glsl}: gain 1");
         // Numbers cannot set an expression; a bad text keeps the last good one.
         assert!(chain.set_param("level", &[0.5]).is_err());
         assert!(chain.set_param_str("level", "x +").is_err());
-        assert!(red(&mut chain).iter().all(|&r| r == 128), "glsl {glsl}: last good expression");
+        assert!(red(&mut chain).iter().all(|&r| r == 64), "glsl {glsl}: last good expression");
         // A long flat chain compiles; NaN comes out as 0.
         chain.set_param_str("level", &vec!["x"; 250].join("+")).unwrap();
         assert!(red(&mut chain).iter().skip(1).all(|&r| r == 255), "glsl {glsl}: long chain");
