@@ -1,16 +1,16 @@
 //! Package textures (texture arrays, atlas grids, mipmaps, premultiplied alpha), their
 //! size limits, and mip chains of effect inputs. GPU tests are skipped without a device.
 
+mod common;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use gpufx_core::{
-    Backend, ColorInfo, Effect, EffectChain, Error, Frame, FrameInfo, FrameMut, GpuContext, Image, ImageMut, Package, PixelFormat,
-};
+use gpufx_core::{ColorInfo, Effect, EffectChain, Error, Frame, FrameInfo, FrameMut, GpuContext, Image, ImageMut, Package, PixelFormat};
 
 fn gpu() -> Option<Arc<GpuContext>> {
     static CTX: std::sync::OnceLock<Option<Arc<GpuContext>>> = std::sync::OnceLock::new();
-    CTX.get_or_init(|| match GpuContext::new(Backend::Auto) {
+    CTX.get_or_init(|| match GpuContext::new(common::backend()) {
         Ok(ctx) => Some(ctx),
         Err(e) => {
             eprintln!("skipping: {e}");

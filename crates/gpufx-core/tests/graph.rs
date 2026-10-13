@@ -1,10 +1,12 @@
 //! Effect graphs (`[0]split[a][b]; ...`) against the same effects run one by one.
 //! Tests that need a device are skipped when none can be created.
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpufx_core::{Backend, Effect, EffectChain, EffectGraph, Error, FrameInfo, GpuContext, Image, ImageMut, Package, Source, StreamInfo};
+use gpufx_core::{Effect, EffectChain, EffectGraph, Error, FrameInfo, GpuContext, Image, ImageMut, Package, Source, StreamInfo};
 
 fn examples() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects")
@@ -13,7 +15,7 @@ fn examples() -> PathBuf {
 /// One device for every test, as in effects.rs.
 fn gpu() -> Option<Arc<GpuContext>> {
     static CTX: std::sync::OnceLock<Option<Arc<GpuContext>>> = std::sync::OnceLock::new();
-    CTX.get_or_init(|| match GpuContext::new(Backend::Auto) {
+    CTX.get_or_init(|| match GpuContext::new(common::backend()) {
         Ok(ctx) => Some(ctx),
         Err(e) => {
             eprintln!("skipping: {e}");
@@ -28,7 +30,7 @@ fn gpu() -> Option<Arc<GpuContext>> {
 /// wants it back makes that graph rebind.
 fn own_gpu() -> Option<Arc<GpuContext>> {
     gpu()?;
-    GpuContext::new(Backend::Auto).ok()
+    GpuContext::new(common::backend()).ok()
 }
 
 fn effect(ctx: &Arc<GpuContext>, name: &str) -> Effect {

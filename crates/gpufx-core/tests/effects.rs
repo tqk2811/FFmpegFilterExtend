@@ -1,9 +1,11 @@
 //! Runs the example packages on whatever GPU is available (lavapipe/llvmpipe work).
 //! Tests that need a device are skipped when none can be created.
 
+mod common;
+
 use std::path::PathBuf;
 
-use gpufx_core::{Backend, Effect, EffectChain, Error, FrameInfo, GpuContext, Image, ImageMut, Package, StreamInfo};
+use gpufx_core::{Effect, EffectChain, Error, FrameInfo, GpuContext, Image, ImageMut, Package, StreamInfo};
 
 fn examples() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects")
@@ -14,7 +16,7 @@ fn examples() -> PathBuf {
 /// access violations of the test process on the Windows runner.
 fn gpu() -> Option<std::sync::Arc<GpuContext>> {
     static CTX: std::sync::OnceLock<Option<std::sync::Arc<GpuContext>>> = std::sync::OnceLock::new();
-    CTX.get_or_init(|| match GpuContext::new(Backend::Auto) {
+    CTX.get_or_init(|| match GpuContext::new(common::backend()) {
         Ok(ctx) => {
             // CI logs show which adapter ran the tests (lavapipe, WARP, Metal).
             eprintln!("adapter: {}", ctx.description());

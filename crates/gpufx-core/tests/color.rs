@@ -1,15 +1,17 @@
 //! YUV <-> RGBA conversion on the GPU: round trips, colour matrices, ranges, 10-bit
 //! precision and premultiplied alpha. Skipped when no GPU device can be created.
 
+mod common;
+
 use std::path::PathBuf;
 
 use gpufx_core::{
-    Backend, ChromaLocation, ColorInfo, Effect, EffectChain, Frame, FrameInfo, FrameMut, GpuContext, Matrix, Package, PixelFormat, Range,
+    ChromaLocation, ColorInfo, Effect, EffectChain, Frame, FrameInfo, FrameMut, GpuContext, Matrix, Package, PixelFormat, Range,
 };
 
 fn gpu() -> Option<std::sync::Arc<GpuContext>> {
     static CTX: std::sync::OnceLock<Option<std::sync::Arc<GpuContext>>> = std::sync::OnceLock::new();
-    CTX.get_or_init(|| match GpuContext::new(Backend::Auto) {
+    CTX.get_or_init(|| match GpuContext::new(common::backend()) {
         Ok(ctx) => Some(ctx),
         Err(e) => {
             eprintln!("skipping: {e}");

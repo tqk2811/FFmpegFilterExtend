@@ -2,16 +2,16 @@
 //! the result must be the same bytes as for the same frames in CPU memory. Skipped when no
 //! GPU device can be created.
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpufx_core::{
-    Backend, ColorInfo, Effect, EffectGraph, Frame, FrameInfo, FrameMut, GpuContext, GpuFrame, Matrix, Package, PixelFormat, Range,
-};
+use gpufx_core::{ColorInfo, Effect, EffectGraph, Frame, FrameInfo, FrameMut, GpuContext, GpuFrame, Matrix, Package, PixelFormat, Range};
 
 fn gpu() -> Option<Arc<GpuContext>> {
     static CTX: std::sync::OnceLock<Option<Arc<GpuContext>>> = std::sync::OnceLock::new();
-    CTX.get_or_init(|| match GpuContext::new(Backend::Auto) {
+    CTX.get_or_init(|| match GpuContext::new(common::backend()) {
         Ok(ctx) => Some(ctx),
         Err(e) => {
             eprintln!("skipping: {e}");
@@ -26,7 +26,7 @@ fn gpu() -> Option<Arc<GpuContext>> {
 /// wants it back makes that graph rebind.
 fn own_gpu() -> Option<Arc<GpuContext>> {
     gpu()?;
-    GpuContext::new(Backend::Auto).ok()
+    GpuContext::new(common::backend()).ok()
 }
 
 fn examples() -> PathBuf {

@@ -1,5 +1,8 @@
 //! On-disk shader cache: files appear, are read back by a new device, and a corrupt file
-//! is tolerated. Skipped without a device, or on backends without a pipeline cache.
+//! is tolerated: pipeline caches (`.gpucache`, Vulkan) and DXIL (`.dxil`, D3D12 with
+//! `dxcompiler.dll`). Skipped without a device, or on backends with neither.
+
+mod common;
 
 use std::path::{Path, PathBuf};
 
@@ -20,14 +23,14 @@ fn cache_dir(name: &str) -> PathBuf {
 
 fn files(dir: &Path) -> Vec<PathBuf> {
     let mut v: Vec<_> = std::fs::read_dir(dir).map(|d| d.map(|e| e.unwrap().path()).collect()).unwrap_or_default();
-    v.retain(|p| p.extension().is_some_and(|x| x == "gpucache"));
+    v.retain(|p| p.extension().is_some_and(|x| x == "gpucache" || x == "dxil"));
     v.sort();
     v
 }
 
 /// Runs the example once on a new device using `dir`; `None` when there is no cache.
 fn run(dir: &Path) -> Option<(Vec<u8>, gpufx_core::ShaderCacheStats)> {
-    let ctx = match GpuContext::with_shader_cache(Backend::Auto, Some(dir)) {
+    let ctx = match GpuContext::with_shader_cache(common::backend(), Some(dir)) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("skipping: {e}");
@@ -75,7 +78,7 @@ fn unwritable_directory_only_disables_the_cache() {
     // A regular file where the directory should be.
     let dir = cache_dir("blocked");
     std::fs::write(&dir, b"x").unwrap();
-    if let Ok(ctx) = GpuContext::with_shader_cache(Backend::Auto, Some(&dir)) {
+    if let Ok(ctx) = GpuContext::with_shader_cache(common::backend(), Some(&dir)) {
         assert!(ctx.shader_cache_stats().is_none());
         Effect::new(ctx, Package::open(example()).unwrap()).unwrap();
     }
@@ -109,7 +112,7 @@ fn world_writable_directory_is_refused() {
     let dir = cache_dir("public");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
-    if let Ok(ctx) = GpuContext::with_shader_cache(Backend::Auto, Some(&dir)) {
+    if let Ok(ctx) = GpuContext::with_shader_cache(common::backend(), Some(&dir)) {
         assert!(ctx.shader_cache_stats().is_none());
     }
     let _ = std::fs::remove_dir_all(&dir);
@@ -119,7 +122,7 @@ fn world_writable_directory_is_refused() {
 fn conversion_pipelines_go_through_the_cache() {
     // A context compiles its conversion passes before any effect is opened.
     let dir = cache_dir("convert");
-    let open = || match GpuContext::with_shader_cache(Backend::Auto, Some(&dir)) {
+    let open = || match GpuContext::with_shader_cache(common::backend(), Some(&dir)) {
         Ok(ctx) => ctx.shader_cache_stats(),
         Err(e) => {
             eprintln!("skipping: {e}");

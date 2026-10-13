@@ -1,13 +1,15 @@
 //! `expr` parameters: compiled into WGSL and GLSL shaders, rebuilt when changed through
 //! a chain (the path FFmpeg takes). Skipped when no GPU device can be created.
 
+mod common;
+
 use std::sync::Arc;
 
-use gpufx_core::{Backend, Effect, EffectChain, FrameInfo, GpuContext, Image, ImageMut, Package};
+use gpufx_core::{Effect, EffectChain, FrameInfo, GpuContext, Image, ImageMut, Package};
 
 fn gpu() -> Option<Arc<GpuContext>> {
     static CTX: std::sync::OnceLock<Option<Arc<GpuContext>>> = std::sync::OnceLock::new();
-    CTX.get_or_init(|| match GpuContext::new(Backend::Auto) {
+    CTX.get_or_init(|| match GpuContext::new(common::backend()) {
         Ok(ctx) => Some(ctx),
         Err(e) => {
             eprintln!("skipping: {e}");

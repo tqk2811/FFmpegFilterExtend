@@ -38,8 +38,22 @@ jobs:
           cygpath -w "$PWD/build/dxc" >> "$GITHUB_PATH"
       - run: cargo fmt --all -- --check
       - run: cargo clippy --release --all-targets -- -D warnings
-      # GPU tests skip themselves when the runner has no usable adapter.
-      - run: cargo test --release
+      # GPU tests skip themselves when the runner has no usable adapter. Each runner pins the
+      # backend it really has (lavapipe on Linux, WARP on Windows); --nocapture shows
+      # each "skipping: ..." line, which libtest otherwise hides for a passing test.
+      - name: cargo test (Vulkan)
+        if: runner.os == 'Linux'
+        run: cargo test --release -- --nocapture
+        env:
+          GPUFX_TEST_BACKEND: vulkan
+      - name: cargo test (D3D12)
+        if: runner.os == 'Windows'
+        run: cargo test --release -- --nocapture
+        env:
+          GPUFX_TEST_BACKEND: dx12
+      - name: cargo test
+        if: runner.os == 'macOS'
+        run: cargo test --release
       - name: Check every example shader
         if: runner.os == 'Linux'
         shell: bash

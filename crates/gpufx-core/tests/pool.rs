@@ -2,10 +2,12 @@
 //! filters of one FFmpeg filter graph share one device). Tests that need a device are
 //! skipped when none can be created.
 
+mod common;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpufx_core::{Backend, Effect, EffectGraph, FrameInfo, GpuContext, Image, ImageMut, Package};
+use gpufx_core::{Effect, EffectGraph, FrameInfo, GpuContext, Image, ImageMut, Package};
 
 fn examples() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects")
@@ -13,7 +15,7 @@ fn examples() -> PathBuf {
 
 /// A device of its own, so the pool statistics see only this test's graphs.
 fn own_gpu() -> Option<Arc<GpuContext>> {
-    match GpuContext::new(Backend::Auto) {
+    match GpuContext::new(common::backend()) {
         Ok(ctx) => Some(ctx),
         Err(e) => {
             eprintln!("skipping: {e}");
