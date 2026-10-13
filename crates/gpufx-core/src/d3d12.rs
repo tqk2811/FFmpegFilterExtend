@@ -28,7 +28,7 @@ use std::ffi::c_void;
 use std::sync::{Arc, Mutex};
 
 use wgpu::hal::{self, api::Dx12, CommandEncoder as _};
-use windows::core::{IUnknown, Interface, PCWSTR};
+use windows::core::{w, IUnknown, Interface, PCWSTR};
 use windows::Win32::Foundation::{CloseHandle, GENERIC_ALL, HANDLE, LUID};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11Device5, ID3D11DeviceContext, ID3D11DeviceContext4, ID3D11Fence, ID3D11Texture2D, D3D11_BIND_SHADER_RESOURCE,
@@ -42,6 +42,7 @@ use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_FORMAT, DXGI_FORMAT_NV12, DXGI_FORMAT_P010, DXGI_FORMAT_R16G16B16A16_UNORM, DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC,
 };
 use windows::Win32::Graphics::Dxgi::{IDXGIDevice, IDXGIResource1, DXGI_SHARED_RESOURCE_READ, DXGI_SHARED_RESOURCE_WRITE};
+use windows::Win32::System::LibraryLoader::{GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_PIN};
 
 use crate::frame::{ColorInfo, GpuFrame, PixelFormat};
 use crate::graph::EffectGraph;
@@ -200,6 +201,11 @@ impl GpuContext {
             ctx11.cast().map_err(|_| gpu_err("the D3D11 device context has no fences (ID3D11DeviceContext4, D3D11.4)"))?;
         let luid = dev11.cast::<IDXGIDevice>().and_then(|d| d.GetAdapter()).and_then(|a| a.GetDesc()).map_err(gpu_err)?.AdapterLuid;
         let mut ctx = open_luid(luid)?;
+        // FFmpeg never loads d3d12.dll for D3D11 frames: wgpu holds the only load and frees it
+        // when its device drops, before the D3D12 objects held elsewhere (graph staging,
+        // opened resources) are released, which then crash in D3D12Core.dll. Keep it loaded.
+        let mut module = Default::default();
+        GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN, w!("d3d12.dll"), &mut module).map_err(gpu_err)?;
         let dev12 = raw_device(&ctx)?;
         let fence12: ID3D12Fence = dev12.CreateFence(0, D3D12_FENCE_FLAG_SHARED).map_err(gpu_err)?;
         let handle = dev12.CreateSharedHandle(&fence12, None, GENERIC_ALL.0, PCWSTR::null()).map_err(gpu_err)?;

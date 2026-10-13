@@ -109,6 +109,11 @@ pub(crate) fn device_limits(supported: &wgpu::Limits) -> wgpu::Limits {
 
 /// A GPU device. One context can be shared by many effects.
 pub struct GpuContext {
+    /// The D3D12 device shared with the caller (see `d3d12.rs`), `None` otherwise. First, so
+    /// its D3D12 objects are released before `device`, whose drop may unload d3d12.dll
+    /// (D3D11 frames also pin it, see `from_d3d11`, as graphs hold D3D12 objects too).
+    #[cfg(windows)]
+    pub(crate) d3d12: Option<crate::d3d12::Shared>,
     pub(crate) device: wgpu::Device,
     pub(crate) queue: wgpu::Queue,
     info: wgpu::AdapterInfo,
@@ -125,9 +130,6 @@ pub struct GpuContext {
     /// failed (the device is then no longer used for Vulkan frames).
     #[cfg_attr(not(any(windows, all(unix, not(target_vendor = "apple")))), allow(dead_code))]
     pub(crate) vulkan_submit: std::sync::Mutex<bool>,
-    /// The D3D12 device shared with the caller (see `d3d12.rs`), `None` otherwise.
-    #[cfg(windows)]
-    pub(crate) d3d12: Option<crate::d3d12::Shared>,
 }
 
 impl GpuContext {
