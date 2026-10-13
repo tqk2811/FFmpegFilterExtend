@@ -337,8 +337,14 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   signal `sem_value + 1` (`add_wait_semaphore`/`add_signal_semaphore`, mỗi semaphore một lần). Sau đó filter
   ghi `layout`, `sem_value`, `access` vào `AVVkFrame` rồi mở khoá.
 - **VRAM:** không texture upload, không storage buffer output, không buffer readback; texture pass trong pool
-  giống hệt đường phần mềm; mỗi input giữ một texture RGBA đã chuyển (như khi upload; input RGBA thẳng cũng
-  qua pass chuyển, xem Backlog), còn output chính là frame trong pool của FFmpeg.
+  giống hệt đường phần mềm; mỗi input giữ một texture RGBA đã chuyển (như khi upload), còn output chính là
+  frame trong pool của FFmpeg. Input `rgba` thẳng của graph không deep, không hiệu ứng nào đọc mip chain của
+  nó, thì không cần cả hai: hiệu ứng sample thẳng image (không pass copy-in), và các hiệu ứng đọc nó được bind
+  lại vào image mới mỗi frame.
+- **Đo thời gian:** `GPUFX_PROFILE=1` xin device timestamp query và khi giải phóng mỗi graph thì in thời gian GPU
+  mỗi frame của copy-in, hiệu ứng, copy-out, cùng thời gian CPU mỗi frame (prepare, bind, record, import,
+  submit). Nó tách frame thành ba compute pass và chờ frame trễ bốn frame, nên khi bật thì thời gian chạy
+  tổng không còn đúng.
 - Filter bị tắt (timeline) luôn chuyển frame trên GPU sang frames context của output (không đưa tham chiếu
   như đường phần mềm, vì output có frames context riêng). Input chưa bắt đầu hiện frame đen upload một lần
   (đục với format có alpha; đường phần mềm hiện đen trong suốt).

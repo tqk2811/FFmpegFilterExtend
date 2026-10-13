@@ -237,6 +237,11 @@ impl Converter {
     }
 }
 
+/// A 1x1 `rgba8unorm` texture bound until the frame's own texture is known.
+pub(crate) fn stand_in(device: &wgpu::Device, usage: wgpu::TextureUsages) -> wgpu::Texture {
+    texture_2d(device, "gpufx stand-in", 1, 1, wgpu::TextureFormat::Rgba8Unorm, usage)
+}
+
 pub(crate) fn texture_2d(
     device: &wgpu::Device,
     label: &str,
@@ -346,7 +351,8 @@ pub(crate) struct InputKey {
     pub format: PixelFormat,
     pub width: u32,
     pub height: u32,
-    /// Straight RGBA8: uploaded as `rgba8unorm` and read by effects without a pass.
+    /// Straight RGBA8: uploaded as `rgba8unorm` and read by effects without a pass. With
+    /// `gpu`, the frame's own texture is read: nothing is pooled (see `graph::prepare`).
     pub direct: bool,
     /// A [`crate::GpuFrame`]: no upload, the conversion pass reads its plane textures.
     pub gpu: bool,
@@ -377,6 +383,9 @@ impl InputSlot {
         let (w, h) = (key.width, key.height);
         let tex = |width, height, format, usage, mips| PoolKey::Texture { width, height, format, usage, mips };
         let copy = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
+        if key.direct && key.gpu {
+            return Vec::new();
+        }
         if key.direct {
             let usage = if mips { copy | wgpu::TextureUsages::STORAGE_BINDING } else { copy };
             return vec![tex(w, h, wgpu::TextureFormat::Rgba8Unorm, usage, mips)];
@@ -396,8 +405,21 @@ impl InputSlot {
         keys
     }
 
-    /// A slot on `textures`, made for [`InputSlot::pool_keys`] of the same arguments.
-    pub fn new(device: &wgpu::Device, conv: &Converter, key: InputKey, deep: bool, mut textures: Vec<wgpu::Texture>) -> Self {
+    /// A slot on `textures`, made for [`InputSlot::pool_keys`] of the same arguments. A
+    /// direct GPU slot reads `frame`, the texture of the frame being recorded (a stand-in
+    /// when there is none: the caller points it at the frame before use).
+    pub fn new(
+        device: &wgpu::Device,
+        conv: &Converter,
+        key: InputKey,
+        deep: bool,
+        mut textures: Vec<wgpu::Texture>,
+        frame: Option<&wgpu::Texture>,
+    ) -> Self {
+        if key.direct && key.gpu {
+            let texture = frame.cloned().unwrap_or_else(|| stand_in(device, wgpu::TextureUsages::TEXTURE_BINDING));
+            return InputSlot { key, planes: Vec::new(), texture, uniform: None, bind_group: None, deep };
+        }
         if key.direct {
             let tex = textures.pop().expect("one texture");
             return InputSlot { key, planes: vec![tex.clone()], texture: tex, uniform: None, bind_group: None, deep };

@@ -308,3 +308,101 @@ fn gpu_frames_are_checked() {
     let err = g.encode_gpu(&[nv12], &[out], Some(&FrameInfo::new(0.0, 0)), &mut enc).unwrap_err();
     assert!(err.to_string().contains("2 plane(s)"), "{err}");
 }
+
+/// An effect reading its input through a mip chain (the smallest level), as a package
+/// directory removed when dropped.
+struct MipPackage(PathBuf);
+
+impl MipPackage {
+    fn new() -> Self {
+        let dir = std::env::temp_dir().join(format!("gpufx-direct-mips-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest =
+            r#"{"api":2,"id":"t.mips","name":"Mips","inputs":[{"name":"src","mipmaps":true}],"passes":[{"shader":"main.wgsl"}]}"#;
+        std::fs::write(dir.join("manifest.json"), manifest).unwrap();
+        let shader = "@compute @workgroup_size(8, 8) fn main(@builtin(global_invocation_id) id: vec3u) {
+    if (!gpufx_in_bounds(id)) { return; }
+    gpufx_write(id, textureSampleLevel(src, smp, gpufx_uv(id), 20.0));
+}";
+        std::fs::write(dir.join("main.wgsl"), shader).unwrap();
+        MipPackage(dir)
+    }
+}
+
+impl Drop for MipPackage {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+/// A graph of examples and `mips.zip` (see [`MipPackage`]).
+fn graph_with_mips(ctx: &Arc<GpuContext>, text: &str, mips: &MipPackage) -> EffectGraph {
+    EffectGraph::parse(text, |path| {
+        let name = path.trim_end_matches(".zip");
+        let dir = if name == "mips" { mips.0.clone() } else { examples().join(name) };
+        Ok((name.to_string(), Effect::new(ctx.clone(), Package::open(dir)?)?))
+    })
+    .unwrap()
+}
+
+/// Runs `text` on GPU frames through the copies and with in-place frames allowed, over
+/// three frames of new textures and new content, and checks both write the same bytes.
+/// Returns the memory stats of the in-place graph.
+fn direct_matches_copies(text: &str, ins: &[PixelFormat], out: PixelFormat, info: Option<&FrameInfo>) -> Option<gpufx_core::MemoryStats> {
+    let ctx = own_gpu()?;
+    if !ins.iter().chain([&out]).all(|&f| supported(&ctx, f)) {
+        return None;
+    }
+    let mips = MipPackage::new();
+    let (w, h) = (37, 22);
+    let mut copied = graph_with_mips(&ctx, text, &mips);
+    let mut direct = graph_with_mips(&ctx, text, &mips);
+    direct.allow_direct_gpu();
+    for frame in 0..3 {
+        let data: Vec<Vec<Vec<u8>>> = ins.iter().enumerate().map(|(i, &f)| pattern(f, w, h, frame * 5 + i as u32)).collect();
+        let upload_all = || ins.iter().zip(&data).map(|(&f, d)| upload(&ctx, f, d, w, h)).collect::<Vec<_>>();
+        let want = gpu_run(&ctx, &mut copied, &upload_all(), &[target(&ctx, out, w, h)], info);
+        let got = gpu_run(&ctx, &mut direct, &upload_all(), &[target(&ctx, out, w, h)], info);
+        assert_eq!(got, want, "`{text}`, frame {frame}");
+        assert_eq!(ctx.pool_stats().borrowed, 0, "given back by release_frame");
+    }
+    Some(direct.memory())
+}
+
+#[test]
+fn rgba_gpu_frames_are_read_in_place() {
+    use PixelFormat::*;
+    let info = FrameInfo::new(0.5, 3);
+    // One pass.
+    if let Some(m) = direct_matches_copies("[0]grayscale.zip[out]", &[Rgba], Rgba, Some(&info)) {
+        assert_eq!(m.input_textures, 0, "no pooled texture for an input read in place");
+    }
+    // Two effects and a two-pass effect reading the same input.
+    if let Some(m) = direct_matches_copies("[0]split[a][b]; [a]gaussian-blur.zip[x]; [x][b]crossfade.zip[out]", &[Rgba], Nv12, Some(&info))
+    {
+        assert_eq!(m.input_textures, 0);
+    }
+    // An NV12 input keeps its conversion, the RGBA one is read in place.
+    if let Some(m) = direct_matches_copies("[0][1]wipe-transition.zip[out]", &[Nv12, Rgba], Rgba, Some(&info)) {
+        assert_eq!(m.input_textures, 1, "only the converted NV12 frame");
+    }
+    // Bypassed: the output conversion reads the frame.
+    if let Some(m) = direct_matches_copies("[0]grayscale.zip[out]", &[Rgba], Nv12, None) {
+        assert_eq!(m.input_textures, 0);
+    }
+}
+
+#[test]
+fn rgba_gpu_frames_are_copied_when_they_cannot_be_read_in_place() {
+    use PixelFormat::*;
+    let info = FrameInfo::new(0.5, 3);
+    // A mip chain needs a texture of its own.
+    if let Some(m) = direct_matches_copies("[0]mips.zip[out]", &[Rgba], Rgba, Some(&info)) {
+        assert_eq!(m.input_textures, 1);
+    }
+    // A deep graph works in rgba16float.
+    if let Some(m) = direct_matches_copies("[0]grayscale.zip[out]", &[Rgba], P010, Some(&info)) {
+        assert_eq!(m.input_textures, 1);
+    }
+}

@@ -343,8 +343,14 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   signal at `sem_value + 1` (`add_wait_semaphore`/`add_signal_semaphore`, each semaphore once). The filter
   then stores `layout`, `sem_value` and `access` in the `AVVkFrame`s and unlocks them.
 - **VRAM:** no upload textures, no output storage buffers, no readback buffer; the pooled pass textures are
-  the same as for software frames; each input keeps one converted RGBA texture (as for uploads; a straight
-  RGBA input is converted too, see the backlog), and the outputs are FFmpeg's pool frames themselves.
+  the same as for software frames; each input keeps one converted RGBA texture (as for uploads), and the
+  outputs are FFmpeg's pool frames themselves. A straight `rgba` input of a graph that is not deep, and
+  whose mip chain no effect reads, has neither: the effects sample its image in place (no copy-in pass),
+  and the effects reading it are bound to the new image every frame.
+- **Profiling:** `GPUFX_PROFILE=1` asks the device for timestamp queries and prints, when each graph is
+  freed, its GPU time per frame for copy-in, effects and copy-out, and its CPU time per frame (prepare, bind,
+  record, import, submit). It splits the frame into three compute passes and waits for frames four behind,
+  so wall time is not representative while it is on.
 - A disabled filter always converts the frame on the GPU into the output's frames context (no pass by
   reference as on the software path: the output has its own frames context). An input that has not started shows a black frame uploaded once (opaque for formats with alpha, where the
   software path shows transparent black).

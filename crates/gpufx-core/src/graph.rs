@@ -105,6 +105,10 @@ pub(crate) struct FrameIo {
     ctx: Option<Arc<crate::GpuContext>>,
     /// Timings of GPU frames, with `GPUFX_PROFILE` set (see [`crate::profile`]).
     pub(crate) prof: Option<crate::profile::Profiler>,
+    /// Vulkan frames may be read in place (see `prepare`).
+    pub(crate) direct_gpu: bool,
+    /// The input textures of the GPU frame being recorded, for the slots made for it.
+    frame_ins: Vec<Option<wgpu::Texture>>,
 }
 
 /// The planned textures of a graph for one set of inputs.
@@ -308,7 +312,7 @@ fn prepare(
     }
 
     let ctx = effects[0].program.ctx.clone();
-    let keys: Vec<InputKey> = inputs
+    let mut keys: Vec<InputKey> = inputs
         .iter()
         .map(|f| InputKey {
             format: f.format,
@@ -324,6 +328,15 @@ fn prepare(
     let others = if bypass { planned.get(inputs.len()..).unwrap_or_default() } else { &[][..] };
     let deep = keys.iter().chain(others).any(|k| work_format(k.format) != wgpu::TextureFormat::Rgba8Unorm)
         || outs.iter().any(|o| work_format(o.format) != wgpu::TextureFormat::Rgba8Unorm);
+    let (pad_mips, node_mips) = mip_sources(effects, topo);
+    // Vulkan frames in straight RGBA8, in a graph that is not deep: effects read the
+    // frame itself, with no pooled texture and no conversion pass.
+    let in_place = gpu && io.direct_gpu && !deep;
+    if in_place {
+        for (i, k) in keys.iter_mut().enumerate() {
+            k.direct = k.format == PixelFormat::Rgba && !inputs[i].premultiplied && !pad_mips[i];
+        }
+    }
     let stale = io.deep != deep
         || if bypass { planned.len() < keys.len() } else { planned.len() != keys.len() }
         || planned.iter().zip(&keys).any(|(p, k)| p != k);
@@ -338,7 +351,6 @@ fn prepare(
         check_nodes(effects, topo, None, &streams)?;
         let pads: Vec<(u32, u32)> = keys.iter().map(|k| (k.width, k.height)).collect();
         let sizes = topo.node_sizes(&pads);
-        let (pad_mips, node_mips) = mip_sources(effects, topo);
         let plan = plan(effects, topo, &sizes, &node_mips, deep)?;
         // Drop the bindings of the old textures; they go back to the pool's trimming.
         io.input_mips.clear();
@@ -399,7 +411,11 @@ fn acquire(effects: &mut [Effect], topo: &Topology, io: &mut FrameIo, ctx: &Arc<
         .keys
         .iter()
         .zip(&counts)
-        .map(|(&k, &n)| InputSlot::new(device, conv, k, deep, textures.by_ref().take(n).collect()))
+        .enumerate()
+        .map(|(i, (&k, &n))| {
+            let frame = io.frame_ins.get(i).and_then(Option::as_ref);
+            InputSlot::new(device, conv, k, deep, textures.by_ref().take(n).collect(), frame)
+        })
         .collect();
     let pool: Vec<wgpu::Texture> = textures.collect();
     for &k in &topo.order {
@@ -610,7 +626,10 @@ pub(crate) fn run_gpu(
     let ins: Vec<Desc> = inputs.iter().map(desc).collect();
     let out_descs: Vec<Desc> = outs.iter().map(desc).collect();
     let t0 = std::time::Instant::now();
-    prepare(effects, topo, io, &ins, &out_descs, bypass, true)?;
+    io.frame_ins = inputs.iter().map(|f| f.planes.first().cloned()).collect();
+    let prepared = prepare(effects, topo, io, &ins, &out_descs, bypass, true);
+    io.frame_ins.clear();
+    prepared?;
     if crate::profile::enabled() {
         let ctx = effects[0].program.ctx.clone();
         let prof = io.prof.get_or_insert_with(|| {
@@ -646,8 +665,23 @@ fn record_gpu(
         io.gpu_outputs = outs.iter().map(|o| GpuOutputSlot::new(device, o.format, o.width, o.height)).collect();
         io.allocations += 1;
     }
-    for (slot, f) in io.inputs.iter_mut().zip(inputs) {
-        slot.use_gpu_frame(device, queue, conv, &f.planes, &f.color);
+    let mut direct = vec![false; io.inputs.len()];
+    for (i, (slot, f)) in io.inputs.iter_mut().zip(inputs).enumerate() {
+        if slot.key.direct {
+            // Read in place: the effects reading it are bound to this frame below.
+            slot.texture = f.planes[0].clone();
+            direct[i] = true;
+        } else {
+            slot.use_gpu_frame(device, queue, conv, &f.planes, &f.color);
+        }
+    }
+    if !bypass && direct.contains(&true) {
+        for &k in &topo.order {
+            if topo.node_inputs[k].iter().any(|s| matches!(*s, Source::Input(i) if direct[i])) {
+                let sources: Vec<wgpu::Texture> = topo.node_inputs[k].iter().map(|&s| source_texture(effects, &io.inputs, s)).collect();
+                effects[k].rebind(&sources.iter().collect::<Vec<_>>(), None)?;
+            }
+        }
     }
     for (k, out) in outs.iter().enumerate() {
         let src = if bypass { Source::Input(topo.pad_of(topo.outputs[k])) } else { topo.outputs[k] };
@@ -1274,6 +1308,15 @@ impl EffectGraph {
     /// of other graphs reuse them.
     pub fn release_frame(&mut self) {
         self.io.release();
+    }
+
+    /// Lets [`EffectGraph::encode_gpu`] read straight RGBA8 input frames in place, with
+    /// no copy, when the graph is not deep and nothing wants their mip chain: the input
+    /// textures then need `TEXTURE_BINDING` usage only. [`EffectGraph::process_vulkan`]
+    /// does this; D3D12 frames keep the copies.
+    #[doc(hidden)]
+    pub fn allow_direct_gpu(&mut self) {
+        self.io.direct_gpu = true;
     }
 
     /// Adds `d` to a CPU span of the profile, when profiling (see [`crate::profile`]).

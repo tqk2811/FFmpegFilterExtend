@@ -604,6 +604,18 @@ impl Effect {
     }
 
     /// The texture the last pass writes. Only valid after `bind`.
+    /// Binds the effect again on `inputs`, keeping its pass textures, with the texture of
+    /// its last pass replaced by `output` when given (a frame written in place).
+    pub(crate) fn rebind(&mut self, inputs: &[&wgpu::Texture], output: Option<&wgpu::Texture>) -> Result<(), Error> {
+        let bound = self.bound.as_ref().ok_or_else(|| Error::Gpu("the effect is not bound".into()))?;
+        let mut outputs = bound.outputs.clone();
+        if let Some(t) = output {
+            outputs.insert(self.program.package.manifest.passes.last().expect("validated").output.clone(), t.clone());
+        }
+        let (size, deep) = (bound.size, bound.deep);
+        self.bind(inputs, outputs, size, deep)
+    }
+
     pub(crate) fn output(&self) -> &wgpu::Texture {
         let bound = self.bound.as_ref().expect("bound before use");
         &bound.outputs[&self.program.package.manifest.passes.last().expect("validated").output]

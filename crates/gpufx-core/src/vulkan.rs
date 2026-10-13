@@ -706,6 +706,7 @@ impl EffectGraph {
             buffers.push(pre.finish());
         }
         let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gpufx vulkan") });
+        self.allow_direct_gpu();
         self.encode_gpu(&ins.frames, &outs_w.frames, info, &mut enc)?;
         // Leave every image in one known layout for whoever uses it next.
         enc.transition_resources(
