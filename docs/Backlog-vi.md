@@ -216,3 +216,17 @@
   - Không giới hạn kích thước pool đầu ra: frame sẽ phải chờ hoặc báo lỗi, hại hiệu suất.
 - **Vì sao nên làm**: chuỗi effect/transition thường giữ nguyên kích thước nên pool dùng chung áp dụng được cho phần lớn trường hợp; ước tính giảm vài chục tới hơn 100 MB với rgba (chưa đo).
 - **Ngày ghi**: 2026-10-13
+
+### [Thấp] Filter `gpufx` upload lại input CPU ở mọi event
+
+- Vấn đề: input là frame CPU bị chuyển đổi rồi upload lại ở mỗi event của framesync, kể cả khi input phụ chậm hơn chỉ lặp lại đúng frame cũ (vd ảnh tĩnh). Upload chạy đồng bộ, nên mỗi event tốn một lần chép cho mỗi input.
+- Vị trí: `ffmpeg/vf_gpufx.c`, `upload_input` (~1436) và lời gọi trong vòng event (~1618).
+- Vì sao nên làm: cache theo danh tính frame (buffer + pts) sẽ bỏ được các lần chép thừa.
+- Ngày ghi: 2026-10-14 (review đợt chỉ xuất frame GPU).
+
+### [Thấp] Filter `gpufx`: input GPU khác API với `-filter_hw_device` báo lỗi khó hiểu
+
+- Vấn đề: `query_formats` chọn output theo `-filter_hw_device`, còn `config_inputs` chọn API theo input. Khi device là Vulkan mà input là D3D11, lỗi hiện ra là "Output ... has vulkan frames but gpufx runs on d3d11", thay vì nói thẳng là device và input lệch API. Hai nơi cùng tự quyết API.
+- Vị trí: `ffmpeg/vf_gpufx.c`, `query_formats` (~1741-1750) và `config_inputs` (~1796-1830).
+- Vì sao nên làm: quyết API ở một chỗ thì lỗi sẽ rõ ràng hơn.
+- Ngày ghi: 2026-10-14 (review đợt chỉ xuất frame GPU).

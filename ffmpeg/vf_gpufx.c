@@ -1368,6 +1368,14 @@ static AVBufferRef *upload_frames_ctx(AVFilterContext *ctx, AVBufferRef *device,
     if (s->hw_fmt == AV_PIX_FMT_VULKAN)
         ((AVVulkanFramesContext *)fc->hwctx)->flags = AV_VK_FRAME_FLAG_DISABLE_MULTIPLANE;
 #endif
+#if CONFIG_D3D11VA
+    /* Readable and shareable like the filter's own D3D11 frames, so gpufx needs no copy. */
+    if (s->hw_fmt == AV_PIX_FMT_D3D11) {
+        AVD3D11VAFramesContext *h = fc->hwctx;
+        h->BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        h->MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
+    }
+#endif
     if (av_hwframe_ctx_init(ref) < 0) {
         av_buffer_unref(&ref);
         return NULL;
