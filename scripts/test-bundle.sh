@@ -727,6 +727,6 @@ elif ! "$FF" -hide_banner -init_hw_device list 2>&1 | grep -qx videotoolbox; the
 else
     vt_tests
 fi
-echo "  VideoToolbox frames tested: ${vt_ran:+yes}${vt_ran:-no}"
+echo "  VideoToolbox frames tested: $([ -n "$vt_ran" ] && echo yes || echo no)"
 
 [ "$fails" -eq 0 ] && echo "all passed" || { echo "$fails failed"; exit 1; }

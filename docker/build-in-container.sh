@@ -51,6 +51,15 @@ KEEP=$(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' "$SRC/docker/keep-filters.txt")
 FILTERS=$(echo $AUDIO $KEEP | tr ' ' ',')
 echo "    $(echo $AUDIO | wc -w) audio filters, video filters: $(echo $KEEP | tr '\n' ' ')"
 
+# gpufx outputs GPU frames only: FFmpeg needs Vulkan (hwcontext_vulkan), which wants
+# vulkan.h >= 1.3.277, newer than the distro packages. The loader is opened at run time.
+VK_TAG=${VULKAN_HEADERS_TAG:-v1.4.321}
+VK_HDR=$WORK/Vulkan-Headers-${VK_TAG#v}
+if [ ! -f "$VK_HDR/include/vulkan/vulkan.h" ]; then
+    echo "==> Vulkan-Headers $VK_TAG"
+    curl -sSfL "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/$VK_TAG.tar.gz" | tar -C "$WORK" -xzf -
+fi
+
 echo "==> configure FFmpeg ($TARGET)"
 cd "$WORK/ffmpeg"
 PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig" ./configure \
@@ -58,6 +67,7 @@ PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig" ./configure \
     --extra-version=gpufx \
     --disable-doc --disable-debug --disable-ffplay \
     --enable-libgpufx \
+    --enable-vulkan --extra-cflags="-I$VK_HDR/include" \
     --disable-filters --enable-filter="$FILTERS" \
     ${CONFIGURE_TARGET[@]+"${CONFIGURE_TARGET[@]}"}
 
