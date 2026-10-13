@@ -135,3 +135,19 @@
 - **Vị trí**: [crates/gpufx-core/src/d3d12.rs](../crates/gpufx-core/src/d3d12.rs), [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`config_d3d`, `process_d3d12`, `process_d3d11`), [scripts/test-bundle.sh](../scripts/test-bundle.sh), [scripts/build-prebuilt.sh](../scripts/build-prebuilt.sh).
 - **Vì sao**: không có máy Windows khi làm; cần đọc log job `ffmpeg-windows` và chạy thử trên GPU thật.
 - **Ngày ghi**: 2026-10-12
+
+### Cache shader bước 2 và `pack --precompile`: thiết kế đã chốt
+- **Vấn đề**: phần thiết kế chưa làm của mục "Cache shader" (chuyển từ kế hoạch GPU đã xoá):
+  - D3D12 bước 2: naga → HLSL → `dxcompiler.dll` (đã đi kèm bản win64) ra DXIL, lưu file; lần sau nạp bằng `Features::PASSTHROUGH_SHADERS` + `create_shader_module_passthrough` (`unsafe`, wgpu không kiểm tra nên chỉ nạp file mình đã ghi và khớp hash). Driver vẫn phải tạo pipeline state. Metal tương tự với `metallib` nếu cần.
+  - `gpufx pack --precompile`: gói kèm thư mục `compiled/` với bytecode theo từng backend, tên file là hash SHA-256 như cache runtime nhưng không có phần adapter/driver. DXIL: naga → HLSL → DXC (có bản Linux, ký sẵn từ 1.8.2505), không phụ thuộc GPU, là chỗ có lợi nhất. SPIR-V: naga sinh rất nhanh, chỉ thêm nếu đo thấy đáng. Metal: `metallib` cần `xcrun metal`, chỉ làm được khi pack trên macOS; không có thì bỏ qua, runtime tự biên dịch MSL. Mã máy của GPU (pipeline state, ISA) không biên dịch sẵn được, vẫn do `GPUFX_SHADER_CACHE` lo.
+  - An toàn: gói là dữ liệu không tin cậy và passthrough shader không được wgpu kiểm tra (bytecode lạ có thể làm sập driver), nên chỉ dùng `compiled/` khi gói đã ký (`signature`, DESIGN mục 7) hoặc `GPUFX_TRUST_PRECOMPILED=1`; ngược lại biên dịch từ nguồn. Gói luôn giữ nguồn shader; bytecode không khớp hash của nguồn hiện tại thì bỏ qua.
+  - Khi làm xong: ghi biến môi trường mới vào README, DESIGN (cả hai thứ tiếng).
+- **Vị trí**: [crates/gpufx-core/src/shader_cache.rs](../crates/gpufx-core/src/shader_cache.rs), [crates/gpufx-cli/src/main.rs](../crates/gpufx-cli/src/main.rs).
+- **Vì sao**: đo trên CI, FXC mất 50–160 s cho shader lá trên WARP (DXC nhanh hơn nhưng vẫn đáng kể); wgpu 30 không có cache ra đĩa cho D3D12/Metal/GL (`create_pipeline_cache` là stub rỗng).
+- **Ngày ghi**: 2026-10-13
+
+### Test "yuva420p in, rgba Vulkan frames out" lỗi chập chờn trên CI linux64
+- **Vấn đề**: test này trong `scripts/test-bundle.sh` lỗi trên job CI linux64 hai lần (run 38324146152, cả hai lần chạy, không có log lỗi), rồi qua ở lần chạy kế tiếp (a4296b2). Không tái hiện được trên máy local (80/80 lần qua). Log Vulkan theo từng test giờ in ra nguyên nhân nếu lỗi lặp lại.
+- **Vị trí**: [scripts/test-bundle.sh](../scripts/test-bundle.sh), job linux64 trong [.github/workflows/ci.yml](../.github/workflows/ci.yml).
+- **Vì sao**: nghi do lavapipe hành xử khác tuỳ máy chủ (host) của runner; cần đọc log Vulkan khi lỗi lặp lại.
+- **Ngày ghi**: 2026-10-13
