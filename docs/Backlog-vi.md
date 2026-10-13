@@ -54,23 +54,37 @@
 - **Vì sao**: chưa cần cho FFmpeg; đổi sang khoá theo từng gói khi có app dùng nhiều thread.
 - **Ngày ghi**: 2026-10-12
 
-### Ảnh PNG trong gói không bị giới hạn kích thước
-- **Vấn đề**: PNG trong `textures` không được kiểm tra kích thước khi nạp. Ảnh lớn hơn giới hạn của device (thường 8192) gây wgpu uncaptured error, mặc định là panic và có thể làm sập process FFmpeg. Cũng không có giới hạn kích thước sau khi giải nén, nên một PNG nhỏ có thể giải ra ảnh rất lớn.
-- **Vị trí**: [crates/gpufx-core/src/runtime.rs](../crates/gpufx-core/src/runtime.rs) (`Program::new`).
-- **Vì sao**: phát hiện khi nghiên cứu kế hoạch sprite ([Plan-sprites-vi.md](Plan-sprites-vi.md), G4); sẽ sửa ở bước 2 của kế hoạch đó.
-- **Ngày ghi**: 2026-10-12
-
 ### Bản build chưa kèm giấy phép của các crate Rust
 - **Vấn đề**: `libgpufx` liên kết tĩnh wgpu, naga, image, zip… Giấy phép của các crate này (MIT, Apache-2.0, BSD, Zlib, có thể cả MPL-2.0, Unicode-3.0) yêu cầu kèm thông báo khi phân phối bản nhị phân, nhưng bản build `dist/<target>` và pre-release chưa có file tổng hợp giấy phép bên thứ ba.
 - **Vị trí**: [scripts/build-prebuilt.sh](../scripts/build-prebuilt.sh), CI pre-release.
 - **Vì sao**: cần thêm bước sinh `THIRD-PARTY-LICENSES` (ví dụ `cargo about`) và `cargo deny check licenses` trong CI để không có crate GPL lọt vào.
 - **Ngày ghi**: 2026-10-12
 
-### Thu nhỏ input không có mipmap: răng cưa khi ảnh lớn hơn khung nhiều
-- **Vấn đề**: sampler tuyến tính, texture input không có mip. Khi hiệu ứng thu nhỏ input nhiều lần (ảnh 4000 px trong `fit`, hộp nhỏ của `push-box`, ảnh của `photo-collection`), ảnh bị răng cưa/nhấp nháy. Nền mờ của `fit` dùng 64 tap bilinear rải đều trên bán kính, nên bán kính lớn (trên khoảng 64 px) có thể lộ bóng lặp.
-- **Vị trí**: [crates/gpufx-core/src/runtime.rs](../crates/gpufx-core/src/runtime.rs) (`create_texture`, sampler), `examples/effects/{fit,push-box,photo-collection}`.
-- **Vì sao**: cần tuỳ chọn mipmap cho input (sinh mip trên GPU mỗi frame) hoặc pass thu nhỏ trước; làm cùng bước mipmap của [Plan-sprites-vi.md](Plan-sprites-vi.md).
-- **Ngày ghi**: 2026-10-12
+### Hiệu ứng thu nhỏ ảnh chưa dùng mipmap của input
+- **Vấn đề**: engine đã có `"mipmaps": true` cho input (api 2, chuỗi mip sinh trên GPU mỗi frame), nhưng `fit`, `push-box`, `photo-collection` vẫn lấy mẫu ở mức 0, nên ảnh lớn hơn khung nhiều (ảnh 4000 px trong `fit`, hộp nhỏ của `push-box`) vẫn răng cưa/nhấp nháy. Nền mờ của `fit` dùng 64 tap bilinear rải đều trên bán kính, bán kính lớn (trên khoảng 64 px) có thể lộ bóng lặp; đọc từ mức mip phù hợp sẽ hết.
+- **Vị trí**: `examples/effects/{fit,push-box,photo-collection}`, [crates/gpufx-core/src/mips.rs](../crates/gpufx-core/src/mips.rs).
+- **Vì sao**: giữ output của các hiệu ứng cũ giống từng byte khi thêm tính năng; chuyển sang api 2 và tự tính `lod` theo tỉ lệ thu nhỏ là thay đổi output, cần làm và kiểm riêng. Mip của input tốn thêm khoảng 1/3 VRAM của texture đó và một pass mỗi mức mỗi frame.
+- **Ngày ghi**: 2026-10-13
+
+### Sprite/hạt: các phần để sau
+- **Vấn đề**:
+  - Chưa có hạt có trạng thái (storage buffer giữ giữa các frame, `globals.dt`, reset khi `t` lùi): va chạm, lá đọng trên vật thể, gió đổi theo thời gian. Phải giữ đúng khi seek nên cần thiết kế riêng.
+  - Mỗi pass tối đa khoảng 256 hạt (bộ nhớ workgroup 16 KiB). Hàng nghìn hạt cần lọc theo tile 8×8 (`atomicAdd` vào shared memory) hoặc pass ghi buffer hạt (cần output khác kích thước/format, M1).
+  - Chưa có thư viện `#include` dùng chung (`gpufx_hash`...): hai gói lá chép cùng `leaves.wgsl` (có test giữ hai bản giống nhau).
+  - Trường `colorspace` (`srgb`/`linear`) cho texture chưa có; khi pipeline chuyển sang linear thì phải linear hoá trước `premultiply` (hàm `premultiply` trong `texture.rs` là chỗ duy nhất đổi màu).
+  - Mip của texture gói sinh trên CPU khi nạp (resize Triangle từ mức trên): ảnh lớn nhiều layer làm nạp gói chậm hơn; có thể chuyển sang GPU như mip của input.
+- **Vị trí**: [crates/gpufx-core/src/texture.rs](../crates/gpufx-core/src/texture.rs), `examples/effects/falling-*`.
+- **Vì sao**: ngoài phạm vi kế hoạch sprite (đã xong: texture mảng, mipmap, premultiply, quỹ đạo `expr`).
+- **Ngày ghi**: 2026-10-13
+
+### Tham số `expr`: các giới hạn còn lại
+- **Vấn đề**:
+  - Biểu thức đổi thì hiệu ứng biên dịch lại pipeline của nó (vài ms, trên llvmpipe lâu hơn) ngay trong lần xử lý frame kế tiếp; biến thể `rgba16float` biên dịch khi cần. Pipeline riêng không được chia sẻ giữa các hiệu ứng có cùng biểu thức.
+  - Trong `vf_gpufx.c`, khi Rust từ chối chuỗi thì filter thử parse như biểu thức FFmpeg theo `t`; chuỗi FFmpeg chấp nhận mà Rust không (ví dụ hàm `random`) chỉ báo lỗi ở frame đầu ("expression parameter ... not numbers"), không phải lúc cấu hình.
+  - Chưa có biến kiểu vector, so sánh, `if`; hàm luôn trả `f32`.
+- **Vị trí**: [crates/gpufx-core/src/expr.rs](../crates/gpufx-core/src/expr.rs), [crates/gpufx-core/src/runtime.rs](../crates/gpufx-core/src/runtime.rs) (`Effect::sync_exprs`), [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`apply_params`).
+- **Vì sao**: đủ cho quỹ đạo lá rơi; C ABI cần hàm báo kiểu tham số để `vf_gpufx.c` không thử av_expr với tham số `expr`.
+- **Ngày ghi**: 2026-10-13
 
 ### Đồ thị GPU: các giới hạn còn lại
 - **Vấn đề**:

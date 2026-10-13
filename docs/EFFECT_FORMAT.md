@@ -1,6 +1,6 @@
 Tiếng Việt: [EFFECT_FORMAT-vi.md](EFFECT_FORMAT-vi.md)
 
-# Effect package format and how to write shaders (api 1)
+# Effect package format and how to write shaders (api 2)
 
 ## Package structure
 
@@ -34,14 +34,14 @@ scripts/pack-effects.sh --check -o out my-fx    # compile the shaders on the GPU
 
 | Field | Type | Required | Meaning |
 |-------|------|----------|---------|
-| `api` | number | no (1) | Format version |
+| `api` | number | no (1) | Format version. `2` is needed for texture arrays, `mipmaps`, `premultiply` and `expr` parameters; packages without those keep `1` and run as before. A runtime older than the package says `unsupported manifest api 2` |
 | `id` | string | yes | Identifier in reverse-DNS form |
 | `name` | string | yes | Display name |
 | `version`, `description` | string | no | |
 | `inputs` | array | no (`[{"name":"src"}]`) | The video inputs, in the filter's pad order, with their rules (see below) |
 | `output` | `{formats}` | no (`rgba` and every format converted on the GPU) | Allowed output pixel formats |
 | `params` | array | no | Parameters, see below |
-| `textures` | array of `{name, path}` | no | Bundled PNG images (LUT, mask) |
+| `textures` | array | no | Bundled PNG images (LUT, mask, sprites), see [Textures](#textures) |
 | `passes` | array | yes | The compute passes, run in order |
 
 ## Input/output rules
@@ -63,6 +63,7 @@ Each element of `inputs`:
 | `formats` | `[]` (any format) | Accepted pixel formats (FFmpeg names: `yuv420p`, `nv12`, `rgba`, `rgb24`...) |
 | `width`, `height` | unrestricted | `{ "min": 16, "max": 4096, "multiple_of": 2 }`, each field is optional |
 | `same_size` | `false` | The size must equal the first input (not for the first input itself) |
+| `mipmaps` | `false` | (api 2) The input texture gets a full mip chain, made on the GPU every frame, for shaders that shrink it a lot (`textureSampleLevel(src, smp, uv, lod)`); see [Mipmaps](#mipmaps) |
 
 `output.formats`: the allowed output pixel formats, in order of preference. Without `output` the list is
 `rgba`, `rgba64le`, `nv12`, `p010le`, `yuv420p`, `yuv422p`, `yuv444p`, `yuv420p10le`, `yuv422p10le`,
@@ -105,13 +106,15 @@ Each element of `params`:
 | Field | Meaning |
 |-------|---------|
 | `name` | Name, also the field name in `params.<name>` |
-| `type` | `float`, `int`, `bool`, `vec2`, `vec3`, `vec4`, `color` |
-| `default` | A number, an array of numbers, `true/false`, or a string (`"#ff8800"`) |
-| `min`, `max` | The value is clamped to this range |
+| `type` | `float`, `int`, `bool`, `vec2`, `vec3`, `vec4`, `color`, `expr` (api 2) |
+| `default` | A number, an array of numbers, `true/false`, or a string (`"#ff8800"`; the expression of an `expr`) |
+| `min`, `max` | The value is clamped to this range (not for `expr`) |
+| `vars` | `expr` only: the variable names of the expression, in the order of the shader function's arguments |
 | `description` | Description |
 
 Types in the shader: `float`→`f32`/`float`, `int`→`i32`/`int`, `bool`→`u32`/`uint` (0 or 1),
-`vecN`→`vecNf`/`vecN`, `color`→`vec4f`/`vec4` (RGBA 0..1).
+`vecN`→`vecNf`/`vecN`, `color`→`vec4f`/`vec4` (RGBA 0..1). An `expr` is not in `params`: it becomes a
+function, see [Expression parameters](#expression-parameters).
 
 Each element of `passes`:
 
@@ -146,6 +149,8 @@ struct GpufxParams { strength: f32 };
 @group(0) @binding(2) var out_tex: texture_storage_2d<rgba8unorm, write>; // rgba16float above 8 bits
 @group(0) @binding(3) var smp: sampler;
 @group(0) @binding(4) var src: texture_2d<f32>;
+// A texture with `layers` or `grid` is a texture_2d_array<f32> (GLSL: texture2DArray).
+// An `expr` parameter adds fn gpufx_expr_<name>(<vars>: f32...) -> f32.
 fn gpufx_in_bounds(id: vec3u) -> bool
 fn gpufx_uv(id: vec3u) -> vec2f          // pixel center, 0..1
 fn gpufx_write(id: vec3u, c: vec4f)      // clamp to 0..1, then write
@@ -191,6 +196,131 @@ void main() {
 }
 ```
 
+## Textures
+
+Each element of `textures` makes one read-only `rgba8unorm` texture from PNG files in the package, bound
+under its `name` (it must not collide with an input, a pass output or another texture):
+
+```json
+"api": 2,
+"textures": [
+  { "name": "lut", "path": "textures/lut.png" },
+  { "name": "leaves", "layers": ["textures/maple.png", "textures/oak.png"], "mipmaps": true, "premultiply": true },
+  { "name": "petals", "path": "textures/petals.png", "grid": [4, 2], "count": 7, "mipmaps": true, "premultiply": true }
+]
+```
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `name` | | Name in the shader |
+| `path` | | One PNG. Without `grid` it is a `texture_2d<f32>` (api 1) |
+| `layers` | | (api 2) PNGs **of one size**, the layers of a `texture_2d_array<f32>`, in order |
+| `grid` | | (api 2) `[cols, rows]` with `path`: cuts an atlas into the layers of a `texture_2d_array<f32>`, row by row. The width and height must divide exactly |
+| `count` | `cols*rows` | (api 2) Cells of the grid to use, when the last ones are empty |
+| `mipmaps` | `false` | (api 2) Make the full mip chain on the CPU when the package loads (each level from the one above, triangle filter, after `premultiply`) |
+| `premultiply` | `false` | (api 2) Multiply RGB by alpha when loading: the shader reads premultiplied colours |
+
+Rules: exactly one of `path`/`layers`; `grid` only with `path`, `count` only with `grid`; 1 to 256 layers;
+each image at most **4096** pixels a side (also below what the device allows; the runtime checks
+`max_texture_dimension_2d` and `max_texture_array_layers` and reports an error instead of letting wgpu
+abort the process); all images of a package decode to at most **64 M texels** (256 MiB RGBA8). The sizes
+come from the PNG headers when the package opens (`gpufx check` reports them), and the decoder is capped,
+so a small file claiming a huge image is refused before any memory is spent.
+
+Loading happens once per package and device, on the CPU: the decoded images, their cut layers and
+mip chains (a third more) are all held until the upload, so the peak is about twice the decoded size
+(up to some 700 MiB for a package at the 64 M texel limit). 16-bit PNGs are decoded at 16 bits (twice
+the bytes, which counts against the decoder cap of 256 MiB per image) and then reduced to 8 bits: package
+textures are always `rgba8unorm`. Mip levels are filtered with premultiplied alpha even when
+`premultiply` is off (and divided back), so transparent texels do not darken the edges.
+
+Texture arrays are read with a layer index, which may differ from pixel to pixel:
+
+```wgsl
+let n = textureNumLayers(leaves);                              // layers
+let c = textureSampleLevel(leaves, smp, uv, layer, lod);       // layer: u32 or i32
+let d = textureLoad(leaves, vec2i(x, y), layer, 0);
+```
+```glsl
+vec4 c = textureLod(sampler2DArray(leaves, smp), vec3(uv, layer), lod);
+```
+
+Every layer is clamped at its own edge: unlike an atlas sampled by hand, filtering and mip levels never
+bleed in the neighbouring picture.
+
+**Alpha.** PNG colours are straight alpha, and transparent pixels usually have RGB = 0: filtering them
+(bilinear, mip levels) darkens the edges of sprites. With `premultiply: true` the texture holds
+premultiplied colours and filters correctly; blend with `acc = c + acc * (1 - c.a)` and divide by alpha
+before `gpufx_write` (which takes straight alpha). It is off by default so LUTs and masks keep their
+values.
+
+**Colour.** Texture values are taken as having the transfer of the video (sRGB/BT.709 gamma), with no
+conversion, like the rest of the engine. When the pipeline moves to linear light, a `colorspace` field
+will say how to convert them.
+
+### Mipmaps
+
+The shared sampler `smp` filters linearly between mip levels (`mipmap_filter: Linear`); textures with
+one level sample exactly as before. Compute shaders have no derivatives, so the shader chooses the level
+itself: `lod = log2(texels across / pixels across on screen)`, e.g. once per sprite rather than per
+pixel. Without mip levels, a picture drawn much smaller than it is flickers and looks jagged.
+
+Inputs can have mip levels too (`"mipmaps": true` in `inputs`): the chain is made on the GPU right after
+the input is converted, or after the effect that writes it in a chain or graph, every frame, inside the
+frame texture itself (a third more memory for that texture, no copy). Effects reading the same frame
+without `mipmaps` see level 0 only. Levels are the alpha-weighted average of 2×2 texels. Use it when an
+effect shrinks a picture a lot (a 4000 px photo in a small box).
+
+## Sprites and particles
+
+`falling-maple`/`falling-ginkgo` draw up to 256 sprites in one compute pass. The pattern:
+
+- **Stateless:** every particle is a pure function of `(seed, slot, time)`. A slot replays a fixed
+  period; a new period is a new random particle ("respawn"), chosen while it is off screen. Seeking,
+  dropped or repeated frames and split encodes then all give the same picture. Use `globals.time_int` and
+  `time_frac` (or `time`), **never `globals.frame`**: it is counted per filter and restarts on seek.
+  `-ss` before `-i` (without `-copyts`) resets the time to 0; an `offset` parameter helps.
+- **Workgroup cache:** the 64 threads of a workgroup compute the particles once into
+  `var<workgroup> leaves: array<Leaf, 256>` (here 40 bytes each: keep it under the 16 KiB default
+  limit), then `workgroupBarrier()`. The barrier must be reached in **uniform control flow**: call
+  `gpufx_in_bounds` *after* it, not before.
+- **Per pixel:** skip particles whose bounding circle misses the pixel, map the pixel into sprite space,
+  sample the texture array with the level computed per sprite, blend premultiplied.
+- **Parameters that set the period** (`speed`, `wind`, `size`, `count`, `life`) should not be FFmpeg
+  expressions of `t`: positions are `f(t * speed)`, not an integral of the speed, so every particle
+  would jump. `opacity` and `seed` can follow `t`.
+- Positions computed with `sin`/`cos` in f32 differ below a pixel between GPUs; on one machine the
+  output is identical byte for byte.
+
+## Expression parameters
+
+An `expr` parameter (api 2) holds a math expression, given as text like any parameter (`params=` of the
+filter, `sendcmd`, `gpufx run -p`), and evaluated on the GPU wherever the shader calls it, for example
+once per particle:
+
+```json
+{ "name": "path_x", "type": "expr", "vars": ["u", "p", "x0"], "default": "x0 + 0.05*sin(tau*u)" }
+```
+
+```wgsl
+let x = gpufx_expr_path_x(u, p, x0);   // the arguments in the order of `vars`, all f32
+```
+
+- The text may hold numbers (`1`, `0.5`, `2e-3`), the declared variables, the constants `pi`, `tau`,
+  `e`, `+ - * /`, `^` (power), parentheses and the functions `sin cos tan asin acos atan atan2 abs sign
+  min max clamp mix step smoothstep pow sqrt exp log floor ceil round fract`. Nothing else: the text is
+  parsed into a tree and the shader code is generated from the tree, never pasted. At most 1024 bytes,
+  512 terms, 32 levels of nesting.
+- The function returns an `f32`. NaN and infinities (`log(-1)`, `1/0`) come out as **0**, so a shader
+  never sees them (a particle at 0 may still be on screen: pick formulas that stay defined).
+- Variable names are plain identifiers: a letter first, no `__`.
+- A new expression rebuilds the effect's pipelines (a few milliseconds): change it now and then
+  (`sendcmd`), not every frame. It is compiled when it is set, so a text that does not parse or compile
+  is an error there (`sendcmd` reports it) and the last good expression stays; the stream goes on.
+  The default expressions use the pipelines shared by every effect opened from the package.
+- On the FFmpeg command line, commas inside `params='...'` are escaped as for any filter option:
+  `angle=max(90*u\,0)`.
+
 ## Included examples
 
 | Package | Demonstrates |
@@ -218,4 +348,4 @@ void main() {
 | `examples/effects/pixelize-transition`, `zoom-transition`, `fade-grays`, `blinds` | `xfade`-style transitions: pixel break-up, zoom, through grayscale, blinds |
 | `examples/effects/checkerboard`, `push-box`, `push-film`, `photo-collection` | Slideshow transitions after [tanersener/ffmpeg-video-slideshow-scripts](https://github.com/tanersener/ffmpeg-video-slideshow-scripts) (written anew as shaders): growing squares, shrink-push-grow boxes, a procedural perforated film strip, a photo that flies in spinning and lands tilted on the first clip (chain it to stack photos) |
 | `examples/effects/fit` | The screen modes of those scripts (center, crop, stretch, blurred background) for a picture of any size: the first input only sets the frame; **two passes**, a separable box blur with a fixed number of bilinear taps |
-| `examples/effects/falling-maple`, `falling-ginkgo` | Falling red maple / yellow ginkgo leaves: **PNG images in the package** (2×2 atlas), stateless particles (depend only on `t`, so seeking is correct), `var<workgroup>` + `workgroupBarrier`, 4 motion styles (`mode`). Source images and licenses are in `assets/leaves/` |
+| `examples/effects/falling-maple`, `falling-ginkgo` | Falling red maple / yellow ginkgo leaves (api 2): a 2×2 atlas cut into a **texture array** (`grid`) with **mipmaps** and **premultiplied alpha**, the mip level computed per leaf, stateless particles (depend only on `t`, so seeking is correct), `var<workgroup>` + `workgroupBarrier`, 4 motion styles (`mode`) and a custom path (`mode=4`, **`expr` parameters** `path_x`, `path_y`, `angle`). Source images and licenses are in `assets/leaves/` |

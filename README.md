@@ -16,7 +16,7 @@ Video effects powered by **GPU shaders** for FFmpeg, loaded from external **`.zi
 - A package declares **input/output rules** (pixel format, size, same size across inputs);
   a stream that does not match gets a clear error instead of a silent conversion.
 - 36 sample effects: color adjustment, grayscale, sepia, sharpen, pixelate, chroma key,
-  picture-in-picture, fitting a picture over a blurred background, falling maple / ginkgo leaves (PNG images in the package), transitions (crossfade, slide, wipe, circle, clock, collapse, expand,
+  picture-in-picture, fitting a picture over a blurred background, falling maple / ginkgo leaves (texture arrays with mipmaps, custom paths from expressions), transitions (crossfade, slide, wipe, circle, clock, collapse, expand,
   dip to black, dissolve, pixelize, zoom, blinds, checkerboard, push box, film strip, photo collection...)
 
 - **Vulkan frames without copies**: `hwupload` frames (`AV_PIX_FMT_VULKAN`, one image per plane) are processed

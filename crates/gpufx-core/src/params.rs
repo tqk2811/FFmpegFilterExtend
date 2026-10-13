@@ -1,5 +1,6 @@
 //! Parameter values and their uniform-buffer layout (WGSL uniform address space rules).
 
+use crate::expr::Expr;
 use crate::manifest::{ParamDef, ParamType};
 use crate::Error;
 
@@ -8,6 +9,7 @@ impl ParamType {
     fn layout(self) -> (usize, usize) {
         match self {
             ParamType::Float | ParamType::Int | ParamType::Bool => (4, 4),
+            ParamType::Expr => (1, 0),
             ParamType::Vec2 => (8, 8),
             ParamType::Vec3 => (16, 12),
             ParamType::Vec4 | ParamType::Color => (16, 16),
@@ -16,7 +18,7 @@ impl ParamType {
 
     pub(crate) fn wgsl(self) -> &'static str {
         match self {
-            ParamType::Float => "f32",
+            ParamType::Float | ParamType::Expr => "f32",
             ParamType::Int => "i32",
             ParamType::Bool => "u32",
             ParamType::Vec2 => "vec2f",
@@ -27,7 +29,7 @@ impl ParamType {
 
     pub(crate) fn glsl(self) -> &'static str {
         match self {
-            ParamType::Float => "float",
+            ParamType::Float | ParamType::Expr => "float",
             ParamType::Int => "int",
             ParamType::Bool => "uint",
             ParamType::Vec2 => "vec2",
@@ -38,6 +40,7 @@ impl ParamType {
 
     fn components(self) -> usize {
         match self {
+            ParamType::Expr => 0,
             ParamType::Float | ParamType::Int | ParamType::Bool => 1,
             ParamType::Vec2 => 2,
             ParamType::Vec3 => 3,
@@ -56,6 +59,8 @@ pub struct ParamBlock {
     defs: Vec<ParamDef>,
     offsets: Vec<usize>,
     values: Vec<Value>,
+    /// The parsed expression of each `expr` parameter.
+    exprs: Vec<Option<Expr>>,
     size: usize,
 }
 
@@ -71,13 +76,21 @@ impl ParamBlock {
         }
         // Struct size is rounded to its alignment (16 is safe); never zero-sized.
         let size = off.max(4).next_multiple_of(16);
-        let mut block = ParamBlock { defs: defs.to_vec(), offsets, values: Vec::new(), size };
+        let mut block = ParamBlock { defs: defs.to_vec(), offsets, values: Vec::new(), exprs: Vec::new(), size };
         for d in defs {
+            if d.kind == ParamType::Expr {
+                let text = d.default.as_ref().and_then(|j| j.as_str()).unwrap_or("0");
+                let e = Expr::parse(text, &d.vars).map_err(|e| Error::Param(format!("default of `{}`: {e}", d.name)))?;
+                block.exprs.push(Some(e));
+                block.values.push(Value([0.0; 4]));
+                continue;
+            }
             let v = match &d.default {
                 None => Value([0.0; 4]),
                 Some(json) => parse_json(d, json)?,
             };
             block.values.push(clamp(d, v));
+            block.exprs.push(None);
         }
         Ok(block)
     }
@@ -101,14 +114,56 @@ impl ParamBlock {
     /// Sets a parameter from its textual form (`0.5`, `1,0,0`, `#ff8800`, `true`).
     pub fn set_str(&mut self, name: &str, text: &str) -> Result<(), Error> {
         let i = self.index(name).ok_or_else(|| Error::Param(format!("unknown parameter `{name}`")))?;
+        if self.defs[i].kind == ParamType::Expr {
+            let e = Expr::parse(text, &self.defs[i].vars).map_err(|e| Error::Param(format!("`{name}`: {e}")))?;
+            self.exprs[i] = Some(e);
+            return Ok(());
+        }
         let v = parse_str(&self.defs[i], text)?;
         self.values[i] = clamp(&self.defs[i], v);
         Ok(())
     }
 
+    /// The expression of an `expr` parameter.
+    pub fn expr(&self, name: &str) -> Option<&Expr> {
+        self.index(name).and_then(|i| self.exprs[i].as_ref())
+    }
+
+    /// Sets every `expr` parameter back to `texts` (as [`ParamBlock::expr_key`] gave them).
+    pub(crate) fn restore_exprs(&mut self, texts: &[String]) {
+        let slots = self.defs.iter().zip(self.exprs.iter_mut()).filter(|(_, e)| e.is_some());
+        for ((d, e), text) in slots.zip(texts) {
+            if let Ok(parsed) = Expr::parse(text, &d.vars) {
+                *e = Some(parsed);
+            }
+        }
+    }
+
+    /// The texts of every `expr` parameter: when it changes, the shaders must be rebuilt.
+    pub(crate) fn expr_key(&self) -> Vec<&str> {
+        self.exprs.iter().flatten().map(Expr::text).collect()
+    }
+
+    /// The shader functions of the `expr` parameters, in WGSL or GLSL.
+    pub(crate) fn expr_functions(&self, glsl: bool) -> String {
+        let mut s = String::new();
+        if self.exprs.iter().any(Option::is_some) {
+            s.push_str(Expr::helper(glsl));
+        }
+        for (d, e) in self.defs.iter().zip(&self.exprs) {
+            if let Some(e) = e {
+                s.push_str(&if glsl { e.glsl_fn(&d.name, &d.vars) } else { e.wgsl_fn(&d.name, &d.vars) });
+            }
+        }
+        s
+    }
+
     /// Sets a parameter from numbers; missing components are kept from the current value.
     pub fn set(&mut self, name: &str, comps: &[f64]) -> Result<(), Error> {
         let i = self.index(name).ok_or_else(|| Error::Param(format!("unknown parameter `{name}`")))?;
+        if self.defs[i].kind == ParamType::Expr {
+            return Err(Error::Param(format!("`{name}` is an expression parameter: it takes text such as `0.1*sin(u)`, not numbers")));
+        }
         let mut v = self.values[i];
         for (dst, src) in v.0.iter_mut().zip(comps) {
             *dst = *src;
@@ -120,10 +175,10 @@ impl ParamBlock {
     /// WGSL declaration of the struct matching [`ParamBlock::bytes`].
     pub(crate) fn wgsl_struct(&self) -> String {
         let mut s = String::from("struct GpufxParams {\n");
-        if self.defs.is_empty() {
+        if self.uniforms().next().is_none() {
             s.push_str("    _unused: f32,\n");
         }
-        for d in &self.defs {
+        for d in self.uniforms() {
             s.push_str(&format!("    {}: {},\n", d.name, d.kind.wgsl()));
         }
         s.push_str("};\n");
@@ -134,13 +189,18 @@ impl ParamBlock {
     /// for the scalar and vector types used here).
     pub(crate) fn glsl_members(&self) -> String {
         let mut s = String::new();
-        if self.defs.is_empty() {
+        if self.uniforms().next().is_none() {
             s.push_str("    float _unused;\n");
         }
-        for d in &self.defs {
+        for d in self.uniforms() {
             s.push_str(&format!("    {} {};\n", d.kind.glsl(), d.name));
         }
         s
+    }
+
+    /// The parameters held in the uniform block (all but `expr`).
+    fn uniforms(&self) -> impl Iterator<Item = &ParamDef> {
+        self.defs.iter().filter(|d| d.kind != ParamType::Expr)
     }
 
     pub fn bytes(&self) -> Vec<u8> {
@@ -242,7 +302,7 @@ mod tests {
     use super::*;
 
     fn def(name: &str, kind: ParamType) -> ParamDef {
-        ParamDef { name: name.into(), kind, default: None, min: None, max: None, description: String::new() }
+        ParamDef { name: name.into(), kind, default: None, min: None, max: None, description: String::new(), vars: Vec::new() }
     }
 
     #[test]
@@ -273,5 +333,24 @@ mod tests {
         let mut b = ParamBlock::new(&[d]).unwrap();
         b.set_str("x", "5").unwrap();
         assert_eq!(b.get("x").unwrap().0[0], 1.0);
+    }
+
+    #[test]
+    fn expressions_take_no_uniform_space() {
+        let mut e = def("path", ParamType::Expr);
+        e.default = Some(serde_json::json!("u * 2"));
+        e.vars = vec!["u".into()];
+        let defs = [def("a", ParamType::Float), e, def("b", ParamType::Vec2)];
+        let mut b = ParamBlock::new(&defs).unwrap();
+        assert_eq!(b.offsets, vec![0, 4, 8]);
+        assert_eq!(b.size(), 16);
+        assert!(!b.wgsl_struct().contains("path") && !b.glsl_members().contains("path"));
+        assert_eq!(b.expr_key(), ["u * 2"]);
+        b.set_str("path", "sin(u)").unwrap();
+        assert_eq!(b.expr("path").unwrap().eval(&[0.0]), 0.0);
+        assert!(b.set_str("path", "sin(v)").is_err());
+        assert_eq!(b.expr_key(), ["sin(u)"], "a bad expression keeps the last good one");
+        assert!(b.set("path", &[1.0]).unwrap_err().to_string().contains("expression parameter"));
+        assert!(b.expr_functions(false).contains("\nfn gpufx_expr_path(gpufx_v_u: f32) -> f32"));
     }
 }

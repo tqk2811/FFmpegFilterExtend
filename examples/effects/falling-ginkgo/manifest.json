@@ -1,8 +1,8 @@
 {
-  "api": 1,
+  "api": 2,
   "id": "io.github.tqk2811.falling-ginkgo",
   "name": "Falling Ginkgo Leaves",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "Yellow ginkgo leaves falling over the video, spinning down on the wind.",
   "inputs": [
     {
@@ -15,8 +15,8 @@
       "type": "int",
       "default": 0,
       "min": 0,
-      "max": 3,
-      "description": "Motion: 0 tumble (spin round, carried by the wind), 1 pendulum swing, 2 spiral, 3 no swing (wind still drifts)"
+      "max": 4,
+      "description": "Motion: 0 tumble (spin round, carried by the wind), 1 pendulum swing, 2 spiral, 3 no swing (wind still drifts), 4 custom path from path_x, path_y and angle"
     },
     {
       "name": "count",
@@ -92,12 +92,83 @@
       "min": -100000,
       "max": 100000,
       "description": "Seconds added to the time (e.g. to keep the leaves in place after -ss)"
+    },
+    {
+      "name": "life",
+      "type": "float",
+      "default": 6,
+      "min": 0.1,
+      "max": 600,
+      "description": "Mode 4: seconds a leaf lives before it respawns"
+    },
+    {
+      "name": "path_x",
+      "type": "expr",
+      "vars": [
+        "t",
+        "u",
+        "p",
+        "i",
+        "r0",
+        "r1",
+        "r2",
+        "r3",
+        "x0",
+        "w",
+        "h"
+      ],
+      "default": "x0 + 0.05*sin(tau*(0.5*u + r1))",
+      "description": "Mode 4: x of the leaf centre in frame heights (0 left, w right). t time, u seconds since the leaf appeared, p = u/life, i slot, r0..r3 random per leaf, x0 random in 0..w, w frame width and h frame height (1) in frame heights"
+    },
+    {
+      "name": "path_y",
+      "type": "expr",
+      "vars": [
+        "t",
+        "u",
+        "p",
+        "i",
+        "r0",
+        "r1",
+        "r2",
+        "r3",
+        "x0",
+        "w",
+        "h"
+      ],
+      "default": "-0.1 + 1.2*p",
+      "description": "Mode 4: y of the leaf centre in frame heights (0 top, 1 bottom); same variables as path_x"
+    },
+    {
+      "name": "angle",
+      "type": "expr",
+      "vars": [
+        "t",
+        "u",
+        "p",
+        "i",
+        "r0",
+        "r1",
+        "r2",
+        "r3",
+        "x0",
+        "w",
+        "h"
+      ],
+      "default": "r2*360 + 90*u",
+      "description": "Mode 4: rotation in degrees; same variables as path_x"
     }
   ],
   "textures": [
     {
-      "name": "atlas",
-      "path": "textures/leaves.png"
+      "name": "sprites",
+      "path": "textures/leaves.png",
+      "grid": [
+        2,
+        2
+      ],
+      "mipmaps": true,
+      "premultiply": true
     }
   ],
   "passes": [

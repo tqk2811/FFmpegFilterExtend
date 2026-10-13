@@ -101,8 +101,17 @@ Mỗi pass là một **compute shader**. Trước mã của tác giả, runtime 
 | 0 | `globals.size`, `globals.time`, `globals.frame`, `globals.time_int`, `globals.time_frac`, `globals.pixel_aspect` | Kích thước output (px), thời gian (giây, f32), số frame, thời gian chính xác (giây nguyên + phần lẻ), tỉ lệ cạnh của pixel (SAR) |
 | 1 | `params.<tên>` | Tham số từ manifest |
 | 2 | `out_tex` | Texture ghi kết quả (`rgba8unorm`, hoặc `rgba16float` khi chuỗi có frame trên 8 bit) |
-| 3 | `smp` | Sampler tuyến tính, clamp |
-| 4.. | tên input/texture/pass | Texture đọc (`texture_2d<f32>`) |
+| 3 | `smp` | Sampler tuyến tính, clamp, tuyến tính giữa các mức mip |
+| 4.. | tên input/texture/pass | Texture đọc (`texture_2d<f32>`; `texture_2d_array<f32>` cho texture của gói có `layers`/`grid`) |
+
+Sampler `smp` lọc tuyến tính cả giữa các mức mip. Texture của gói (api 2) có thể là texture mảng
+(`layers`, hoặc atlas cắt theo `grid`), có chuỗi mip sinh trên CPU và alpha premultiplied, làm một lần
+khi nạp `Program`; kích thước ảnh được kiểm từ header PNG (4096 mỗi cạnh, 64 M texel mỗi gói, giới hạn
+của device) trước khi giải mã. Input khai `mipmaps` được sinh chuỗi mip trên GPU mỗi frame ngay trong
+texture của nó (slot input, hoặc texture trong pool của hiệu ứng ghi ra nó; texture có mip và không có
+mip nằm ở hai pool riêng), không copy. Tham số `expr` được biên dịch vào shader thành
+`gpufx_expr_<name>`, sinh từ cây đã parse; hiệu ứng có biểu thức khác mặc định tự dựng pipeline riêng khi
+biểu thức đổi (`Program` giữ pipeline mặc định). Xem [EFFECT_FORMAT-vi.md](EFFECT_FORMAT-vi.md).
 
 Kèm hàm tiện ích `gpufx_in_bounds(id)`, `gpufx_uv(id)`, `gpufx_write(id, color)`.
 
@@ -519,7 +528,9 @@ nguyên), chạy `integrate.sh`, rồi configure FFmpeg với:
 ## 10. Lộ trình
 
 1. **M0 – Prototype (PR này):** gói zip, WGSL + GLSL, nhiều pass, nhiều input, texture,
-   tham số + biểu thức, filter FFmpeg 9.0, CLI, 5 hiệu ứng mẫu, test tự động.
+   tham số + biểu thức, filter FFmpeg 9.0, CLI, 5 hiệu ứng mẫu, test tự động. Sau đó (api 2):
+   texture mảng, mipmap (texture của gói và input), texture premultiplied, tham số `expr` biên dịch
+   vào shader; sprite/hạt bằng shader không trạng thái (`falling-*`).
 2. **M1 – Shader:** SPIR-V/HLSL/Slang, wrapper Shadertoy `mainImage`, `#include` thư viện
    shader chung (màu, noise, blend mode), hot-reload khi phát triển, output size khác input
    (crop/zoom/pad), sampler tuỳ chọn (nearest/repeat/mirror).

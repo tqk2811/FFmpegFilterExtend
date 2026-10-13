@@ -1,11 +1,11 @@
-// Falling leaves drawn from a 2x2 atlas over the video.
+// Falling leaves drawn over the video from `sprites`, a texture array cut from a 2x2
+// atlas, with mipmaps and premultiplied alpha made when the package loads.
 //
 // Stateless: every leaf is a pure function of (seed, slot, time), so seeking, dropped
 // frames and split encodes all give the same picture. Each slot replays a fixed period;
 // a new period is a new random leaf ("respawn"), and the switch always happens while the
 // leaf is off screen. Units are frame heights: x in 0..aspect, y in 0..1 (down).
 const MAX_LEAVES: u32 = 256u;
-const GRID: vec2u = vec2u(2u, 2u);      // atlas cells
 const SPEED_JITTER: f32 = 0.3;          // per-leaf fall speed in [1-j, 1+j] * speed
 const TAU: f32 = 6.2831853;
 const TICKS: f32 = 64.0;                // time steps per second of the slot clocks
@@ -14,7 +14,9 @@ struct Leaf {
     pos: vec2f,      // centre
     rot: vec2f,      // cos, sin of the angle
     scale: vec2f,    // sprite size (x shrinks when the leaf turns edge-on)
-    cell: u32,       // atlas cell
+    lod: f32,        // mip level: sprite texels per screen pixel, as a power of two
+    layer: u32,      // which leaf picture
+    alpha: f32,      // fades custom paths in and out
     alive: u32,
 };
 
@@ -47,7 +49,53 @@ fn clock() -> Clock {
     return Clock((globals.time_int + i32(off_s)) * i32(TICKS) + i32(fi), f - fi);
 }
 
+// Sprite size, picture and mip level of a leaf, the same in every mode.
+fn dress(l: ptr<function, Leaf>, i: u32, gen: u32, size: f32) {
+    let pictures = textureNumLayers(sprites);
+    (*l).layer = min(u32(rnd(i, gen, 8u) * f32(pictures)), pictures - 1u);
+    // Compute shaders have no derivatives: the level comes from the drawn size, once per leaf.
+    let texels = f32(textureDimensions(sprites).y);
+    (*l).lod = clamp(log2(texels / max(size * globals.size.y, 1e-3)), 0.0, f32(textureNumLevels(sprites) - 1u));
+}
+
+// Mode 4: the path comes from the path_x, path_y and angle expressions of the command
+// line, compiled into this shader. Every leaf lives `life` seconds, then respawns.
+fn make_custom(i: u32, now: Clock, aspect: f32) -> Leaf {
+    var l: Leaf;
+    l.alive = 0u;
+    let pt = max(i32(ceil(max(params.life, 0.1) * TICKS)), 1);
+    let local = now.ticks + i32(rnd(i, 0xffffffffu, 0u) * f32(pt));
+    var g = local / pt;
+    var r = local - g * pt;
+    if (r < 0) { r += pt; g -= 1; }
+    let gen = bitcast<u32>(g);
+    let u = (f32(r) + now.sub) / TICKS;               // seconds since the leaf appeared
+    let p = u * TICKS / f32(pt);                      // 0..1 over its life
+    let t = globals.time + params.offset;
+    let fi = f32(i);
+    let r0 = rnd(i, gen, 10u);
+    let r1 = rnd(i, gen, 11u);
+    let r2 = rnd(i, gen, 12u);
+    let r3 = rnd(i, gen, 13u);
+    let x0 = rnd(i, gen, 6u) * aspect;
+    let pos = vec2f(gpufx_expr_path_x(t, u, p, fi, r0, r1, r2, r3, x0, aspect, 1.0),
+                    gpufx_expr_path_y(t, u, p, fi, r0, r1, r2, r3, x0, aspect, 1.0));
+    let ang = radians(gpufx_expr_angle(t, u, p, fi, r0, r1, r2, r3, x0, aspect, 1.0));
+    // NaN or far away (log of a negative number, division by zero): not drawn.
+    if (!(abs(pos.x) < 1e4 && abs(pos.y) < 1e4 && abs(ang) < 1e7)) { return l; }
+    let depth = (fi + rnd(i, gen, 3u)) / f32(max(params.count, 1));
+    let size = mix(params.size.x, params.size.y, depth);
+    l.pos = pos;
+    l.rot = vec2f(cos(ang), sin(ang));
+    l.scale = vec2f(size, size);
+    dress(&l, i, gen, size);
+    l.alpha = clamp(min(p / 0.05, (1.0 - p) / 0.15), 0.0, 1.0);   // no pop in or out
+    l.alive = 1u;
+    return l;
+}
+
 fn make_leaf(i: u32, now: Clock, aspect: f32) -> Leaf {
+    if (params.mode == 4) { return make_custom(i, now, aspect); }
     var l: Leaf;
     l.alive = 0u;
     let speed = max(params.speed, 0.01);
@@ -106,30 +154,10 @@ fn make_leaf(i: u32, now: Clock, aspect: f32) -> Leaf {
     l.pos = vec2f(x, -margin + dist * tau / dur);
     l.rot = vec2f(cos(ang), sin(ang));
     l.scale = vec2f(size * turn, size);
-    l.cell = min(u32(rnd(i, gen, 8u) * f32(GRID.x * GRID.y)), GRID.x * GRID.y - 1u);
+    dress(&l, i, gen, size);
+    l.alpha = 1.0;
     l.alive = 1u;
     return l;
-}
-
-// Premultiplied bilinear sample of one atlas cell, never reading the neighbouring cell.
-// Done by hand because textures are straight alpha, which leaves dark fringes when the
-// sampler filters it. uv is 0..1 inside the cell.
-fn sample_cell(cell: u32, uv: vec2f) -> vec4f {
-    let cell_px = vec2f(textureDimensions(atlas)) / vec2f(GRID);
-    let origin = vec2f(f32(cell % GRID.x), f32(cell / GRID.x)) * cell_px;
-    let p = origin + uv * cell_px - 0.5;
-    let lo = vec2i(floor(p));
-    let f = p - floor(p);
-    let mn = vec2i(origin);
-    let mx = vec2i(origin + cell_px) - 1;
-    var acc = vec4f(0.0);
-    for (var k = 0; k < 4; k++) {
-        let o = vec2i(k & 1, k >> 1);
-        let c = textureLoad(atlas, clamp(lo + o, mn, mx), 0);
-        let wt = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1);
-        acc += vec4f(c.rgb * c.a, c.a) * wt;
-    }
-    return acc;
 }
 
 @compute @workgroup_size(8, 8)
@@ -155,7 +183,7 @@ fn main(@builtin(global_invocation_id) id: vec3u, @builtin(local_invocation_inde
         if (dot(d, d) > 0.5 * l.scale.y * l.scale.y) { continue; }  // outside the bounding circle
         let q = vec2f(l.rot.x * d.x + l.rot.y * d.y, -l.rot.y * d.x + l.rot.x * d.y) / l.scale;
         if (any(abs(q) > vec2f(0.5))) { continue; }
-        let c = sample_cell(l.cell, q + 0.5) * params.opacity;
+        let c = textureSampleLevel(sprites, smp, q + 0.5, l.layer, l.lod) * (params.opacity * l.alpha);  // premultiplied
         acc = c + acc * (1.0 - c.a);
         hit = hit || c.a > 0.0;
     }

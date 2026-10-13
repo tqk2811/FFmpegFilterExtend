@@ -3,10 +3,11 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::convert::{texture_2d, Converter};
+use crate::convert::Converter;
 use crate::frame::{Frame, FrameMut};
 use crate::graph::{run, FrameIo, Topology};
 use crate::manifest::{PassDef, ShaderLanguage};
+use crate::mips::MipGen;
 use crate::package::Package;
 use crate::params::ParamBlock;
 use crate::shader_cache::{ShaderCache, ShaderCacheStats};
@@ -60,6 +61,7 @@ pub struct GpuContext {
     pub(crate) queue: wgpu::Queue,
     info: wgpu::AdapterInfo,
     pub(crate) conv: Converter,
+    pub(crate) mips: MipGen,
     shader_cache: Option<ShaderCache>,
     /// Queue family of a shared Vulkan device (see `vulkan.rs`), `None` for devices
     /// gpufx made itself.
@@ -142,6 +144,7 @@ impl GpuContext {
             queue,
             info,
             conv,
+            mips: MipGen::default(),
             shader_cache,
             vulkan_queue_family: None,
             vulkan_submit: std::sync::Mutex::new(false),
@@ -249,6 +252,8 @@ pub(crate) struct Pass {
 
 /// Pass outputs and bind groups of one effect, for one set of input textures.
 pub(crate) struct Bound {
+    /// The input textures, to bind again when the pipelines change.
+    inputs: Vec<wgpu::Texture>,
     size: (u32, u32),
     /// Pass outputs are `rgba16float` (else `rgba8unorm`).
     deep: bool,
@@ -267,7 +272,10 @@ pub struct Program {
     /// Pipelines writing `rgba16float`, compiled the first time a deeper frame comes.
     deep_passes: std::sync::OnceLock<Result<Vec<Pass>, String>>,
     sampler: wgpu::Sampler,
-    textures: HashMap<String, wgpu::Texture>,
+    /// Texts of the `expr` parameter defaults the pipelines were built with.
+    pub(crate) default_exprs: Vec<String>,
+    /// Package textures, viewed with their dimension and every mip level.
+    textures: HashMap<String, wgpu::TextureView>,
 }
 
 impl Program {
@@ -281,38 +289,61 @@ impl Program {
             min_filter: wgpu::FilterMode::Linear,
             address_mode_u: wgpu::AddressMode::ClampToEdge,
             address_mode_v: wgpu::AddressMode::ClampToEdge,
+            // Only textures with mips see this: one-level textures sample as before.
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
 
+        let limits = device.limits();
         let mut textures = HashMap::new();
         for t in &package.manifest.textures {
-            let img = image::load_from_memory(package.file(&t.path)?)
-                .map_err(|e| Error::Package(format!("texture `{}`: {e}", t.path)))?
-                .to_rgba8();
+            let texels = crate::texture::load(&package, t)?;
+            let (w, h, layers) = (texels.width, texels.height, texels.layers);
+            // Checked here, not left to wgpu: its errors go to the device error handler,
+            // which panics by default and would take the host process down.
+            if w > limits.max_texture_dimension_2d || h > limits.max_texture_dimension_2d {
+                return Err(Error::Gpu(format!(
+                    "texture `{}` is {w}x{h}, this device allows {} a side",
+                    t.name, limits.max_texture_dimension_2d
+                )));
+            }
+            if layers > limits.max_texture_array_layers {
+                return Err(Error::Gpu(format!(
+                    "texture `{}` has {layers} layers, this device allows {}",
+                    t.name, limits.max_texture_array_layers
+                )));
+            }
             // Package images stay 8-bit: they are only read.
-            let (w, h) = (img.width(), img.height());
-            let tex = texture_2d(
-                device,
-                &t.name,
-                w,
-                h,
-                wgpu::TextureFormat::Rgba8Unorm,
-                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            );
-            ctx.queue.write_texture(
-                tex.as_image_copy(),
-                img.as_raw(),
-                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(w * 4), rows_per_image: Some(h) },
-                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-            );
-            textures.insert(t.name.clone(), tex);
+            let tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(&t.name),
+                size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: layers },
+                mip_level_count: texels.levels.len() as u32,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            for (level, data) in texels.levels.iter().enumerate() {
+                let (lw, lh) = ((w >> level).max(1), (h >> level).max(1));
+                ctx.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo { mip_level: level as u32, ..tex.as_image_copy() },
+                    data,
+                    wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(lw * 4), rows_per_image: Some(lh) },
+                    wgpu::Extent3d { width: lw, height: lh, depth_or_array_layers: layers },
+                );
+            }
+            let dimension = if texels.array { wgpu::TextureViewDimension::D2Array } else { wgpu::TextureViewDimension::D2 };
+            let view = tex.create_view(&wgpu::TextureViewDescriptor { dimension: Some(dimension), ..Default::default() });
+            textures.insert(t.name.clone(), view);
         }
 
         let mut passes = Vec::new();
         for (i, def) in package.manifest.passes.iter().enumerate() {
             passes.push(compile_pass(&ctx, &package, &params, i, def, false)?);
         }
-        Ok(Arc::new(Program { ctx, package, passes, deep_passes: Default::default(), sampler, textures }))
+        let default_exprs = params.expr_key().into_iter().map(String::from).collect();
+        Ok(Arc::new(Program { ctx, package, passes, deep_passes: Default::default(), sampler, default_exprs, textures }))
     }
 
     /// The pipelines for one work format; the shaders were validated in `new`.
@@ -347,6 +378,16 @@ pub struct Effect {
     pub(crate) bound: Option<Bound>,
     /// Upload and readback buffers of [`Effect::process`]; a graph has its own.
     io: Option<FrameIo>,
+    /// Pipelines built for this effect's own `expr` values, when they differ from the
+    /// package defaults the program was compiled with.
+    own: Option<OwnPasses>,
+}
+
+/// Pipelines of an effect whose `expr` parameters were changed.
+struct OwnPasses {
+    key: Vec<String>,
+    passes: Vec<Pass>,
+    deep_passes: std::sync::OnceLock<Result<Vec<Pass>, String>>,
 }
 
 impl Effect {
@@ -371,7 +412,7 @@ impl Effect {
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
-        Ok(Effect { program, params, globals, params_buf, bound: None, io: None })
+        Ok(Effect { program, params, globals, params_buf, bound: None, io: None, own: None })
     }
 
     pub fn program(&self) -> &Arc<Program> {
@@ -392,6 +433,67 @@ impl Effect {
 
     pub fn input_count(&self) -> usize {
         self.program.package.manifest.inputs.len()
+    }
+
+    /// The pipelines for one work format: the program's, or this effect's own.
+    pub(crate) fn passes(&self, deep: bool) -> Result<&[Pass], Error> {
+        let Some(own) = &self.own else { return self.program.passes(deep) };
+        if !deep {
+            return Ok(&own.passes);
+        }
+        let program = &self.program;
+        let compiled = own.deep_passes.get_or_init(|| {
+            let defs = program.package.manifest.passes.iter().enumerate();
+            defs.map(|(i, def)| compile_pass(&program.ctx, &program.package, &self.params, i, def, true).map_err(|e| e.to_string()))
+                .collect()
+        });
+        compiled.as_deref().map_err(|e| Error::Shader(format!("{} (rgba16float variant): {e}", program.package.manifest.name)))
+    }
+
+    /// Rebuilds the pipelines when an `expr` parameter changed since they were built
+    /// (a few milliseconds: change expressions now and then, not every frame), and binds
+    /// them to the current textures. On failure the expressions go back to those of the
+    /// current pipelines, so the effect keeps running and the failure is not retried.
+    pub(crate) fn sync_exprs(&mut self) -> Result<(), Error> {
+        let res = self.try_sync_exprs();
+        if res.is_err() {
+            let good = self.own.as_ref().map_or(&self.program.default_exprs, |own| &own.key).clone();
+            self.params.restore_exprs(&good);
+        }
+        res
+    }
+
+    fn try_sync_exprs(&mut self) -> Result<(), Error> {
+        let key = self.params.expr_key();
+        let current = self.own.as_ref().map_or(&self.program.default_exprs, |own| &own.key);
+        if key == *current {
+            return Ok(());
+        }
+        let key: Vec<String> = key.into_iter().map(String::from).collect();
+        if key == self.program.default_exprs {
+            // Back to the defaults: the program's pipelines.
+            self.own = None;
+        } else {
+            let program = &self.program;
+            let defs = program.package.manifest.passes.iter().enumerate();
+            let passes = defs
+                .map(|(i, def)| compile_pass(&program.ctx, &program.package, &self.params, i, def, false))
+                .collect::<Result<Vec<_>, _>>()?;
+            let own = OwnPasses { key, passes, deep_passes: Default::default() };
+            let previous = self.own.replace(own);
+            // Bound to deep frames: build that variant now, so binding cannot fail.
+            if self.bound.as_ref().is_some_and(|b| b.deep) {
+                if let Err(e) = self.passes(true).map(|_| ()) {
+                    self.own = previous;
+                    return Err(e);
+                }
+            }
+        }
+        if let Some(bound) = self.bound.take() {
+            let inputs = bound.inputs.clone();
+            self.bind(&inputs.iter().collect::<Vec<_>>(), bound.outputs, bound.size, bound.deep)?;
+        }
+        Ok(())
     }
 
     /// Runs every pass on `inputs` (one per manifest input) and writes the RGBA result
@@ -423,21 +525,28 @@ impl Effect {
     ) -> Result<(), Error> {
         let program = &self.program;
         let device = &program.ctx.device;
-        let passes = program.passes(deep)?;
-        let lookup = |name: &str| -> &wgpu::Texture {
-            if let Some(i) = program.package.manifest.inputs.iter().position(|d| d.name == name) {
-                inputs[i]
+        let passes = self.passes(deep)?;
+        let manifest = &program.package.manifest;
+        // Frame textures are seen at level 0 only, unless the input asks for its mips.
+        let level0 = |t: &wgpu::Texture| t.create_view(&wgpu::TextureViewDescriptor { mip_level_count: Some(1), ..Default::default() });
+        let lookup = |name: &str| -> wgpu::TextureView {
+            if let Some(i) = manifest.inputs.iter().position(|d| d.name == name) {
+                if manifest.inputs[i].mipmaps {
+                    inputs[i].create_view(&Default::default())
+                } else {
+                    level0(inputs[i])
+                }
             } else if let Some(t) = program.textures.get(name) {
-                t
+                t.clone()
             } else {
-                &outputs[name]
+                level0(&outputs[name])
             }
         };
         let bind_groups = passes
             .iter()
             .map(|pass| {
-                let views: Vec<wgpu::TextureView> = pass.inputs.iter().map(|n| lookup(n).create_view(&Default::default())).collect();
-                let out_view = outputs[&pass.output].create_view(&Default::default());
+                let views: Vec<wgpu::TextureView> = pass.inputs.iter().map(|n| lookup(n)).collect();
+                let out_view = level0(&outputs[&pass.output]);
                 let mut entries = vec![
                     wgpu::BindGroupEntry { binding: 0, resource: self.globals.as_entire_binding() },
                     wgpu::BindGroupEntry { binding: 1, resource: self.params_buf.as_entire_binding() },
@@ -453,7 +562,8 @@ impl Effect {
                 device.create_bind_group(&wgpu::BindGroupDescriptor { label: Some("gpufx pass"), layout: &pass.layout, entries: &entries })
             })
             .collect();
-        self.bound = Some(Bound { size, deep, outputs, bind_groups });
+        let inputs = inputs.iter().map(|&t| t.clone()).collect();
+        self.bound = Some(Bound { inputs, size, deep, outputs, bind_groups });
         Ok(())
     }
 
@@ -469,7 +579,7 @@ impl Effect {
         queue.write_buffer(&self.globals, 0, &globals_bytes(bound.size, info));
         queue.write_buffer(&self.params_buf, 0, &self.params.bytes());
         let (w, h) = bound.size;
-        let passes = self.program.passes(bound.deep).expect("compiled in bind");
+        let passes = self.passes(bound.deep).expect("compiled in bind");
         for (pass, bg) in passes.iter().zip(&bound.bind_groups) {
             cpass.set_pipeline(&pass.pipeline);
             cpass.set_bind_group(0, bg, &[]);
@@ -479,13 +589,14 @@ impl Effect {
 }
 
 /// WGSL declarations prepended to every pass shader.
-fn prelude(params: &ParamBlock, inputs: &[String], deep: bool) -> String {
+fn prelude(params: &ParamBlock, inputs: &[String], arrays: &[bool], deep: bool) -> String {
     let mut s = String::from(
         "// ---- generated by gpufx ----\n\
          struct GpufxGlobals {\n    size: vec2f,\n    time: f32,\n    frame: u32,\n    \
          time_int: i32,\n    time_frac: f32,\n    pixel_aspect: f32,\n    gpufx_reserved: f32,\n};\n",
     );
     s.push_str(&params.wgsl_struct());
+    s.push_str(&params.expr_functions(false));
     s.push_str(
         "@group(0) @binding(0) var<uniform> globals: GpufxGlobals;\n\
          @group(0) @binding(1) var<uniform> params: GpufxParams;\n\
@@ -497,7 +608,8 @@ fn prelude(params: &ParamBlock, inputs: &[String], deep: bool) -> String {
          @group(0) @binding(3) var smp: sampler;\n",
     );
     for (i, name) in inputs.iter().enumerate() {
-        s.push_str(&format!("@group(0) @binding({}) var {name}: texture_2d<f32>;\n", FIRST_TEXTURE_BINDING + i as u32));
+        let ty = if arrays[i] { "texture_2d_array" } else { "texture_2d" };
+        s.push_str(&format!("@group(0) @binding({}) var {name}: {ty}<f32>;\n", FIRST_TEXTURE_BINDING + i as u32));
     }
     s.push_str(
         "fn gpufx_in_bounds(id: vec3u) -> bool { return f32(id.x) < globals.size.x && f32(id.y) < globals.size.y; }\n\
@@ -510,7 +622,7 @@ fn prelude(params: &ParamBlock, inputs: &[String], deep: bool) -> String {
 
 /// Inserts the GLSL prelude after the author's `#version` line (adding `#version 450`
 /// when there is none), so their line numbers stay readable in errors.
-fn glsl_with_prelude(params: &ParamBlock, inputs: &[String], user: &str, deep: bool) -> String {
+fn glsl_with_prelude(params: &ParamBlock, inputs: &[String], arrays: &[bool], user: &str, deep: bool) -> String {
     let (version, body) = match user.trim_start().strip_prefix("#version") {
         Some(rest) => {
             let rest_at = user.len() - rest.len();
@@ -530,8 +642,10 @@ fn glsl_with_prelude(params: &ParamBlock, inputs: &[String], user: &str, deep: b
         params.glsl_members(),
         if deep { "rgba16f" } else { "rgba8" }
     ));
+    s.push_str(&params.expr_functions(true));
     for (i, name) in inputs.iter().enumerate() {
-        s.push_str(&format!("layout(set = 0, binding = {}) uniform texture2D {name};\n", FIRST_TEXTURE_BINDING + i as u32));
+        let ty = if arrays[i] { "texture2DArray" } else { "texture2D" };
+        s.push_str(&format!("layout(set = 0, binding = {}) uniform {ty} {name};\n", FIRST_TEXTURE_BINDING + i as u32));
     }
     s.push_str(
         "bool gpufx_in_bounds(uvec3 id) { return float(id.x) < globals.size.x && float(id.y) < globals.size.y; }\n\
@@ -548,15 +662,16 @@ fn compile_pass(ctx: &GpuContext, pkg: &Package, params: &ParamBlock, index: usi
         Some(v) => v.clone(),
         None => pkg.manifest.inputs.iter().map(|i| i.name.clone()).chain(pkg.manifest.textures.iter().map(|t| t.name.clone())).collect(),
     };
+    let arrays: Vec<bool> = inputs.iter().map(|n| pkg.manifest.textures.iter().any(|t| t.name == *n && t.is_array())).collect();
     let (module, source) = match def.language() {
         ShaderLanguage::Wgsl => {
-            let source = format!("{}{}", prelude(params, &inputs, deep), pkg.text(&def.shader)?);
+            let source = format!("{}{}", prelude(params, &inputs, &arrays, deep), pkg.text(&def.shader)?);
             let module = naga::front::wgsl::parse_str(&source)
                 .map_err(|e| Error::Shader(format!("{}: {}", def.shader, e.emit_to_string(&source))))?;
             (module, source)
         }
         ShaderLanguage::Glsl => {
-            let source = glsl_with_prelude(params, &inputs, pkg.text(&def.shader)?, deep);
+            let source = glsl_with_prelude(params, &inputs, &arrays, pkg.text(&def.shader)?, deep);
             let module = naga::front::glsl::Frontend::default()
                 .parse(&naga::front::glsl::Options::from(naga::ShaderStage::Compute), &source)
                 .map_err(|e| Error::Shader(format!("{}: {}", def.shader, e.emit_to_string(&source))))?;
@@ -603,13 +718,13 @@ fn compile_pass(ctx: &GpuContext, pkg: &Package, params: &ParamBlock, index: usi
             count: None,
         },
     ];
-    for i in 0..inputs.len() {
+    for (i, &array) in arrays.iter().enumerate() {
         entries.push(wgpu::BindGroupLayoutEntry {
             binding: FIRST_TEXTURE_BINDING + i as u32,
             visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Texture {
                 sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                view_dimension: wgpu::TextureViewDimension::D2,
+                view_dimension: if array { wgpu::TextureViewDimension::D2Array } else { wgpu::TextureViewDimension::D2 },
                 multisampled: false,
             },
             count: None,

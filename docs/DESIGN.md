@@ -102,8 +102,17 @@ Each pass is a **compute shader**. Before the author's code, the runtime inserts
 | 0 | `globals.size`, `globals.time`, `globals.frame`, `globals.time_int`, `globals.time_frac`, `globals.pixel_aspect` | Output size (px), time (seconds, f32), frame number, exact time (whole seconds + fraction), pixel aspect ratio (SAR) |
 | 1 | `params.<name>` | Parameters from the manifest |
 | 2 | `out_tex` | Texture the result is written to (`rgba8unorm`, or `rgba16float` when a frame of the chain has more than 8 bits) |
-| 3 | `smp` | Linear sampler, clamp |
-| 4.. | input/texture/pass names | Textures to read (`texture_2d<f32>`) |
+| 3 | `smp` | Linear sampler, clamp, linear between mip levels |
+| 4.. | input/texture/pass names | Textures to read (`texture_2d<f32>`; `texture_2d_array<f32>` for package textures with `layers`/`grid`) |
+
+Package textures (api 2) can be texture arrays (`layers`, or an atlas cut by `grid`), with mip chains made
+on the CPU and premultiplied alpha, all once when the `Program` loads; image sizes are checked from the PNG
+headers (4096 a side, 64 M texels per package, the device limits) before anything is decoded. An input with
+`mipmaps` gets its mip chain on the GPU every frame, in its own texture (the input slot or the pooled
+texture of the effect writing it; pooled textures with and without mips are kept apart), so nothing is
+copied. An `expr` parameter is compiled into the shaders as `gpufx_expr_<name>`, generated from a parsed
+tree; an effect whose expressions differ from the defaults builds its own pipelines when they change
+(the `Program` keeps the default ones). See [EFFECT_FORMAT.md](EFFECT_FORMAT.md).
 
 Helper functions `gpufx_in_bounds(id)`, `gpufx_uv(id)`, `gpufx_write(id, color)` are included.
 
@@ -529,7 +538,9 @@ untouched), runs `integrate.sh`, then configures FFmpeg with:
 ## 10. Roadmap
 
 1. **M0 – Prototype (this PR):** zip packages, WGSL + GLSL, multiple passes, multiple inputs, textures,
-   parameters + expressions, FFmpeg 9.0 filter, CLI, 5 sample effects, automated tests.
+   parameters + expressions, FFmpeg 9.0 filter, CLI, 5 sample effects, automated tests. Since then
+   (api 2): texture arrays, mipmaps (package textures and inputs), premultiplied textures, `expr`
+   parameters compiled into the shaders; sprites/particles as stateless shaders (`falling-*`).
 2. **M1 – Shaders:** SPIR-V/HLSL/Slang, a Shadertoy `mainImage` wrapper, `#include` of shared shader
    libraries (color, noise, blend modes), hot-reload during development, output size different from the input
    (crop/zoom/pad), optional samplers (nearest/repeat/mirror).

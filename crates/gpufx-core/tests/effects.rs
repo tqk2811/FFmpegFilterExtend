@@ -158,6 +158,47 @@ fn falling_leaves_depend_only_on_time() {
         // whatever the frame counter says.
         let mut seeked = open();
         assert_eq!(run(&mut seeked, 3.0, 0), frames[12], "{name}: seek");
+        // Playing backwards draws the same frames.
+        let mut reverse = open();
+        for k in (0..=12u64).rev() {
+            assert_eq!(run(&mut reverse, k as f64 * 0.25, 12 - k), frames[k as usize], "{name}: reverse at frame {k}");
+        }
+        // Steady density: the share of covered pixels stays in a band, at the start and
+        // deep into the clip (catches leaves falling all at once, or never respawning).
+        for t in [0.0, 7.3, 61.7, 3600.0] {
+            let frame = run(&mut reverse, t, 0);
+            let covered = frame.chunks(4).zip(src.chunks(4)).filter(|(a, b)| a != b).count() as f64 / (w * h) as f64;
+            assert!((0.02..=0.30).contains(&covered), "{name}: {:.1}% covered at t = {t}", covered * 100.0);
+        }
+        reverse.params_mut().set_str("seed", "2").unwrap();
+        assert_ne!(run(&mut reverse, 3.0, 0), frames[12], "{name}: another seed, other leaves");
+        reverse.params_mut().set_str("opacity", "0").unwrap();
+        assert_eq!(run(&mut reverse, 3.0, 0), src, "{name}: opacity 0 leaves the frame untouched");
+        // Mode 4: paths from expressions, compiled into the shader when they change.
+        let mut custom = open();
+        custom.params_mut().set_str("mode", "4").unwrap();
+        let first = run(&mut custom, 2.0, 0);
+        assert_ne!(first, src, "{name}: custom paths draw leaves");
+        assert_eq!(run(&mut open_mode4(&open), 2.0, 0), first, "{name}: custom paths are stateless");
+        custom.params_mut().set_str("path_x", "x0 + 0.3*sin(u)").unwrap();
+        let moved = run(&mut custom, 2.0, 0);
+        assert_ne!(moved, first, "{name}: a new path_x moves the leaves");
+        // Everything above the frame: nothing drawn. NaN paths are dropped.
+        custom.params_mut().set_str("path_y", "-5").unwrap();
+        assert_eq!(run(&mut custom, 2.0, 0), src, "{name}: leaves off the frame");
+        custom.params_mut().set_str("path_y", "0.5").unwrap();
+        let middle = run(&mut custom, 2.0, 0);
+        custom.params_mut().set_str("path_y", "0.5 + log(-1)").unwrap();
+        assert_ne!(run(&mut custom, 2.0, 0), middle, "{name}: NaN reaches the shader as 0");
+        custom.params_mut().set_str("path_y", "0").unwrap();
+        let top = run(&mut custom, 2.0, 0);
+        custom.params_mut().set_str("path_y", "log(-1)").unwrap();
+        assert_eq!(run(&mut custom, 2.0, 0), top, "{name}: NaN positions become 0");
+        assert!(custom.params_mut().set_str("path_y", "textureLoad(src)").is_err(), "{name}: only math");
+        // Back to the default texts: the shared pipelines again, same picture.
+        custom.params_mut().set_str("path_y", "-0.1 + 1.2*p").unwrap();
+        custom.params_mut().set_str("path_x", "x0 + 0.05*sin(tau*(0.5*u + r1))").unwrap();
+        assert_eq!(run(&mut custom, 2.0, 0), first, "{name}: default paths again");
         assert_ne!(frames[0], frames[1], "{name}: leaves must move");
         assert!(frames.iter().all(|f| f != &src), "{name}: leaves must be visible");
         // Eleven days in, f32 seconds would step by 0.0625 s and repeat frames at 30 fps:
@@ -186,6 +227,12 @@ fn falling_leaves_depend_only_on_time() {
             .unwrap();
         assert_eq!(out, clear, "{name}: transparent pixels pass through");
     }
+}
+
+fn open_mode4(open: &dyn Fn() -> Effect) -> Effect {
+    let mut fx = open();
+    fx.params_mut().set_str("mode", "4").unwrap();
+    fx
 }
 
 #[test]

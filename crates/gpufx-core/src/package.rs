@@ -39,8 +39,12 @@ impl Package {
             pkg.file(&pass.shader)?;
         }
         for tex in &pkg.manifest.textures {
-            pkg.file(&tex.path)?;
+            for f in tex.files() {
+                pkg.file(f)?;
+            }
         }
+        // Image sizes come from the headers: nothing is decoded until a device loads it.
+        crate::texture::check_package(&pkg)?;
         Ok(pkg)
     }
 

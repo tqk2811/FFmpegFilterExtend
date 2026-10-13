@@ -5,13 +5,16 @@
 mod convert;
 #[cfg(windows)]
 pub mod d3d12;
+pub mod expr;
 pub mod frame;
 pub mod graph;
 pub mod manifest;
+mod mips;
 pub mod package;
 pub mod params;
 pub mod runtime;
 mod shader_cache;
+mod texture;
 #[cfg(any(windows, all(unix, not(target_vendor = "apple"))))]
 pub mod vulkan;
 

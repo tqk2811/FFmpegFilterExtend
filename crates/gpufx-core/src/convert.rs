@@ -244,10 +244,23 @@ pub(crate) fn texture_2d(
     format: wgpu::TextureFormat,
     usage: wgpu::TextureUsages,
 ) -> wgpu::Texture {
+    texture_2d_mips(device, label, w, h, format, usage, false)
+}
+
+/// [`texture_2d`], with a full mip chain when `mips` (filled by [`crate::mips`]).
+pub(crate) fn texture_2d_mips(
+    device: &wgpu::Device,
+    label: &str,
+    w: u32,
+    h: u32,
+    format: wgpu::TextureFormat,
+    usage: wgpu::TextureUsages,
+    mips: bool,
+) -> wgpu::Texture {
     device.create_texture(&wgpu::TextureDescriptor {
         label: Some(label),
         size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
-        mip_level_count: 1,
+        mip_level_count: if mips { crate::texture::mip_levels(w, h) } else { 1 },
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
@@ -355,12 +368,14 @@ pub(crate) struct InputSlot {
 }
 
 impl InputSlot {
-    /// `deep`: convert into `rgba16float` rather than `rgba8unorm`.
-    pub fn new(device: &wgpu::Device, conv: &Converter, name: &str, key: InputKey, deep: bool) -> Self {
+    /// `deep`: convert into `rgba16float` rather than `rgba8unorm`. `mips`: the texture
+    /// effects read has a mip chain (filled by the caller after `encode`).
+    pub fn new(device: &wgpu::Device, conv: &Converter, name: &str, key: InputKey, deep: bool, mips: bool) -> Self {
         let (w, h) = (key.width, key.height);
         let copy = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
         if key.direct {
-            let tex = texture_2d(device, name, w, h, wgpu::TextureFormat::Rgba8Unorm, copy);
+            let usage = if mips { copy | wgpu::TextureUsages::STORAGE_BINDING } else { copy };
+            let tex = texture_2d_mips(device, name, w, h, wgpu::TextureFormat::Rgba8Unorm, usage, mips);
             return InputSlot { key, planes: vec![tex.clone()], texture: tex, uniform: None, bind_group: None, deep };
         }
         let planes: Vec<wgpu::Texture> = if key.gpu {
@@ -373,8 +388,8 @@ impl InputSlot {
                 })
                 .collect()
         };
-        let texture =
-            texture_2d(device, name, w, h, deep_format(deep), wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING);
+        let usage = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
+        let texture = texture_2d_mips(device, name, w, h, deep_format(deep), usage, mips);
         let mut slot =
             InputSlot { key, planes, texture, uniform: Some(uniform_buffer(device, "gpufx convert in")), bind_group: None, deep };
         if !key.gpu {
@@ -387,7 +402,7 @@ impl InputSlot {
     /// Makes the conversion pass read `planes`.
     fn bind_planes(&mut self, device: &wgpu::Device, conv: &Converter, planes: &[wgpu::Texture]) {
         let buf = self.uniform.as_ref().expect("a conversion pass");
-        let dst = self.texture.create_view(&Default::default());
+        let dst = self.texture.create_view(&wgpu::TextureViewDescriptor { mip_level_count: Some(1), ..Default::default() });
         let views: Vec<wgpu::TextureView> = planes.iter().map(|t| t.create_view(&Default::default())).collect();
         let mut entries = vec![
             wgpu::BindGroupEntry { binding: 0, resource: buf.as_entire_binding() },
@@ -409,11 +424,12 @@ impl InputSlot {
         self.planes.len() + self.uniform.is_some() as usize
     }
 
-    /// Bytes of those textures.
+    /// Bytes of those textures, mip chains included.
     pub fn texture_bytes(&self) -> u64 {
         let size = |t: &wgpu::Texture| {
             let bytes = t.format().block_copy_size(None).unwrap_or(4) as u64;
-            t.width() as u64 * t.height() as u64 * bytes
+            let mips = if t.mip_level_count() > 1 { crate::mips::chain_bytes(t.width(), t.height(), bytes) } else { 0 };
+            t.width() as u64 * t.height() as u64 * bytes + mips
         };
         self.planes.iter().map(size).sum::<u64>() + if self.uniform.is_some() { size(&self.texture) } else { 0 }
     }
@@ -482,7 +498,7 @@ impl GpuOutputSlot {
         color: &ColorInfo,
     ) -> Result<(), Error> {
         let (format, w, h) = self.key;
-        let view = source.create_view(&Default::default());
+        let view = source.create_view(&wgpu::TextureViewDescriptor { mip_level_count: Some(1), ..Default::default() });
         self.bind_groups.clear();
         for (i, (buf, plane)) in self.uniforms.iter().zip(planes).enumerate() {
             queue.write_buffer(buf, 0, &uniform(format, w, h, color, Some(i)));
@@ -572,7 +588,7 @@ impl OutputSlot {
 
     /// Makes the passes read `source`: the RGBA result, or the input when `input`.
     pub fn bind(&mut self, device: &wgpu::Device, conv: &Converter, source: &wgpu::Texture, input: bool) {
-        let view = source.create_view(&Default::default());
+        let view = source.create_view(&wgpu::TextureViewDescriptor { mip_level_count: Some(1), ..Default::default() });
         self.bind_groups[input as usize] = Some(
             self.planes
                 .iter()

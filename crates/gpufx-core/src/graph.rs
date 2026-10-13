@@ -4,9 +4,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::convert::{read_outputs, readback_buffer, texture_2d, work_format, GpuOutputSlot, InputKey, InputSlot, OutputSlot};
+use crate::convert::{read_outputs, readback_buffer, texture_2d_mips, work_format, GpuOutputSlot, InputKey, InputSlot, OutputSlot};
 use crate::frame::{Frame, FrameMut, GpuFrame, PixelFormat};
 use crate::manifest::StreamInfo;
+use crate::mips::MipChain;
 use crate::params::ParamBlock;
 use crate::runtime::{Effect, FrameInfo, Image, ImageMut};
 use crate::Error;
@@ -83,25 +84,50 @@ pub(crate) struct FrameIo {
     gpu_outputs: Vec<GpuOutputSlot>,
     readback: Option<wgpu::Buffer>,
     memory: MemoryStats,
+    /// Mip chains of the input pads and effect outputs an effect input wants mipmapped.
+    input_mips: Vec<Option<MipChain>>,
+    node_mips: Vec<Option<MipChain>>,
+}
+
+/// Which input pads and effect outputs some effect reads through a `mipmaps` input.
+fn mip_sources(effects: &[Effect], topo: &Topology) -> (Vec<bool>, Vec<bool>) {
+    let mut pads = vec![false; topo.nb_inputs];
+    let mut nodes = vec![false; effects.len()];
+    for (k, sources) in topo.node_inputs.iter().enumerate() {
+        for (def, src) in effects[k].package().manifest.inputs.iter().zip(sources) {
+            if def.mipmaps {
+                match *src {
+                    Source::Input(i) => pads[i] = true,
+                    Source::Node(j) => nodes[j] = true,
+                }
+            }
+        }
+    }
+    (pads, nodes)
 }
 
 /// Which pooled texture each pass output gets, and the size of each pooled texture.
 struct Plan {
     assign: Vec<HashMap<String, usize>>,
-    slots: Vec<(u32, u32)>,
+    /// Size of each pooled texture, and whether it has a mip chain.
+    slots: Vec<(u32, u32, bool)>,
 }
 
 impl Plan {
     fn bytes(&self, deep: bool) -> u64 {
         let texel = if deep { 8 } else { 4 };
-        self.slots.iter().map(|&(w, h)| w as u64 * h as u64 * texel).sum()
+        self.slots
+            .iter()
+            .map(|&(w, h, mips)| w as u64 * h as u64 * texel + if mips { crate::mips::chain_bytes(w, h, texel) } else { 0 })
+            .sum()
     }
 }
 
 /// Assigns the pass outputs of every effect to pooled textures: a texture goes back to
 /// the pool (per size) after the last pass that reads it, counted over the whole graph
-/// in execution order. Graph outputs stay alive until they are read back.
-fn plan(effects: &[Effect], topo: &Topology, sizes: &[(u32, u32)], deep: bool) -> Result<Plan, Error> {
+/// in execution order. Graph outputs stay alive until they are read back. The outputs of
+/// the effects in `mips` get pooled textures with a mip chain, kept apart from the others.
+fn plan(effects: &[Effect], topo: &Topology, sizes: &[(u32, u32)], mips: &[bool], deep: bool) -> Result<Plan, Error> {
     let finals: Vec<&str> =
         effects.iter().map(|fx| fx.program.package.manifest.passes.last().expect("validated").output.as_str()).collect();
     let mut last: HashMap<(usize, &str), usize> = HashMap::new();
@@ -112,7 +138,7 @@ fn plan(effects: &[Effect], topo: &Topology, sizes: &[(u32, u32)], deep: bool) -
     let mut g = 0;
     for &k in &topo.order {
         let m = &effects[k].program.package.manifest;
-        let passes = effects[k].program.passes(deep)?;
+        let passes = effects[k].passes(deep)?;
         for pass in passes {
             for name in &pass.inputs {
                 if let Some(p) = passes.iter().find(|p| p.output == *name) {
@@ -135,13 +161,13 @@ fn plan(effects: &[Effect], topo: &Topology, sizes: &[(u32, u32)], deep: bool) -
         }
     }
 
-    let mut free: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    let mut free: HashMap<(u32, u32, bool), Vec<usize>> = HashMap::new();
     let mut live: Vec<(usize, usize)> = Vec::new();
-    let mut slots: Vec<(u32, u32)> = Vec::new();
+    let mut slots: Vec<(u32, u32, bool)> = Vec::new();
     let mut assign = vec![HashMap::new(); effects.len()];
     let mut g = 0;
     for &k in &topo.order {
-        for pass in effects[k].program.passes(deep)? {
+        for pass in effects[k].passes(deep)? {
             live.retain(|&(end, slot)| {
                 if end < g {
                     free.entry(slots[slot]).or_default().push(slot);
@@ -149,8 +175,9 @@ fn plan(effects: &[Effect], topo: &Topology, sizes: &[(u32, u32)], deep: bool) -
                 end >= g
             });
             if !assign[k].contains_key(&pass.output) {
-                let slot = free.get_mut(&sizes[k]).and_then(|f| f.pop()).unwrap_or_else(|| {
-                    slots.push(sizes[k]);
+                let key = (sizes[k].0, sizes[k].1, mips[k] && pass.output == finals[k]);
+                let slot = free.get_mut(&key).and_then(|f| f.pop()).unwrap_or_else(|| {
+                    slots.push(key);
                     slots.len() - 1
                 });
                 live.push((last[&(k, pass.output.as_str())], slot));
@@ -267,8 +294,11 @@ fn prepare(
         check_nodes(effects, topo, None, &streams)?;
         let pads: Vec<(u32, u32)> = keys.iter().map(|k| (k.width, k.height)).collect();
         let sizes = topo.node_sizes(&pads);
-        let plan = plan(effects, topo, &sizes, deep)?;
+        let (pad_mips, node_mips) = mip_sources(effects, topo);
+        let plan = plan(effects, topo, &sizes, &node_mips, deep)?;
         // Drop the old textures before making new ones.
+        io.input_mips.clear();
+        io.node_mips.clear();
         io.inputs.clear();
         io.outputs.clear();
         io.gpu_outputs.clear();
@@ -278,16 +308,22 @@ fn prepare(
         }
         io.deep = deep;
         io.allocations += 1;
-        io.inputs = keys.iter().enumerate().map(|(i, &k)| InputSlot::new(device, conv, &format!("gpufx input {i}"), k, deep)).collect();
+        io.inputs = keys
+            .iter()
+            .enumerate()
+            .map(|(i, &k)| InputSlot::new(device, conv, &format!("gpufx input {i}"), k, deep, pad_mips[i]))
+            .collect();
         let format = if deep { wgpu::TextureFormat::Rgba16Float } else { wgpu::TextureFormat::Rgba8Unorm };
         let usage = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
         let pool: Vec<wgpu::Texture> =
-            plan.slots.iter().map(|&(w, h)| texture_2d(device, "gpufx pass output", w, h, format, usage)).collect();
+            plan.slots.iter().map(|&(w, h, mips)| texture_2d_mips(device, "gpufx pass output", w, h, format, usage, mips)).collect();
         for &k in &topo.order {
             let sources: Vec<wgpu::Texture> = topo.node_inputs[k].iter().map(|&s| source_texture(effects, &io.inputs, s)).collect();
             let outputs = plan.assign[k].iter().map(|(name, &slot)| (name.clone(), pool[slot].clone())).collect();
             effects[k].bind(&sources.iter().collect::<Vec<_>>(), outputs, sizes[k], deep)?;
         }
+        io.input_mips = io.inputs.iter().zip(&pad_mips).map(|(slot, &m)| m.then(|| ctx.mips.chain(device, &slot.texture))).collect();
+        io.node_mips = (0..effects.len()).map(|k| node_mips[k].then(|| ctx.mips.chain(device, effects[k].output()))).collect();
         io.memory = MemoryStats {
             pass_textures: plan.slots.len(),
             pass_texture_bytes: plan.bytes(deep),
@@ -317,6 +353,14 @@ pub(crate) fn run(
     info: Option<&FrameInfo>,
 ) -> Result<(), Error> {
     let bypass = info.is_none();
+    if !bypass {
+        for fx in effects.iter_mut() {
+            // Already reported when set through a graph; the last good shaders keep running.
+            if let Err(e) = fx.sync_exprs() {
+                eprintln!("gpufx: {e}; keeping the previous expressions");
+            }
+        }
+    }
     for (i, f) in inputs.iter().enumerate() {
         f.check(&format!("input {i}"))?;
     }
@@ -359,14 +403,7 @@ pub(crate) fn run(
     let mut enc = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gpufx") });
     {
         let mut cpass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("gpufx"), timestamp_writes: None });
-        for slot in &io.inputs[..inputs.len()] {
-            slot.encode(conv, &mut cpass);
-        }
-        if let Some(info) = info {
-            for &k in &topo.order {
-                effects[k].encode(&mut cpass, info);
-            }
-        }
+        encode_effects(effects, topo, io, inputs.len(), info, &mut cpass);
         for (slot, out) in io.outputs.iter().zip(outs.iter()) {
             slot.encode(queue, conv, &mut cpass, &out.color, bypass);
         }
@@ -377,6 +414,33 @@ pub(crate) fn run(
     }
     queue.submit([enc.finish()]);
     read_outputs(device, readback, &io.outputs, outs)
+}
+
+/// Encodes the conversion of the first `given` inputs and, unless bypassed (no `info`),
+/// every effect in order, each mip chain right after the texture it is made from.
+fn encode_effects(
+    effects: &[Effect],
+    topo: &Topology,
+    io: &FrameIo,
+    given: usize,
+    info: Option<&FrameInfo>,
+    cpass: &mut wgpu::ComputePass,
+) {
+    let ctx = &effects[0].program.ctx;
+    for (i, slot) in io.inputs[..given].iter().enumerate() {
+        slot.encode(&ctx.conv, cpass);
+        if let (Some(Some(chain)), Some(_)) = (io.input_mips.get(i), info) {
+            chain.encode(&ctx.device, &ctx.mips, cpass);
+        }
+    }
+    if let Some(info) = info {
+        for &k in &topo.order {
+            effects[k].encode(cpass, info);
+            if let Some(Some(chain)) = io.node_mips.get(k) {
+                chain.encode(&ctx.device, &ctx.mips, cpass);
+            }
+        }
+    }
 }
 
 /// [`run`] for frames already on the GPU: the conversion passes read the input plane
@@ -393,6 +457,14 @@ pub(crate) fn run_gpu(
     enc: &mut wgpu::CommandEncoder,
 ) -> Result<(), Error> {
     let bypass = info.is_none();
+    if !bypass {
+        for fx in effects.iter_mut() {
+            // Already reported when set through a graph; the last good shaders keep running.
+            if let Err(e) = fx.sync_exprs() {
+                eprintln!("gpufx: {e}; keeping the previous expressions");
+            }
+        }
+    }
     for (i, f) in inputs.iter().enumerate() {
         f.check(&format!("input {i}"), false)?;
     }
@@ -421,14 +493,7 @@ pub(crate) fn run_gpu(
         io.gpu_outputs[k].bind(device, queue, conv, &tex, &out.planes, &out.color)?;
     }
     let mut cpass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("gpufx"), timestamp_writes: None });
-    for slot in &io.inputs[..inputs.len()] {
-        slot.encode(conv, &mut cpass);
-    }
-    if let Some(info) = info {
-        for &k in &topo.order {
-            effects[k].encode(&mut cpass, info);
-        }
-    }
+    encode_effects(effects, topo, io, inputs.len(), info, &mut cpass);
     for slot in &io.gpu_outputs {
         slot.encode(conv, &mut cpass)?;
     }
@@ -936,8 +1001,15 @@ impl EffectGraph {
 
     /// Sets a parameter (any name `find_param` takes) from text.
     pub fn set_param_str(&mut self, name: &str, text: &str) -> Result<(), Error> {
-        let (block, name) = self.param(self.find_param(name)?)?;
-        block.set_str(&name, text)
+        let index = self.find_param(name)?;
+        let (block, name) = self.param(index)?;
+        block.set_str(&name, text)?;
+        // An expression is compiled now, so a bad one fails here (sendcmd) and not mid-stream.
+        if block.expr(&name).is_some() {
+            let k = self.params[index].0;
+            self.effects[k].sync_exprs()?;
+        }
+        Ok(())
     }
 
     /// Sets the first components of a parameter (any name `find_param` takes).
@@ -963,7 +1035,8 @@ impl EffectGraph {
         if sizes.len() != self.topo.nb_inputs {
             return Err(Error::Unsupported(format!("the {} takes {} input(s), got {}", self.what, self.topo.nb_inputs, sizes.len())));
         }
-        let plan = plan(&self.effects, &self.topo, &self.topo.node_sizes(sizes), deep)?;
+        let (_, mips) = mip_sources(&self.effects, &self.topo);
+        let plan = plan(&self.effects, &self.topo, &self.topo.node_sizes(sizes), &mips, deep)?;
         Ok((plan.slots.len(), plan.bytes(deep)))
     }
 
