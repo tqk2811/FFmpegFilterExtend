@@ -17,7 +17,7 @@ use wgpu::hal::{self, api::Vulkan};
 
 use crate::frame::{ColorInfo, GpuFrame, PixelFormat};
 use crate::graph::EffectGraph;
-use crate::runtime::{device_limits, FrameInfo, GpuContext, GPU_FEATURES};
+use crate::runtime::{device_limits, FrameInfo, GpuContext};
 use crate::Error;
 
 /// A Vulkan device to share, as `AVVulkanDeviceContext` describes it.
@@ -481,7 +481,7 @@ impl GpuContext {
         )
         .map_err(gpu_err)?;
         let exposed = hal_instance.expose_adapter(phd).ok_or_else(|| gpu_err("wgpu cannot use this physical device"))?;
-        let features = exposed.features & GPU_FEATURES;
+        let features = exposed.features & crate::profile::features();
         let limits = device_limits(&exposed.capabilities.limits);
         let flags = desc.queue_flags;
         let ash_device = ash::Device::load_with(
@@ -559,6 +559,7 @@ impl EffectGraph {
         outs: &mut [VulkanFrame],
         info: Option<&FrameInfo>,
     ) -> Result<(), Error> {
+        let t_start = std::time::Instant::now();
         let ctx = self.context().clone();
         if *ctx.vulkan_submit.lock().unwrap_or_else(|p| p.into_inner()) {
             return Err(Error::Gpu("an earlier Vulkan submission failed; the shared device is no longer used".into()));
@@ -685,6 +686,7 @@ impl EffectGraph {
             (ins, outs_w, raw_device)
         };
 
+        let t_import = t_start.elapsed();
         let mut buffers = Vec::new();
         if !barriers.is_empty() {
             let mut pre = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("gpufx vulkan layouts") });
@@ -726,6 +728,7 @@ impl EffectGraph {
         }
         // Held from staging the semaphores until the submission took them, so two threads
         // using this device never stage into each other's submission.
+        let t_submit = std::time::Instant::now();
         let mut poisoned = ctx.vulkan_submit.lock().unwrap_or_else(|p| p.into_inner());
         if *poisoned {
             return Err(Error::Gpu("an earlier Vulkan submission failed; the shared device is no longer used".into()));
@@ -751,6 +754,7 @@ impl EffectGraph {
                 left |= queue.remove_signal_semaphore(sem);
             }
         }
+        let t_scope = std::time::Instant::now();
         let error = pollster::block_on(scope.pop());
         if left || error.is_some() {
             *poisoned = true;
@@ -761,6 +765,13 @@ impl EffectGraph {
         for plane in inputs.iter_mut().chain(outs.iter_mut()).flat_map(|f| f.planes.iter_mut()) {
             plane.layout = LAYOUT_AFTER;
             plane.value = sems.iter().find(|(s, _)| *s == plane.semaphore).map_or(plane.value, |&(_, v)| v + 1);
+        }
+        if crate::profile::enabled() {
+            use crate::profile::Cpu;
+            self.profile_cpu(Cpu::Import, t_import);
+            self.profile_cpu(Cpu::Submit, t_scope - t_submit);
+            self.profile_cpu(Cpu::Scope, t_scope.elapsed());
+            self.profile_cpu(Cpu::Total, t_start.elapsed());
         }
         Ok(())
     }

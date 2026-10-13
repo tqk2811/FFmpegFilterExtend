@@ -153,7 +153,7 @@ impl GpuContext {
             // PIPELINE_CACHE: only Vulkan has it in wgpu 30; it costs nothing until a cache
             // is created. The format features let GPU frames have 16-bit and r8/rg8
             // storage planes (see GpuFrame).
-            required_features: adapter.features() & GPU_FEATURES,
+            required_features: adapter.features() & crate::profile::features(),
             ..Default::default()
         }))
         .map_err(|e| Error::Gpu(e.to_string()))?;

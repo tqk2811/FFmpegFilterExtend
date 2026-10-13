@@ -13,6 +13,7 @@ mod mips;
 pub mod package;
 pub mod params;
 mod pool;
+mod profile;
 pub mod runtime;
 mod shader_cache;
 mod texture;

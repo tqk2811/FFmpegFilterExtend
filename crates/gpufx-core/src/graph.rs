@@ -103,6 +103,8 @@ pub(crate) struct FrameIo {
     /// The pool's id of this borrower, and the context of the pool.
     user: u64,
     ctx: Option<Arc<crate::GpuContext>>,
+    /// Timings of GPU frames, with `GPUFX_PROFILE` set (see [`crate::profile`]).
+    pub(crate) prof: Option<crate::profile::Profiler>,
 }
 
 /// The planned textures of a graph for one set of inputs.
@@ -548,6 +550,12 @@ fn encode_effects(
     info: Option<&FrameInfo>,
     cpass: &mut wgpu::ComputePass,
 ) {
+    encode_inputs(effects, io, given, info, cpass);
+    encode_nodes(effects, topo, io, info, cpass);
+}
+
+/// The input half of [`encode_effects`]: conversions and the mip chains of the inputs.
+fn encode_inputs(effects: &[Effect], io: &FrameIo, given: usize, info: Option<&FrameInfo>, cpass: &mut wgpu::ComputePass) {
     let ctx = &effects[0].program.ctx;
     for (i, slot) in io.inputs[..given].iter().enumerate() {
         slot.encode(&ctx.conv, cpass);
@@ -555,6 +563,11 @@ fn encode_effects(
             chain.encode(&ctx.device, &ctx.mips, cpass);
         }
     }
+}
+
+/// The effect half of [`encode_effects`].
+fn encode_nodes(effects: &[Effect], topo: &Topology, io: &FrameIo, info: Option<&FrameInfo>, cpass: &mut wgpu::ComputePass) {
+    let ctx = &effects[0].program.ctx;
     if let Some(info) = info {
         for &k in &topo.order {
             effects[k].encode(cpass, info);
@@ -596,7 +609,16 @@ pub(crate) fn run_gpu(
     let desc = |f: &GpuFrame| Desc { format: f.format, width: f.width, height: f.height, premultiplied: f.color.premultiplied };
     let ins: Vec<Desc> = inputs.iter().map(desc).collect();
     let out_descs: Vec<Desc> = outs.iter().map(desc).collect();
+    let t0 = std::time::Instant::now();
     prepare(effects, topo, io, &ins, &out_descs, bypass, true)?;
+    if crate::profile::enabled() {
+        let ctx = effects[0].program.ctx.clone();
+        let prof = io.prof.get_or_insert_with(|| {
+            let label = effects.iter().map(|fx| fx.package().manifest.name.clone()).collect::<Vec<_>>().join("|");
+            crate::profile::Profiler::new(&ctx.device, &ctx.queue, label)
+        });
+        prof.cpu(crate::profile::Cpu::Prepare, t0.elapsed());
+    }
     // The pooled textures stay borrowed until the caller submitted `enc`.
     let res = record_gpu(effects, topo, io, inputs, outs, info, enc);
     if res.is_err() {
@@ -617,6 +639,7 @@ fn record_gpu(
     let bypass = info.is_none();
     let ctx = effects[0].program.ctx.clone();
     let (device, queue, conv) = (&ctx.device, &ctx.queue, &ctx.conv);
+    let t0 = std::time::Instant::now();
     if io.gpu_outputs.len() != outs.len()
         || io.gpu_outputs.iter().zip(outs.iter()).any(|(slot, o)| slot.key != (o.format, o.width, o.height))
     {
@@ -631,10 +654,31 @@ fn record_gpu(
         let tex = source_texture(effects, &io.inputs, src);
         io.gpu_outputs[k].bind(device, queue, conv, &tex, &out.planes, &out.color)?;
     }
-    let mut cpass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("gpufx"), timestamp_writes: None });
-    encode_effects(effects, topo, io, inputs.len(), info, &mut cpass);
-    for slot in &io.gpu_outputs {
-        slot.encode(conv, &mut cpass)?;
+    let t1 = std::time::Instant::now();
+    match &io.prof {
+        Some(prof) if prof.timed() => {
+            // Profiled: one pass per span, each with its timestamps.
+            use crate::profile::{COPY_IN, COPY_OUT, EFFECTS};
+            let desc = |span| wgpu::ComputePassDescriptor { label: Some("gpufx"), timestamp_writes: prof.writes(span) };
+            encode_inputs(effects, io, inputs.len(), info, &mut enc.begin_compute_pass(&desc(COPY_IN)));
+            encode_nodes(effects, topo, io, info, &mut enc.begin_compute_pass(&desc(EFFECTS)));
+            let mut cpass = enc.begin_compute_pass(&desc(COPY_OUT));
+            for slot in &io.gpu_outputs {
+                slot.encode(conv, &mut cpass)?;
+            }
+        }
+        _ => {
+            let mut cpass = enc.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("gpufx"), timestamp_writes: None });
+            encode_effects(effects, topo, io, inputs.len(), info, &mut cpass);
+            for slot in &io.gpu_outputs {
+                slot.encode(conv, &mut cpass)?;
+            }
+        }
+    }
+    if let Some(prof) = &mut io.prof {
+        prof.finish(enc);
+        prof.cpu(crate::profile::Cpu::Bind, t1 - t0);
+        prof.cpu(crate::profile::Cpu::Record, t1.elapsed());
     }
     Ok(())
 }
@@ -1229,6 +1273,14 @@ impl EffectGraph {
     /// of other graphs reuse them.
     pub fn release_frame(&mut self) {
         self.io.release();
+    }
+
+    /// Adds `d` to a CPU span of the profile, when profiling (see [`crate::profile`]).
+    #[cfg_attr(not(any(windows, all(unix, not(target_vendor = "apple")))), allow(dead_code))]
+    pub(crate) fn profile_cpu(&mut self, span: crate::profile::Cpu, d: std::time::Duration) {
+        if let Some(prof) = &mut self.io.prof {
+            prof.cpu(span, d);
+        }
     }
 
     /// The device the graph runs on.
