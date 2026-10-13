@@ -222,3 +222,13 @@
 - **Vị trí**: [crates/gpufx-core/src/convert_in_tiled.wgsl](../crates/gpufx-core/src/convert_in_tiled.wgsl), [crates/gpufx-core/src/convert_out_fused.wgsl](../crates/gpufx-core/src/convert_out_fused.wgsl), [crates/gpufx-core/src/convert_out_buffer.wgsl](../crates/gpufx-core/src/convert_out_buffer.wgsl).
 - **Vì sao nên làm**: với 8 filter riêng, copy vẫn chiếm phần lớn thời gian GPU; đường CPU có thể dùng chung các pass mới (byte ra giống hệt) nếu được duyệt đổi.
 - **Ngày ghi**: 2026-10-13
+
+### [Thấp] Chuỗi nhiều filter `gpufx` riêng vẫn tốn VRAM hơn một `graph=` (pool frame đầu ra)
+- **Vấn đề**: 8 filter riêng với `out_format=rgba` qua `gpufx_upload`/`gpufx_download` dùng 421 MB VRAM, một `graph=` dùng 256 MB (NV12: 320 MB). Phần dôi gần như là frame đầu ra đang chờ ở các chỗ nối giữa filter: mỗi filter có pool `VkImage` riêng, mỗi pool giữ mức đỉnh của nó (trước `crossfade` lên 5–10 frame vì framesync chờ ghép cặp hai nhánh). Frame RGBA 1080p nặng 8,3 MB so với 3,1 MB của NV12.
+- **Vị trí**: [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`config_vulkan_output`, tạo frames context đầu ra), [ffmpeg/vf_gpufx_transfer.c](../ffmpeg/vf_gpufx_transfer.c) (`depth` của `gpufx_upload`).
+- **Hướng đã bàn, chưa duyệt**:
+  - Dùng chung pool frame giữa các filter `gpufx` cùng device, phân nhóm theo kích thước/format/usage; không khớp thì tạo pool riêng như hiện nay. VRAM khi đó bằng số frame thật sự đang sống thay vì tổng mức đỉnh từng pool. Không hại hiệu suất.
+  - Hướng dẫn cho filter ngay trước filter nhiều đầu vào xuất NV12; thử giảm `depth` của `gpufx_upload`.
+  - Không giới hạn kích thước pool đầu ra: frame sẽ phải chờ hoặc báo lỗi, hại hiệu suất.
+- **Vì sao nên làm**: chuỗi effect/transition thường giữ nguyên kích thước nên pool dùng chung áp dụng được cho phần lớn trường hợp; ước tính giảm vài chục tới hơn 100 MB với rgba (chưa đo).
+- **Ngày ghi**: 2026-10-13
