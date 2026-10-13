@@ -185,6 +185,12 @@
 - **Vì sao**: (1) nguồn đổi độ phân giải làm dừng cả graph; (2) nên khớp phiên bản header với libavutil thay vì vá lúc chạy.
 - **Ngày ghi**: 2026-10-13
 
+### [Vừa] Filter `gpufx` chưa có frame VideoToolbox: trên macOS không dùng được
+- **Vấn đề**: filter chỉ trả ra frame GPU Vulkan, D3D12 hoặc D3D11 (giống các filter `*_cuda`) và không còn đường readback ra frame CPU, nên trên macOS (không có các API đó trong FFmpeg) `gpufx` không chạy được tới khi có đường frame VideoToolbox (`AV_PIX_FMT_VIDEOTOOLBOX`, `CVPixelBuffer`/IOSurface dùng chung với Metal của wgpu). Thư viện và CLI `gpufx` vẫn chạy Metal.
+- **Vị trí**: [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) — bảng `hw_apis[]` và các switch theo API (`hw_ok`, `config_api`, `config_api_output`, `upload_ok`, `process_hw`); phía Rust cần thêm hàm kiểu `gpufx_effect_use_metal`/`process_videotoolbox` trong [crates/gpufx-ffi/src/lib.rs](../crates/gpufx-ffi/src/lib.rs) (đổi C API).
+- **Vì sao nên làm**: trước thay đổi "chỉ trả frame GPU", filter chạy được trên macOS qua đường frame CPU (dù chưa ai chạy thử); giờ người dùng macOS mất hẳn filter. Chưa có máy Mac để làm và kiểm.
+- **Ngày ghi**: 2026-10-14
+
 ### [Vừa] Đọc/ghi frame Vulkan tại chỗ: wrapper giữ qua frame, pass cuối ghi thiếu pixel
 - **Vấn đề**:
   - Wrapper wgpu của image FFmpeg (và view, bind group dựng từ chúng) được cache theo `VkImage` (16 frame mỗi pad, `ImportCache` trong `vulkan.rs`, `Lru` trong `InputSlot`, `GpuOutputSlot`, `Effect::rebind`), nên được giữ qua frame tới khi bị đẩy khỏi cache hoặc graph bị huỷ. Filter giữ ref các frames context Vulkan của input/output (`hold_vk_frames` trong `vf_gpufx.c`) tới sau `gpufx_effect_free`, nên image không bị giải phóng trước wrapper. Còn hở: frames context bị thay giữa chừng (cấu hình lại link) thì ref cũ vẫn giữ tới khi filter bị huỷ (tốn VRAM, không sai); dùng `process_vulkan` từ Rust mà không giữ image như vậy thì wrapper có thể sống lâu hơn image. Đường D3D12/D3D11 chưa có cache, vẫn giữ wrapper của frame cuối tới frame sau.
@@ -210,9 +216,3 @@
   - Không giới hạn kích thước pool đầu ra: frame sẽ phải chờ hoặc báo lỗi, hại hiệu suất.
 - **Vì sao nên làm**: chuỗi effect/transition thường giữ nguyên kích thước nên pool dùng chung áp dụng được cho phần lớn trường hợp; ước tính giảm vài chục tới hơn 100 MB với rgba (chưa đo).
 - **Ngày ghi**: 2026-10-13
-
-### [Thấp] Chuỗi `gpufx` riêng với frame CPU: tự giữ frame trên GPU
-- **Vấn đề**: không có `hwupload`/`gpufx_upload` ở đầu thì mỗi `gpufx` nhận frame CPU và trả frame CPU (quy tắc hw/sw ở `config_output`), nên chuỗi 8 filter riêng upload + readback 8 lần mỗi frame: 29.8 s so với 6–13 s khi upload một lần (docs/BENCHMARK-vi.md). Người dùng phải tự biết thêm bước upload.
-- **Vị trí**: [ffmpeg/vf_gpufx.c:1565](../ffmpeg/vf_gpufx.c#L1565) (`query_formats`), [ffmpeg/vf_gpufx.c:1627-1654](../ffmpeg/vf_gpufx.c#L1627-L1654) (quy tắc frame GPU vào thì GPU ra).
-- **Vì sao**: hướng có thể làm: khi output nối thẳng vào một `gpufx` khác thì đưa ra frame GPU (Vulkan) trên device riêng của gpufx, filter cuối tự readback. Cần tạo hw device/frames context ngay trong filter và thoả thuận định dạng giữa hai filter, nên không đơn giản; trước mắt README đã ghi khuyến nghị.
-- **Ngày ghi**: 2026-10-14

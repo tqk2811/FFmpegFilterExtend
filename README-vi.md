@@ -6,8 +6,8 @@ Hiệu ứng video chạy bằng **shader trên GPU** cho FFmpeg, nạp từ **g
 - Shader **WGSL** hoặc **GLSL**, nhiều pass, nhiều input, texture đi kèm, tham số tự sinh.
 - Chạy trên **Vulkan, DirectX 12, Metal, OpenGL** (qua [wgpu](https://wgpu.rs)), Windows/Linux/macOS.
 - Tham số là literal hoặc biểu thức theo thời gian; đổi lúc chạy bằng `sendcmd`.
-- Nhiều hiệu ứng trong một filter (`effect='blur.zip|vignette.zip'`): frame lên GPU một lần,
-  chạy hết chuỗi rồi mới về RAM.
+- Nhiều hiệu ứng trong một filter (`effect='blur.zip|vignette.zip'`): cả chuỗi chạy trong một lần
+  submit GPU, không qua frame trung gian.
 - Cả **đồ thị hiệu ứng** trong một filter (`graph='[0]split[a][b]; [a]blur.zip[x]; [x][b]crossfade.zip[out]'`):
   rẽ nhánh, nhiều input và nhiều output, tất cả trong một lần submit GPU; `split` không chép gì và
   texture trung gian lấy từ pool.
@@ -29,21 +29,24 @@ Hiệu ứng video chạy bằng **shader trên GPU** cho FFmpeg, nạp từ **g
   `GPUFX_TRUST_PRECOMPILED=1` (xem [thiết kế](docs/DESIGN-vi.md)).
 
 ```sh
-ffmpeg -i a.mp4 -i b.mp4 -filter_complex \
-  "[0][1]gpufx=effect=wipe-transition.zip:params='progress=clip((t-1)/1.5\,0\,1)|angle=45'" out.mp4
+# gpufx trả ra frame GPU: đưa cho nó một device (frame CPU ở input nó tự upload) và
+# download trước encoder
+ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i a.mp4 -i b.mp4 -filter_complex \
+  "[0][1]gpufx=effect=wipe-transition.zip:params='progress=clip((t-1)/1.5\,0\,1)|angle=45',hwdownload,format=yuv420p" out.mp4
 ```
 
 ```sh
-# upload một lần, đồ thị hình thoi trên GPU, hai output pad ghi ra hai file
-ffmpeg -i a.mp4 -i b.mp4 -filter_complex \
-  "[0:v][1:v]gpufx=graph='[0]split[a][b]; [a]gaussian-blur.zip[ba]; [b]grayscale.zip|vignette.zip[gb]; [ba][gb]crossfade.zip[x]; [x]split[x1][x2]; [x2][1]wipe-transition.zip[w]':params='x.progress=0.5|w.progress=t'[mix][wipe]" \
-  -map "[mix]" mix.mp4 -map "[wipe]" wipe.mp4
+# đồ thị hình thoi trên GPU, hai output pad ghi ra hai file
+ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i a.mp4 -i b.mp4 -filter_complex \
+  "[0:v][1:v]gpufx=graph='[0]split[a][b]; [a]gaussian-blur.zip[ba]; [b]grayscale.zip|vignette.zip[gb]; [ba][gb]crossfade.zip[x]; [x]split[x1][x2]; [x2][1]wipe-transition.zip[w]':params='x.progress=0.5|w.progress=t'[mix][wipe];[mix]hwdownload,format=yuv420p[m];[wipe]hwdownload,format=yuv420p[w2]" \
+  -map "[m]" mix.mp4 -map "[w2]" wipe.mp4
 ```
 
 ```sh
-# Frame Vulkan: upload một lần, mọi hiệu ứng chạy trên device Vulkan của FFmpeg, download một lần
+# một chuỗi: gpufx đầu tiên upload, mọi hiệu ứng chạy trên device Vulkan của FFmpeg, download một lần
 ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i a.mp4 \
-  -vf "format=nv12,hwupload,gpufx=effect=vignette.zip,gpufx=effect=sepia.zip,hwdownload,format=nv12" out.mp4
+  -vf "format=nv12,gpufx=effect=vignette.zip,gpufx=effect=sepia.zip,hwdownload,format=nv12" out.mp4
+# D3D12 (Windows): như trên với -init_hw_device d3d12va=dx -filter_hw_device dx
 ```
 
 ```sh
@@ -53,14 +56,19 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   -vf "format=nv12,gpufx_upload,gpufx=effect=vignette.zip:out_format=rgba,gpufx=effect=sepia.zip:out_format=nv12,gpufx_download,format=nv12" out.mp4
 ```
 
-Giữ frame trên GPU suốt chuỗi. Mỗi `gpufx` trả ra đúng loại frame nó nhận vào: đầu vào là frame CPU
-thì đầu ra là frame CPU (chỉ ra frame GPU khi đầu vào đã nằm trên GPU). Vì vậy không có bước upload ở đầu
-thì mọi `gpufx` trong chuỗi đều nhận frame CPU, tự upload rồi readback kết quả, nên chuỗi 8 filter riêng chép mỗi frame 16 lần (29.8 s so với 6–13 s trên clip của
-[bảng đo](docs/BENCHMARK-vi.md)). Từ nhanh tới chậm:
+Giống các filter `*_cuda` của FFmpeg, `gpufx` **chỉ trả ra frame GPU** (Vulkan, D3D12 hoặc D3D11). Input có thể là
+frame GPU (`hwupload`, `gpufx_upload`, một `gpufx` khác) hoặc frame CPU; frame CPU được `gpufx` tự upload lên device
+của các input GPU, hoặc lên `-filter_hw_device` khi không input nào nằm trên GPU; không có device thì filter dừng và
+báo cần thêm option nào. Trước filter CPU và encoder phải có `hwdownload,format=<fmt>` hoặc
+`gpufx_download,format=<fmt>` (`<fmt>` là format của output, mặc định là format của input nếu hiệu ứng được phép trả
+ra format đó). Vì vậy một chuỗi `gpufx` chỉ upload mỗi frame một lần và readback một lần. Từ nhanh tới chậm:
 
 1. một `gpufx=graph=...` chứa mọi hiệu ứng;
 2. các filter riêng kẹp giữa `gpufx_upload` và `gpufx_download`, `out_format=rgba` trên mọi filter trừ cái cuối;
-3. các filter riêng kẹp giữa `hwupload` và `hwdownload`.
+3. các filter riêng sau một lần upload (do `gpufx` đầu tiên hoặc `hwupload`), rồi `hwdownload`.
+
+Filter từ chối `backend=gl` và `backend=metal` (thư viện và CLI `gpufx` vẫn nhận). Trên macOS filter chưa chạy được:
+nó chưa có frame VideoToolbox.
 
 Tài liệu: [thiết kế](docs/DESIGN-vi.md) · [định dạng gói và cách viết shader](docs/EFFECT_FORMAT-vi.md) · [đo tốc độ](docs/BENCHMARK-vi.md) · [English](README.md)
 

@@ -137,13 +137,13 @@ initialize the graph instead of running incorrectly.
 ## 5. The `gpufx` FFmpeg filter
 
 ```
-gpufx=effect=<zip|directory>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)'][:backend=auto|vulkan|dx12|metal|gl][:shortest=0|1][:out_format=<pix_fmt>]
+gpufx=effect=<zip|directory>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)'][:backend=auto|vulkan|dx12][:shortest=0|1][:out_format=<pix_fmt>]
 gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backend=...][:shortest=0|1][:out_format=<pix_fmt>]
 ```
 
 - **effect**: path to the package. The filter's number of inputs comes from the manifest.
 - **Effect chain** `effect='a.zip|b.zip|c.zip'`: runs one after another like three chained filters, but
-  the frame is uploaded only once, all passes fit in a single GPU submit, and there is only one readback.
+  all passes fit in a single GPU submit, without intermediate frames.
   The filter's inputs are the inputs of the first effect; only the first effect may have multiple inputs. The output
   follows the rules of the last effect. The rules of the later effects are checked as when chaining filters:
   the format is the first one in the previous effect's `output.formats` that the next effect accepts,
@@ -153,14 +153,23 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   effect has it. Spaces around `|` are ignored.
 - **graph**: a whole effect graph with several inputs and outputs, in place of `effect`; see
   "GPU graph inside one filter" in section 6.
+- **GPU frames out only**, like the `*_cuda` filters: every output is a Vulkan, D3D12 or D3D11 frame, so
+  `hwdownload,format=<fmt>` or `gpufx_download,format=<fmt>` must come before CPU filters and encoders. Inputs
+  may be GPU frames of that API or software frames, which the filter uploads itself (`av_hwframe_transfer_data`
+  into its own frames context per input): as they are when the device takes the format, else as nv12/p010le
+  (4:2:0 YUV) or RGBA converted by swscale; frames whose matrix the GPU does not convert go up as RGBA. The
+  device is the one of the GPU inputs (checked against `-filter_hw_device` when both are set), else
+  `-filter_hw_device` (`AVFILTER_FLAG_HWDEVICE`), and its type picks the API; with software inputs only and
+  no device the filter fails and names the options to add. `backend=gl|metal` is refused (the library and the
+  CLI keep them). Adding an API (VideoToolbox on macOS, missing for now) is one entry in `hw_apis[]` plus
+  its cases in the per-API switches of `vf_gpufx.c`.
 - **out_format**: forces the pixel format of every output (on Vulkan/D3D frames: the sw_format of the
   output frames context). It must be in the effect's output formats and converted on the GPU by libgpufx
   (`gpufx_format_supported`), and for GPU frames FFmpeg must make storage images of it; otherwise the
-  filter fails at configuration. Default: chosen as before (software: negotiated from the output formats;
-  GPU frames: see "Vulkan frames"). Use: `out_format=rgba` between separate `gpufx` filters, so the middle
+  filter fails at configuration. Default: the source input's format (for a software input, the format it
+  is uploaded in) when the effect may output it, else its first output format the GPU writes (see "Vulkan frames"). Use: `out_format=rgba` between separate `gpufx` filters, so the middle
   ones skip the YUV ↔ RGBA conversions (the last one goes back with `out_format=nv12`).
-  Limits: one format for every output of the filter; on D3D frames only nv12, p010le, rgba and rgba64le;
-  on software frames a different format downstream makes FFmpeg insert a CPU `scale`.
+  Limits: one format for every output of the filter; on D3D frames only nv12, p010le, rgba and rgba64le.
 - **params**: `name=value` separated by `|`. A value is a literal (`0.5`, `1,0,0`, `#ff8800`)
   or an **FFmpeg expression** in `t`, `n`, `w`, `h`, `a` (`w/h`), `sar`, `dar` (`a*sar`),
   re-evaluated for every frame. This is how you do keyframes/transitions without external tools.
@@ -168,7 +177,7 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   `sendcmd=c='2.0 gpufx@fx params strength=0.2'`.
 - **timeline** (`enable='between(t,1,3)'`) is supported.
 - Multiple inputs use `framesync`: the first input decides the length and frame rate (an input with a
-  different fps has its frames repeated or dropped). Another input that has not started yet is a transparent image; one that has
+  different fps has its frames repeated or dropped). Another input that has not started yet is a black GPU frame (opaque for formats with alpha); one that has
   ended holds its last frame (or use `shortest=1`).
 - The output takes the size, SAR and frame rate of the first input (in a graph, of the input pad its source comes from); colorspace/range/alpha are the values
   negotiated on the output link. Color-dependent side data (HDR metadata, film grain...), motion
@@ -183,18 +192,20 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
 Examples:
 
 ```sh
-# 1 input, parameter animated over time
-ffmpeg -i in.mp4 -vf "gpufx=effect=vignette.zip:params='strength=clip(t/2\,0\,1)|color=#200040'" out.mp4
+VK="-init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk"   # or d3d12va=dx ... dx
+
+# 1 input, parameter animated over time (gpufx uploads the frame, hwdownload brings it back)
+ffmpeg $VK -i in.mp4 -vf "gpufx=effect=vignette.zip:params='strength=clip(t/2\,0\,1)|color=#200040',hwdownload,format=yuv420p" out.mp4
 
 # 2-input transition
-ffmpeg -i a.mp4 -i b.mp4 -filter_complex \
-  "[0][1]gpufx=effect=wipe-transition.zip:params='progress=clip((t-1)/1.5\,0\,1)|angle=45'" out.mp4
+ffmpeg $VK -i a.mp4 -i b.mp4 -filter_complex \
+  "[0][1]gpufx=effect=wipe-transition.zip:params='progress=clip((t-1)/1.5\,0\,1)|angle=45',hwdownload,format=yuv420p" out.mp4
 
-# chaining several effects: two filters, each with its own upload/readback
-ffmpeg -i in.mp4 -vf "gpufx=effect=gaussian-blur.zip,gpufx=effect=gradient-map.zip:params='intensity=0.6'" out.mp4
+# chaining several effects: two filters, the frame stays on the GPU between them
+ffmpeg $VK -i in.mp4 -vf "gpufx=effect=gaussian-blur.zip,gpufx=effect=gradient-map.zip:params='intensity=0.6',hwdownload,format=yuv420p" out.mp4
 
-# same result in one filter: a single upload and readback
-ffmpeg -i in.mp4 -vf "gpufx=effect='gaussian-blur.zip|gradient-map.zip':params='gradient-map.intensity=0.6'" out.mp4
+# same result in one filter: one GPU submission
+ffmpeg $VK -i in.mp4 -vf "gpufx=effect='gaussian-blur.zip|gradient-map.zip':params='gradient-map.intensity=0.6',hwdownload,format=yuv420p" out.mp4
 ```
 
 ## 6. Frame path and performance
@@ -300,14 +311,13 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   -vf "format=nv12,hwupload,gpufx=effect=vignette.zip,gpufx=effect=sepia.zip,hwdownload,format=nv12" out.mp4
 ```
 
-- Every input and output pad also takes `AV_PIX_FMT_VULKAN`. Either all inputs and outputs of a `gpufx`
-  are Vulkan frames or none: a mix is refused with a message naming the pad (add `hwupload`/`hwdownload`).
-  The sw_format of each input must be one libgpufx converts (`nv12`, `p010le`, `yuv420p`, `rgba`...) and is
-  checked against the manifest rules like a software format. The filter is `FF_FILTER_FLAG_HWFRAME_AWARE`.
+- Every input pad also takes `AV_PIX_FMT_VULKAN`, and output pads take only GPU formats (section 5).
+  Inputs may mix Vulkan and software frames (the filter uploads the software ones on the same device).
+  The sw_format of each Vulkan input must be one libgpufx converts (`nv12`, `p010le`, `yuv420p`, `rgba`...) and
+  is checked against the manifest rules like a software format. The filter is `FF_FILTER_FLAG_HWFRAME_AWARE`.
 - **One device.** `init` opens the packages on wgpu's noop device (pads and formats are known before
-  negotiation, and no GPU device is made yet); for software frames `gpufx_effect_use_default_device`
-  then makes or reuses the backend's device (API v8), so a filter on GPU frames never makes its own;
-  when the links are configured, `gpufx_effect_use_vulkan` moves the effect to FFmpeg's device: libgpufx
+  negotiation, and no GPU device is made yet); the filter never makes a device of its own
+  (`gpufx_effect_use_default_device` stays in the C API for other callers); when the links are configured, `gpufx_effect_use_vulkan` moves the effect to FFmpeg's device: libgpufx
   wraps the `AVVulkanDeviceContext` handles with `wgpu-hal` (`Instance::from_raw`, `expose_adapter`,
   `Adapter::device_from_raw`, then `create_device_from_hal`), compiles the packages again for that device
   (shared per `VkDevice` like any device) and copies the parameter values. Nothing of FFmpeg's is destroyed
@@ -371,8 +381,8 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   record, import, submit). It splits the frame into three compute passes and waits for frames four behind,
   so wall time is not representative while it is on.
 - A disabled filter always converts the frame on the GPU into the output's frames context (no pass by
-  reference as on the software path: the output has its own frames context). An input that has not started shows a black frame uploaded once (opaque for formats with alpha, where the
-  software path shows transparent black).
+  reference: the output has its own frames context). An input that has not started shows a black frame
+  uploaded once (opaque for formats with alpha); software inputs get one too, in their upload format.
 - Rust: `GpuFrame` (plane textures of the effect's device) and `EffectGraph::encode_gpu`, which records a
   whole graph into the caller's command encoder without submitting (backend independent, the base of the
   D3D12 step); `GpuContext::from_vulkan` and `EffectGraph::process_vulkan` (`gpufx_core::vulkan`, Linux and
@@ -387,8 +397,8 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
 - **Submissions** of one shared device are serialised by a mutex in libgpufx held from staging the semaphores
   to `queue.submit` (besides FFmpeg's `lock_queue`), inside a wgpu error scope; a submission wgpu refuses has
   its semaphores taken back and makes later Vulkan frames on that device fail cleanly.
-- Tested on lavapipe: the bundle test compares the framemd5 of `hwupload,gpufx,...,hwdownload` with the
-  software path (rgba, nv12, yuv420p, yuv444p, p010le, yuv420p10le, rgba64le, a graph whose two inputs are one split
+- Tested on lavapipe: the bundle test compares the framemd5 of `hwupload,gpufx,...,hwdownload` with
+  software frames that gpufx uploads itself (rgba, nv12, yuv420p, yuv444p, p010le, yuv420p10le, rgba64le, a graph whose two inputs are one split
   frame, two filters in a row, a changed output format); they are identical. Rust tests check
   `encode_gpu` against the CPU path byte for byte.
 

@@ -8,6 +8,9 @@ Build `b1531dc` (win64 release package), measured on 2026-10-13.
   8 GiB VRAM (driver 617.42), Windows 11 Pro.
 - **Input**: two H.264 clips, 1920×1080, 23.976 fps, 90 s each (2158 frames), software decode, output to
   `-f null`. gpufx picks Vulkan by default on Windows (`backend=auto`).
+- **Historical frame path**: the gpufx rows not marked † were measured when `gpufx` took software frames and
+  read its result back itself. It now outputs GPU frames only, so the same commands need `-filter_hw_device` and
+  `hwdownload` (the transfers then happen in those steps instead of inside the filter).
 - **Comparison**: FFmpeg 8.0.1 (gpl-shared build) with its own CPU filters. The transition runs over
   the first 60 s (`xfade` refuses `duration` above 60 s); gpufx uses `progress=clip(t/60,0,1)`.
 - Time is the best of 3 runs. RAM is the peak working set; VRAM is the peak of the Windows
@@ -33,16 +36,18 @@ then sharpen. The CPU side uses `gblur`, `eq`, `vignette`, `colorchannelmixer`, 
 | Filter | Time | Peak RAM | VRAM ded. / shared |
 |---|---|---|---|
 | CPU filters | 34.95 s | 655 MB | 0 |
-| 8 separate `gpufx`, software frames (each uploads and reads back) | 29.77 s | 586 MB | 202 / – |
+| 8 separate `gpufx`, software frames (each uploads and reads back; historical ‡) | 29.77 s | 586 MB | 202 / – |
 | `hwupload`, 8 separate `gpufx`, `hwdownload` (frames stay on the GPU) | 9.83 s † | 547 MB | 316 / – |
 | `gpufx_upload`, 8 separate `gpufx` with `out_format=rgba`, `gpufx_download` | 5.95 s † | 527 MB | 421 / – |
 | one `gpufx=graph=...` | **7.05 s** | 491 MB | 202 / – |
 
 † Vulkan frames, fastest of the 3 runs of the next table (measured with the desktop busy).
 
-A `gpufx` outputs the kind of frames it takes (software in, software out), so with software frames every
-separate `gpufx` uploads its input and reads its output back. Uploading once in
-front keeps the frames on the GPU between the filters (rows marked †; all runs in the next table).
+‡ Measured when a `gpufx` output the kind of frames it took (software in, software out), so every separate
+`gpufx` uploaded its input and read its output back. `gpufx` now outputs GPU frames only: the first filter
+uploads, the next ones take its GPU frames, and one `hwdownload` ends the chain, which is the `hwupload` row
+without `hwupload`. The row is kept as the cost of that old behaviour; it cannot be run any more.
+Uploading once in front keeps the frames on the GPU between the filters (rows marked †; all runs in the next table).
 
 **Vulkan frames and the transfer filters** (same machine, 2026-10-13, range of 3 runs, normal desktop running (browser, Discord, Steam; a few % GPU load), so spread is wide; RAM is
 the peak working set, VRAM the dedicated peak of the 3rd run). Rows of the first two tables that name gpufx were re-measured on this build (VRAM shared not re-measured); CPU, `xfade_vulkan` and DX12 rows are from the earlier build. Transfers: clip A only, nv12, 90 s.

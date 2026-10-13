@@ -8,8 +8,8 @@ Video effects powered by **GPU shaders** for FFmpeg, loaded from external **`.zi
 - **WGSL** or **GLSL** shaders, multiple passes, multiple inputs, bundled textures, auto-generated parameters.
 - Runs on **Vulkan, DirectX 12, Metal, OpenGL** (via [wgpu](https://wgpu.rs)), on Windows/Linux/macOS.
 - Parameters are literals or time-based expressions; change them at run time with `sendcmd`.
-- Several effects in one filter (`effect='blur.zip|vignette.zip'`): the frame is uploaded to the
-  GPU once, runs through the whole chain, and only then goes back to RAM.
+- Several effects in one filter (`effect='blur.zip|vignette.zip'`): the whole chain runs in one GPU
+  submission, without intermediate frames.
 - A whole **effect graph** in one filter (`graph='[0]split[a][b]; [a]blur.zip[x]; [x][b]crossfade.zip[out]'`):
   branches, several inputs and several outputs, all in one GPU submission; `split` copies nothing and
   intermediate textures are pooled.
@@ -32,21 +32,24 @@ Video effects powered by **GPU shaders** for FFmpeg, loaded from external **`.zi
   with `GPUFX_TRUST_PRECOMPILED=1` (see [design](docs/DESIGN.md)).
 
 ```sh
-ffmpeg -i a.mp4 -i b.mp4 -filter_complex \
-  "[0][1]gpufx=effect=wipe-transition.zip:params='progress=clip((t-1)/1.5\,0\,1)|angle=45'" out.mp4
+# gpufx outputs GPU frames: give it a device (it uploads software inputs itself) and
+# download before the encoder
+ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i a.mp4 -i b.mp4 -filter_complex \
+  "[0][1]gpufx=effect=wipe-transition.zip:params='progress=clip((t-1)/1.5\,0\,1)|angle=45',hwdownload,format=yuv420p" out.mp4
 ```
 
 ```sh
-# one upload, a diamond of effects on the GPU, two output pads written to two files
-ffmpeg -i a.mp4 -i b.mp4 -filter_complex \
-  "[0:v][1:v]gpufx=graph='[0]split[a][b]; [a]gaussian-blur.zip[ba]; [b]grayscale.zip|vignette.zip[gb]; [ba][gb]crossfade.zip[x]; [x]split[x1][x2]; [x2][1]wipe-transition.zip[w]':params='x.progress=0.5|w.progress=t'[mix][wipe]" \
-  -map "[mix]" mix.mp4 -map "[wipe]" wipe.mp4
+# a diamond of effects on the GPU, two output pads written to two files
+ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i a.mp4 -i b.mp4 -filter_complex \
+  "[0:v][1:v]gpufx=graph='[0]split[a][b]; [a]gaussian-blur.zip[ba]; [b]grayscale.zip|vignette.zip[gb]; [ba][gb]crossfade.zip[x]; [x]split[x1][x2]; [x2][1]wipe-transition.zip[w]':params='x.progress=0.5|w.progress=t'[mix][wipe];[mix]hwdownload,format=yuv420p[m];[wipe]hwdownload,format=yuv420p[w2]" \
+  -map "[m]" mix.mp4 -map "[w2]" wipe.mp4
 ```
 
 ```sh
-# Vulkan frames: upload once, every effect on FFmpeg's Vulkan device, download once
+# a chain: the first gpufx uploads, every effect runs on FFmpeg's Vulkan device, one download
 ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i a.mp4 \
-  -vf "format=nv12,hwupload,gpufx=effect=vignette.zip,gpufx=effect=sepia.zip,hwdownload,format=nv12" out.mp4
+  -vf "format=nv12,gpufx=effect=vignette.zip,gpufx=effect=sepia.zip,hwdownload,format=nv12" out.mp4
+# D3D12 (Windows): the same with -init_hw_device d3d12va=dx -filter_hw_device dx
 ```
 
 ```sh
@@ -56,14 +59,19 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   -vf "format=nv12,gpufx_upload,gpufx=effect=vignette.zip:out_format=rgba,gpufx=effect=sepia.zip:out_format=nv12,gpufx_download,format=nv12" out.mp4
 ```
 
-Keep frames on the GPU across a chain. A `gpufx` hands out the same kind of frames it takes: software frames
-in, software frames out (GPU frames only when its input is already on the GPU). Without an upload in front,
-every `gpufx` in a chain therefore takes software frames, uploads them and reads its result back, so a chain of 8 separate filters copies each frame 16 times
-(29.8 s against 6–13 s on the [benchmark](docs/BENCHMARK.md) clips). Fastest first:
+Like FFmpeg's `*_cuda` filters, `gpufx` outputs **GPU frames only** (Vulkan, D3D12 or D3D11). Inputs may be GPU
+frames (`hwupload`, `gpufx_upload`, another `gpufx`) or software frames, which `gpufx` uploads itself on the device
+of its GPU inputs or, when none is on the GPU, on `-filter_hw_device`; without a device it stops and says which
+options to add. Put `hwdownload,format=<fmt>` or `gpufx_download,format=<fmt>` before CPU filters and encoders
+(`<fmt>` is the output's format, by default the input's when the effect may output it). A chain of `gpufx`
+filters therefore uploads each frame once and reads it back once. Fastest first:
 
 1. one `gpufx=graph=...` with every effect;
 2. separate filters between `gpufx_upload` and `gpufx_download`, `out_format=rgba` on all but the last;
-3. separate filters between `hwupload` and `hwdownload`.
+3. separate filters behind one upload (by the first `gpufx` or `hwupload`), then `hwdownload`.
+
+`backend=gl` and `backend=metal` are refused by the filter (the library and the `gpufx` CLI still take them).
+On macOS the filter cannot run yet: it has no VideoToolbox frames.
 
 Docs: [design](docs/DESIGN.md) · [package format and how to write shaders](docs/EFFECT_FORMAT.md) · [benchmark](docs/BENCHMARK.md)
 

@@ -8,6 +8,9 @@ Bản build `b1531dc` (gói release win64), đo ngày 2026-10-13.
   8 GiB VRAM (driver 617.42), Windows 11 Pro.
 - **Input**: hai clip H.264, 1920×1080, 23.976 fps, mỗi clip 90 s (2158 frame), decode bằng CPU, ghi ra
   `-f null`. Trên Windows gpufx mặc định chọn Vulkan (`backend=auto`).
+- **Đường frame cũ**: các dòng gpufx không có dấu † được đo khi `gpufx` còn nhận frame CPU và tự readback kết quả.
+  Giờ filter chỉ trả ra frame GPU, nên cùng lệnh đó cần thêm `-filter_hw_device` và `hwdownload` (việc truyền frame
+  khi đó nằm ở các bước này thay vì bên trong filter).
 - **So với**: FFmpeg 8.0.1 (bản gpl-shared) với filter CPU có sẵn. Chuyển cảnh chạy trong 60 s đầu (`xfade` không
   nhận `duration` quá 60 s); gpufx dùng `progress=clip(t/60,0,1)`.
 - Thời gian lấy lần nhanh nhất trong 3 lần. RAM là working set đỉnh; VRAM là đỉnh của counter Windows
@@ -33,15 +36,18 @@ sharpen. Phía CPU dùng `gblur`, `eq`, `vignette`, `colorchannelmixer`, `unshar
 | Filter | Thời gian | RAM đỉnh | VRAM ded. / shared |
 |---|---|---|---|
 | Filter CPU | 34.95 s | 655 MB | 0 |
-| 8 `gpufx` riêng, frame CPU (mỗi filter upload + readback) | 29.77 s | 586 MB | 202 / – |
+| 8 `gpufx` riêng, frame CPU (mỗi filter upload + readback; số cũ ‡) | 29.77 s | 586 MB | 202 / – |
 | `hwupload`, 8 `gpufx` riêng, `hwdownload` (frame nằm trên GPU) | 9.83 s † | 547 MB | 316 / – |
 | `gpufx_upload`, 8 `gpufx` riêng có `out_format=rgba`, `gpufx_download` | 5.95 s † | 527 MB | 421 / – |
 | một `gpufx=graph=...` | **7.05 s** | 491 MB | 202 / – |
 
 † Frame Vulkan, lần nhanh nhất trong 3 lần chạy ở bảng sau (đo khi máy đang chạy desktop bình thường).
 
-`gpufx` trả ra đúng loại frame nó nhận (đầu vào CPU thì đầu ra CPU), nên với frame CPU mỗi `gpufx` riêng
-tự upload input và readback output. Upload một lần ở đầu thì frame nằm
+‡ Đo khi `gpufx` còn trả ra đúng loại frame nó nhận (đầu vào CPU thì đầu ra CPU), nên mỗi `gpufx` riêng tự
+upload input và readback output. Giờ `gpufx` chỉ trả ra frame GPU: filter đầu upload, các filter sau nhận frame
+GPU của nó, một `hwdownload` kết thúc chuỗi, tức là dòng `hwupload` mà không cần `hwupload`. Dòng này giữ lại làm
+số đo của cách cũ; không chạy lại được nữa.
+Upload một lần ở đầu thì frame nằm
 trên GPU suốt giữa các filter (các dòng có dấu †; đủ các lần chạy ở bảng sau).
 
 **Frame Vulkan và filter truyền frame** (cùng máy, 2026-10-13, khoảng của 3 lần chạy, máy đang chạy desktop bình thường (trình duyệt, Discord, Steam; GPU tải vài %) nên độ lệch rộng; RAM là

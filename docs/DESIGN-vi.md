@@ -136,13 +136,13 @@ tạo graph thay vì chạy sai.
 ## 5. Filter FFmpeg `gpufx`
 
 ```
-gpufx=effect=<zip|thư mục>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)'][:backend=auto|vulkan|dx12|metal|gl][:shortest=0|1][:out_format=<pix_fmt>]
+gpufx=effect=<zip|thư mục>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)'][:backend=auto|vulkan|dx12][:shortest=0|1][:out_format=<pix_fmt>]
 gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backend=...][:shortest=0|1][:out_format=<pix_fmt>]
 ```
 
 - **effect**: đường dẫn gói. Số input của filter lấy từ manifest.
 - **Chuỗi hiệu ứng** `effect='a.zip|b.zip|c.zip'`: chạy lần lượt như ba filter nối nhau, nhưng
-  frame chỉ upload một lần, mọi pass nằm trong một lần submit GPU và chỉ readback một lần.
+  mọi pass nằm trong một lần submit GPU, không qua frame trung gian.
   Input của filter là input của hiệu ứng đầu; chỉ hiệu ứng đầu được có nhiều input. Output
   theo quy tắc của hiệu ứng cuối. Quy tắc của hiệu ứng sau được kiểm như khi nối filter:
   format là format đầu tiên trong `output.formats` của hiệu ứng trước mà hiệu ứng sau nhận,
@@ -152,14 +152,23 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   hiệu ứng có nó. Dấu cách quanh `|` được bỏ qua.
 - **graph**: cả đồ thị hiệu ứng với nhiều input và output, thay cho `effect`; xem "Đồ thị GPU trong
   một filter" ở mục 6.
+- **Chỉ trả ra frame GPU**, giống các filter `*_cuda`: mọi output là frame Vulkan, D3D12 hoặc D3D11, nên trước
+  filter CPU và encoder phải có `hwdownload,format=<fmt>` hoặc `gpufx_download,format=<fmt>`. Input có thể là frame
+  GPU của API đó hoặc frame CPU; frame CPU được filter tự upload (`av_hwframe_transfer_data` vào frames context
+  riêng của từng input): giữ nguyên format khi device nhận format đó, không thì thành nv12/p010le (YUV 4:2:0)
+  hoặc RGBA do swscale chuyển; frame có ma trận màu mà GPU không chuyển được thì lên dạng RGBA. Device là device
+  của các input GPU (kiểm khớp với `-filter_hw_device` khi có cả hai), không thì là `-filter_hw_device`
+  (`AVFILTER_FLAG_HWDEVICE`), loại device quyết định API; chỉ có input CPU mà không có device thì filter báo lỗi
+  kèm các option cần thêm. `backend=gl|metal` bị từ chối (thư viện và CLI vẫn giữ). Thêm một API (VideoToolbox
+  trên macOS, hiện còn thiếu) là thêm một dòng vào `hw_apis[]` và các nhánh trong các switch theo API của
+  `vf_gpufx.c`.
 - **out_format**: ép pixel format của mọi output (với frame Vulkan/D3D: sw_format của frames context đầu
   ra). Format phải nằm trong danh sách output của effect, libgpufx phải chuyển được trên GPU
   (`gpufx_format_supported`), và với frame GPU thì FFmpeg phải tạo được storage image của nó; không thì
-  filter báo lỗi lúc configure. Mặc định: chọn như cũ (phần mềm: negotiate theo danh sách output; frame
-  GPU: xem "Frame Vulkan"). Dùng: `out_format=rgba` giữa các `gpufx` rời để filter ở giữa bỏ qua chuyển
+  filter báo lỗi lúc configure. Mặc định: format của input nguồn (input CPU: format nó được upload) nếu effect
+  được trả ra format đó, không thì format output đầu tiên GPU ghi được (xem "Frame Vulkan"). Dùng: `out_format=rgba` giữa các `gpufx` rời để filter ở giữa bỏ qua chuyển
   đổi YUV ↔ RGBA (filter cuối quay về bằng `out_format=nv12`).
-  Giới hạn: một format cho mọi output của filter; với frame D3D chỉ nv12, p010le, rgba, rgba64le; với frame
-  phần mềm, filter phía sau cần format khác thì FFmpeg tự chèn `scale` chạy trên CPU.
+  Giới hạn: một format cho mọi output của filter; với frame D3D chỉ nv12, p010le, rgba, rgba64le.
 - **params**: `tên=giá trị` cách nhau bởi `|`. Giá trị là literal (`0.5`, `1,0,0`, `#ff8800`)
   hoặc **biểu thức FFmpeg** theo `t`, `n`, `w`, `h`, `a` (`w/h`), `sar`, `dar` (`a*sar`),
   tính lại mỗi frame. Đây là cách làm keyframe/transition không cần tool ngoài.
@@ -167,7 +176,7 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   `sendcmd=c='2.0 gpufx@fx params strength=0.2'`.
 - **timeline** (`enable='between(t,1,3)'`) được hỗ trợ.
 - Nhiều input dùng `framesync`: input đầu quyết định độ dài và frame rate (input khác lệch
-  fps thì frame của nó được lặp hoặc bỏ). Input khác chưa bắt đầu thì là ảnh trong suốt; đã
+  fps thì frame của nó được lặp hoặc bỏ). Input khác chưa bắt đầu thì là frame GPU đen (đục với format có alpha); đã
   hết thì giữ frame cuối (hoặc `shortest=1`).
 - Output nhận kích thước, SAR, frame rate của input đầu (trong đồ thị: của input pad mà nguồn của nó đi ra); colorspace/range/alpha là giá trị
   đã negotiate của link output. Side data phụ thuộc màu (HDR metadata, film grain...), motion
@@ -182,18 +191,20 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
 Ví dụ:
 
 ```sh
-# 1 input, tham số động theo thời gian
-ffmpeg -i in.mp4 -vf "gpufx=effect=vignette.zip:params='strength=clip(t/2\,0\,1)|color=#200040'" out.mp4
+VK="-init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk"   # hoặc d3d12va=dx ... dx
+
+# 1 input, tham số động theo thời gian (gpufx tự upload frame, hwdownload đưa về)
+ffmpeg $VK -i in.mp4 -vf "gpufx=effect=vignette.zip:params='strength=clip(t/2\,0\,1)|color=#200040',hwdownload,format=yuv420p" out.mp4
 
 # transition 2 input
-ffmpeg -i a.mp4 -i b.mp4 -filter_complex \
-  "[0][1]gpufx=effect=wipe-transition.zip:params='progress=clip((t-1)/1.5\,0\,1)|angle=45'" out.mp4
+ffmpeg $VK -i a.mp4 -i b.mp4 -filter_complex \
+  "[0][1]gpufx=effect=wipe-transition.zip:params='progress=clip((t-1)/1.5\,0\,1)|angle=45',hwdownload,format=yuv420p" out.mp4
 
-# xâu chuỗi nhiều hiệu ứng: hai filter, mỗi filter một lần upload/readback
-ffmpeg -i in.mp4 -vf "gpufx=effect=gaussian-blur.zip,gpufx=effect=gradient-map.zip:params='intensity=0.6'" out.mp4
+# xâu chuỗi nhiều hiệu ứng: hai filter, frame nằm trên GPU giữa hai filter
+ffmpeg $VK -i in.mp4 -vf "gpufx=effect=gaussian-blur.zip,gpufx=effect=gradient-map.zip:params='intensity=0.6',hwdownload,format=yuv420p" out.mp4
 
-# cùng kết quả trong một filter: upload và readback một lần
-ffmpeg -i in.mp4 -vf "gpufx=effect='gaussian-blur.zip|gradient-map.zip':params='gradient-map.intensity=0.6'" out.mp4
+# cùng kết quả trong một filter: một lần submit GPU
+ffmpeg $VK -i in.mp4 -vf "gpufx=effect='gaussian-blur.zip|gradient-map.zip':params='gradient-map.intensity=0.6',hwdownload,format=yuv420p" out.mp4
 ```
 
 ## 6. Đường đi của frame và hiệu năng
@@ -297,13 +308,13 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   -vf "format=nv12,hwupload,gpufx=effect=vignette.zip,gpufx=effect=sepia.zip,hwdownload,format=nv12" out.mp4
 ```
 
-- Mọi pad input và output nhận thêm `AV_PIX_FMT_VULKAN`. Hoặc mọi input và output của một `gpufx` đều là
-  frame Vulkan, hoặc không cái nào: trộn lẫn bị từ chối, thông báo nêu tên pad (thêm `hwupload`/`hwdownload`).
-  sw_format của từng input phải là format libgpufx chuyển được (`nv12`, `p010le`, `yuv420p`, `rgba`…) và được
-  kiểm theo quy tắc của manifest như format phần mềm. Filter có cờ `FF_FILTER_FLAG_HWFRAME_AWARE`.
+- Mọi pad input nhận thêm `AV_PIX_FMT_VULKAN`, pad output chỉ nhận format GPU (mục 5). Input có thể trộn frame
+  Vulkan và frame CPU (filter tự upload frame CPU lên cùng device).
+  sw_format của từng input Vulkan phải là format libgpufx chuyển được (`nv12`, `p010le`, `yuv420p`, `rgba`…) và
+  được kiểm theo quy tắc của manifest như format phần mềm. Filter có cờ `FF_FILTER_FLAG_HWFRAME_AWARE`.
 - **Một device.** `init` mở gói trên device noop của wgpu (pad và format phải biết trước khi negotiate, chưa
-  tạo device GPU nào); với frame phần mềm, `gpufx_effect_use_default_device` mới tạo hoặc dùng lại device của
-  backend (API v8), nên filter chạy frame GPU không bao giờ tạo device riêng; khi các link được
+  tạo device GPU nào); filter không bao giờ tạo device riêng (`gpufx_effect_use_default_device` vẫn còn trong
+  C API cho nơi gọi khác); khi các link được
   configure, `gpufx_effect_use_vulkan` chuyển effect sang device của FFmpeg: libgpufx bọc các handle của
   `AVVulkanDeviceContext` bằng `wgpu-hal` (`Instance::from_raw`, `expose_adapter`, `Adapter::device_from_raw`,
   rồi `create_device_from_hal`), biên dịch lại gói cho device đó (dùng chung theo `VkDevice` như mọi device) và
@@ -363,8 +374,8 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   submit). Nó tách frame thành ba compute pass và chờ frame trễ bốn frame, nên khi bật thì thời gian chạy
   tổng không còn đúng.
 - Filter bị tắt (timeline) luôn chuyển frame trên GPU sang frames context của output (không đưa tham chiếu
-  như đường phần mềm, vì output có frames context riêng). Input chưa bắt đầu hiện frame đen upload một lần
-  (đục với format có alpha; đường phần mềm hiện đen trong suốt).
+  vì output có frames context riêng). Input chưa bắt đầu hiện frame đen upload một lần (đục với format có
+  alpha); input CPU cũng vậy, ở format upload của nó.
 - Rust: `GpuFrame` (texture từng plane trên device của effect) và `EffectGraph::encode_gpu`, ghi cả đồ thị vào
   command encoder của người gọi mà không submit (không phụ thuộc backend, nền cho bước D3D12);
   `GpuContext::from_vulkan` và `EffectGraph::process_vulkan` (`gpufx_core::vulkan`, Linux và Windows) thêm phần
@@ -379,7 +390,7 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
 - **Submit** trên một device dùng chung được tuần tự hoá bằng mutex trong libgpufx, giữ từ lúc đặt semaphore
   tới `queue.submit` (ngoài `lock_queue` của FFmpeg), trong một error scope của wgpu; submit bị wgpu từ chối
   được lấy lại semaphore và làm các frame Vulkan sau trên device đó báo lỗi rõ ràng.
-- Đã chạy trên lavapipe: test bundle so framemd5 của `hwupload,gpufx,…,hwdownload` với đường phần mềm (rgba,
+- Đã chạy trên lavapipe: test bundle so framemd5 của `hwupload,gpufx,…,hwdownload` với frame CPU do gpufx tự upload (rgba,
   nv12, yuv420p, yuv444p, p010le, yuv420p10le, rgba64le, đồ thị có hai input là cùng một frame split, hai filter
   liền nhau, đổi format output): giống hệt. Test Rust so `encode_gpu` với đường CPU từng byte.
 
