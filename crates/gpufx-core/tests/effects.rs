@@ -475,3 +475,24 @@ fn pooled_pass_outputs_do_not_clobber_each_other() {
     chain.process(&[Image { data: &src, width: w, height: h, stride: w * 4 }], target(&mut out, w, h, w * 4), &info).unwrap();
     assert_eq!(out, want);
 }
+
+/// Effects are opened on the noop device until they get theirs (as libgpufx does): every
+/// example must compile there as it does on a GPU.
+#[test]
+fn every_example_opens_on_the_noop_device() {
+    let ctx = GpuContext::noop().expect("the noop backend is built in");
+    let dir = examples();
+    let mut opened = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if !path.join("manifest.json").exists() {
+            continue;
+        }
+        let package = Package::open(&path).unwrap();
+        if let Err(e) = Effect::new(ctx.clone(), package) {
+            panic!("{}: {e}", path.display());
+        }
+        opened += 1;
+    }
+    assert!(opened > 10, "{opened} examples");
+}

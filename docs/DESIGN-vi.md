@@ -301,7 +301,9 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   frame Vulkan, hoặc không cái nào: trộn lẫn bị từ chối, thông báo nêu tên pad (thêm `hwupload`/`hwdownload`).
   sw_format của từng input phải là format libgpufx chuyển được (`nv12`, `p010le`, `yuv420p`, `rgba`…) và được
   kiểm theo quy tắc của manifest như format phần mềm. Filter có cờ `FF_FILTER_FLAG_HWFRAME_AWARE`.
-- **Một device.** `init` mở gói như thường (pad và format phải biết trước khi negotiate); khi các link được
+- **Một device.** `init` mở gói trên device noop của wgpu (pad và format phải biết trước khi negotiate, chưa
+  tạo device GPU nào); với frame phần mềm, `gpufx_effect_use_default_device` mới tạo hoặc dùng lại device của
+  backend (API v8), nên filter chạy frame GPU không bao giờ tạo device riêng; khi các link được
   configure, `gpufx_effect_use_vulkan` chuyển effect sang device của FFmpeg: libgpufx bọc các handle của
   `AVVulkanDeviceContext` bằng `wgpu-hal` (`Instance::from_raw`, `expose_adapter`, `Adapter::device_from_raw`,
   rồi `create_device_from_hal`), biên dịch lại gói cho device đó (dùng chung theo `VkDevice` như mọi device) và

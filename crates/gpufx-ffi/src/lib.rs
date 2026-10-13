@@ -21,7 +21,7 @@ use gpufx_core::{
 };
 
 /// Bumped when the C ABI changes incompatibly. Must match `GPUFX_API_VERSION` in gpufx.h.
-const API_VERSION: u32 = 7;
+const API_VERSION: u32 = 8;
 
 thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
@@ -63,12 +63,31 @@ fn context(backend: Backend) -> Result<Arc<GpuContext>, gpufx_core::Error> {
         return Ok(ctx);
     }
     let ctx = GpuContext::new(backend)?;
+    CONTEXT_OPENS.fetch_add(1, Ordering::Relaxed);
     cache.insert(key, Arc::downgrade(&ctx));
     Ok(ctx)
 }
 
+/// The device effects are opened on until they are given theirs (see [`ready`]); shared
+/// while an effect is on it.
+fn noop_context() -> Result<Arc<GpuContext>, String> {
+    static CACHE: Mutex<Weak<GpuContext>> = Mutex::new(Weak::new());
+    let mut cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(ctx) = cache.upgrade() {
+        return Ok(ctx);
+    }
+    let ctx = GpuContext::noop().map_err(|e| e.to_string())?;
+    *cache = Arc::downgrade(&ctx);
+    Ok(ctx)
+}
+
+/// Device string of an effect not on a device yet.
+const NO_DEVICE: &str = "none yet: chosen by gpufx_effect_use_* or the first frame";
+
 /// Packages read and compiled so far; lets tests check that the cache works.
 static PROGRAM_LOADS: AtomicUsize = AtomicUsize::new(0);
+/// Backend devices made so far; lets tests check that opening an effect makes none.
+static CONTEXT_OPENS: AtomicUsize = AtomicUsize::new(0);
 
 type ProgramCache = Mutex<Vec<(PathBuf, Weak<Program>)>>;
 
@@ -103,9 +122,11 @@ enum Spec {
 
 pub struct GpufxEffect {
     graph: EffectGraph,
-    /// Only to open the effect again on a shared device (Vulkan, D3D12, D3D11).
-    #[cfg(any(windows, all(unix, not(target_vendor = "apple"))))]
+    /// To open the effect again on its device (its backend's, or a shared one).
     spec: Spec,
+    /// Backend of the device the effect runs on unless given a shared one; `Some` while
+    /// the effect is on the noop device it was opened on.
+    pending: Option<Backend>,
     name: CString,
     device: CString,
     inputs: Vec<CString>,
@@ -313,15 +334,13 @@ unsafe fn backend_arg(backend: *const c_char) -> Result<Backend, String> {
     str_arg(backend, "backend")?.parse().map_err(|e: gpufx_core::Error| e.to_string())
 }
 
-fn wrap(graph: EffectGraph, spec: Spec, name: String, device: CString) -> *mut GpufxEffect {
+fn wrap(graph: EffectGraph, spec: Spec, pending: Backend, name: String) -> *mut GpufxEffect {
     let strings = |list: &[String]| list.iter().map(|f| cstring(f)).collect::<Vec<_>>();
-    #[cfg(not(any(windows, all(unix, not(target_vendor = "apple")))))]
-    let _ = spec;
     let out = GpufxEffect {
-        #[cfg(any(windows, all(unix, not(target_vendor = "apple"))))]
         spec,
+        pending: Some(pending),
         name: cstring(&name),
-        device,
+        device: cstring(NO_DEVICE),
         inputs: strings(graph.input_names()),
         input_formats: (0..graph.input_count()).map(|i| strings(graph.input_formats(i))).collect(),
         outputs: strings(graph.output_names()),
@@ -360,11 +379,34 @@ fn open_spec(spec: &Spec, ctx: &Arc<GpuContext>) -> Result<(EffectGraph, String)
     }
 }
 
+/// Opens the effect on the noop device: the caller may give it a shared device before the
+/// first frame (FFmpeg's, through gpufx_effect_use_*), so the backend's device is made only
+/// when it is used (see [`ready`]).
 unsafe fn open(spec: Spec, backend: *const c_char) -> Result<*mut GpufxEffect, String> {
-    let ctx = context(backend_arg(backend)?).map_err(|e| e.to_string())?;
-    let device = cstring(&ctx.description());
-    let (graph, name) = open_spec(&spec, &ctx)?;
-    Ok(wrap(graph, spec, name, device))
+    let backend = backend_arg(backend)?;
+    let (graph, name) = open_spec(&spec, &noop_context()?)?;
+    Ok(wrap(graph, spec, backend, name))
+}
+
+/// Opens the effect again on `ctx` with its parameter values, unless it runs there.
+fn move_to(fx: &mut GpufxEffect, ctx: &Arc<GpuContext>, device: String) -> Result<(), String> {
+    if !Arc::ptr_eq(fx.graph.context(), ctx) {
+        let (mut graph, _) = open_spec(&fx.spec, ctx)?;
+        graph.copy_params_from(&fx.graph).map_err(|e| e.to_string())?;
+        fx.graph = graph;
+        fx.device = cstring(&device);
+    }
+    fx.pending = None;
+    Ok(())
+}
+
+/// Moves an effect still on the noop device to the device of its backend.
+fn ready(fx: &mut GpufxEffect) -> Result<(), String> {
+    if let Some(backend) = fx.pending {
+        let ctx = context(backend).map_err(|e| e.to_string())?;
+        move_to(fx, &ctx, ctx.description())?;
+    }
+    Ok(())
 }
 
 unsafe fn open_chain(paths: &[&str], backend: *const c_char) -> Result<*mut GpufxEffect, String> {
@@ -415,6 +457,14 @@ pub unsafe extern "C" fn gpufx_effect_name(fx: *const GpufxEffect) -> *const c_c
 #[no_mangle]
 pub unsafe extern "C" fn gpufx_effect_device(fx: *const GpufxEffect) -> *const c_char {
     fx.as_ref().map_or(ptr::null(), |fx| fx.device.as_ptr())
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_use_default_device(fx: *mut GpufxEffect) -> c_int {
+    guard(-1, || {
+        ready(fx.as_mut().ok_or("effect is NULL")?)?;
+        Ok(0)
+    })
 }
 
 #[no_mangle]
@@ -552,6 +602,7 @@ pub unsafe extern "C" fn gpufx_effect_process(
 ) -> c_int {
     guard(-1, || {
         let fx = fx.as_mut().ok_or("effect is NULL")?;
+        ready(fx)?;
         let (out, info) = (out.as_ref().ok_or("out is NULL")?, info.as_ref().ok_or("info is NULL")?);
         if inputs.is_null() || nb_inputs == 0 || out.data.is_null() {
             return Err("inputs and out must not be NULL".into());
@@ -648,6 +699,7 @@ pub unsafe extern "C" fn gpufx_effect_process_graph(
 ) -> c_int {
     guard(-1, || {
         let fx = fx.as_mut().ok_or("effect is NULL")?;
+        ready(fx)?;
         let info = frame_info(info.as_ref().ok_or("info is NULL")?);
         let frames = frames_arg(inputs, nb_inputs)?;
         let mut outs = outs_arg(outs, nb_outputs)?;
@@ -662,6 +714,7 @@ pub unsafe extern "C" fn gpufx_effect_convert_frame(fx: *mut GpufxEffect, input:
     guard(-1, || {
         let fx = fx.as_mut().ok_or("effect is NULL")?;
         single(fx)?;
+        ready(fx)?;
         let input = frame_arg(input.as_ref().ok_or("input is NULL")?, "input")?;
         let mut outs = outs_arg(out, 1)?;
         check_no_alias(std::slice::from_ref(&input), &outs)?;
@@ -680,6 +733,7 @@ pub unsafe extern "C" fn gpufx_effect_convert_graph(
 ) -> c_int {
     guard(-1, || {
         let fx = fx.as_mut().ok_or("effect is NULL")?;
+        ready(fx)?;
         let frames = frames_arg(inputs, nb_inputs)?;
         let mut outs = outs_arg(outs, nb_outputs)?;
         check_no_alias(&frames, &outs)?;
@@ -766,19 +820,12 @@ mod vk {
             queue_flags: dev.queue_flags,
         };
         let ctx = vulkan_context(&desc)?;
-        move_to(fx, &ctx, "Vulkan")
+        move_to(fx, &ctx, shared_device(&ctx, "Vulkan"))
     }
 
-    /// Opens the effect again on `ctx` with its parameter values, unless it runs there.
-    pub fn move_to(fx: &mut GpufxEffect, ctx: &Arc<GpuContext>, api: &str) -> Result<(), String> {
-        if Arc::ptr_eq(fx.graph.context(), ctx) {
-            return Ok(());
-        }
-        let (mut graph, _) = open_spec(&fx.spec, ctx)?;
-        graph.copy_params_from(&fx.graph).map_err(|e| e.to_string())?;
-        fx.graph = graph;
-        fx.device = cstring(&format!("{} ({api} device shared with the caller)", ctx.description()));
-        Ok(())
+    /// Device string of an effect on a device shared with the caller.
+    pub fn shared_device(ctx: &GpuContext, api: &str) -> String {
+        format!("{} ({api} device shared with the caller)", ctx.description())
     }
 
     unsafe fn frame(f: &GpufxVulkanFrame, what: &str) -> Result<VulkanFrame, String> {
@@ -940,12 +987,12 @@ mod dx {
 
     pub unsafe fn use_d3d12(fx: &mut GpufxEffect, dev: &GpufxD3D12Device) -> Result<(), String> {
         let ctx = shared(dev.device as usize, || GpuContext::from_d3d12(dev.device))?;
-        vk::move_to(fx, &ctx, "D3D12")
+        move_to(fx, &ctx, vk::shared_device(&ctx, "D3D12"))
     }
 
     pub unsafe fn use_d3d11(fx: &mut GpufxEffect, dev: &GpufxD3D11Device) -> Result<(), String> {
         let ctx = shared(dev.device as usize, || GpuContext::from_d3d11(dev.device, dev.device_context))?;
-        vk::move_to(fx, &ctx, "D3D11")
+        move_to(fx, &ctx, vk::shared_device(&ctx, "D3D11"))
     }
 
     unsafe fn list<'a, T>(p: *mut T, n: u32, what: &str) -> Result<&'a mut [T], String> {
@@ -1134,6 +1181,44 @@ mod tests {
 
     fn serial() -> std::sync::MutexGuard<'static, ()> {
         SERIAL.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    #[test]
+    fn an_effect_gets_its_device_at_the_first_frame() {
+        let _serial = serial();
+        if GpuContext::new(Backend::Auto).is_err() {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        }
+        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects");
+        let opens = || CONTEXT_OPENS.load(Ordering::Relaxed);
+        let start = opens();
+        // Kept alive so the next effect would find it in the cache.
+        let fx = open(&examples.join("invert"));
+        assert!(!fx.is_null(), "{:?}", unsafe { CStr::from_ptr(gpufx_last_error()) });
+        unsafe {
+            // Opening, describing and setting parameters make no device: a filter given
+            // FFmpeg's device never makes its own.
+            let (name, value) = (CString::new("amount").unwrap(), CString::new("0.25").unwrap());
+            assert_eq!(gpufx_effect_set_param(fx, name.as_ptr(), value.as_ptr()), 0);
+            let format = CString::new("rgba").unwrap();
+            let stream = GpufxStreamInfo { format: format.as_ptr(), width: 4, height: 2 };
+            assert_eq!(gpufx_effect_check_inputs(fx, &stream, 1), 0);
+            assert_eq!(opens(), start, "no device before the first frame");
+            assert_eq!(CStr::from_ptr(gpufx_effect_device(fx)).to_str().unwrap(), NO_DEVICE);
+
+            let data = [10u8, 20, 30, 255].repeat(8);
+            let mut out = [0u8; 32];
+            let image = GpufxImage { data: data.as_ptr(), width: 4, height: 2, stride: 16 };
+            let target = GpufxOutput { data: out.as_mut_ptr(), width: 4, height: 2, stride: 16 };
+            let info = GpufxFrameInfo { time: 0.0, frame: 0, pixel_aspect: 1.0 };
+            assert_eq!(gpufx_effect_process(fx, &image, 1, &target, &info), 0, "{:?}", CStr::from_ptr(gpufx_last_error()));
+            assert_ne!(CStr::from_ptr(gpufx_effect_device(fx)).to_str().unwrap(), NO_DEVICE);
+            // The parameter set before the move is kept: a quarter of the way to the inverse, not the full 245.
+            assert!((60..80).contains(&out[0]), "{out:?}");
+            assert_eq!(gpufx_effect_use_default_device(fx), 0);
+            gpufx_effect_free(fx);
+        }
     }
 
     #[test]

@@ -304,7 +304,9 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   are Vulkan frames or none: a mix is refused with a message naming the pad (add `hwupload`/`hwdownload`).
   The sw_format of each input must be one libgpufx converts (`nv12`, `p010le`, `yuv420p`, `rgba`...) and is
   checked against the manifest rules like a software format. The filter is `FF_FILTER_FLAG_HWFRAME_AWARE`.
-- **One device.** `init` opens the packages as usual (pads and formats are known before negotiation);
+- **One device.** `init` opens the packages on wgpu's noop device (pads and formats are known before
+  negotiation, and no GPU device is made yet); for software frames `gpufx_effect_use_default_device`
+  then makes or reuses the backend's device (API v8), so a filter on GPU frames never makes its own;
   when the links are configured, `gpufx_effect_use_vulkan` moves the effect to FFmpeg's device: libgpufx
   wraps the `AVVulkanDeviceContext` handles with `wgpu-hal` (`Instance::from_raw`, `expose_adapter`,
   `Adapter::device_from_raw`, then `create_device_from_hal`), compiles the packages again for that device

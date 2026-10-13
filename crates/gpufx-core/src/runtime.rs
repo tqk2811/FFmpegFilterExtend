@@ -123,6 +123,27 @@ impl GpuContext {
         Self::open_adapter(&adapter, "gpufx", cache_dir)
     }
 
+    /// A device that runs nothing (wgpu's noop backend), to open effects before the device
+    /// they run on is known: their shaders are compiled and checked, no GPU memory is used.
+    pub fn noop() -> Result<Arc<Self>, Error> {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::NOOP,
+            backend_options: wgpu::BackendOptions {
+                // It reports no format features: without the adapter's own, the WebGPU
+                // defaults apply, which cover what effects use.
+                noop: wgpu::NoopBackendOptions {
+                    enable: true,
+                    features: Some(GPU_FEATURES - wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+            ..wgpu::InstanceDescriptor::new_without_display_handle()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).map_err(|e| Error::Gpu(e.to_string()))?;
+        Self::open_adapter(&adapter, "gpufx noop", None)
+    }
+
     /// A device on `adapter` with the features and limits gpufx uses (see [`device_limits`]).
     pub(crate) fn open_adapter(adapter: &wgpu::Adapter, label: &str, cache_dir: Option<&std::path::Path>) -> Result<Arc<Self>, Error> {
         let required_limits = device_limits(&adapter.limits());

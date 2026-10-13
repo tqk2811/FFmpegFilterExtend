@@ -304,8 +304,8 @@ static av_cold int init(AVFilterContext *ctx)
     } else if ((ret = open_effects(ctx)) < 0) {
         return ret;
     }
-    av_log(ctx, AV_LOG_VERBOSE, "Loaded '%s' on %s\n",
-           gpufx_effect_name(s->fx), gpufx_effect_device(s->fx));
+    /* The device is chosen in config_inputs(): FFmpeg's for GPU frames, else the backend's. */
+    av_log(ctx, AV_LOG_VERBOSE, "Loaded '%s'\n", gpufx_effect_name(s->fx));
 
     s->nb_inputs = gpufx_effect_input_count(s->fx);
     for (unsigned i = 0; i < s->nb_inputs; i++) {
@@ -1654,6 +1654,11 @@ static int config_inputs(AVFilterContext *ctx)
 #endif
     if ((s->hw_fmt == AV_PIX_FMT_D3D12 || s->hw_fmt == AV_PIX_FMT_D3D11) && (ret = config_d3d(ctx)) < 0)
         return ret;
+    if (!s->hw) {
+        if (gpufx_effect_use_default_device(s->fx) < 0)
+            return gpufx_error(ctx, "Cannot create the GPU device");
+        av_log(ctx, AV_LOG_VERBOSE, "Software frames on %s\n", gpufx_effect_device(s->fx));
+    }
 
     /* Every input is configured by now: check them all against the manifest rules. */
     streams = av_calloc(s->nb_inputs, sizeof(*streams));

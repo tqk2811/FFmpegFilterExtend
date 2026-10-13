@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define GPUFX_API_VERSION 7
+#define GPUFX_API_VERSION 8
 
 typedef struct GpufxEffect GpufxEffect;
 
@@ -179,8 +179,15 @@ void gpufx_effect_free(GpufxEffect *fx);
 
 /* Strings below are owned by the effect and live as long as it does. */
 const char *gpufx_effect_name(const GpufxEffect *fx);
-/* Adapter and API in use, e.g. "NVIDIA GeForce RTX 4070 (Vulkan)". */
+/*
+ * Adapter and API in use, e.g. "NVIDIA GeForce RTX 4070 (Vulkan)". An effect is opened
+ * without a device: it gets one from gpufx_effect_use_vulkan/d3d12/d3d11(), or else the
+ * backend's own from gpufx_effect_use_default_device() or its first frame (the string
+ * says so until then).
+ */
 const char *gpufx_effect_device(const GpufxEffect *fx);
+/* Makes or reuses the device of the backend given at open, unless the effect has a device. */
+int gpufx_effect_use_default_device(GpufxEffect *fx);
 
 uint32_t gpufx_effect_input_count(const GpufxEffect *fx);
 const char *gpufx_effect_input_name(const GpufxEffect *fx, uint32_t index);
