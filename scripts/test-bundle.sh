@@ -392,6 +392,48 @@ else
     # shellcheck disable=SC2086
     rejects "Vulkan input, software output" "software frames but the inputs have Vulkan" -init_hw_device "$VKDEV" -filter_hw_device vk \
         -i "$A" -an -vf "format=rgba,hwupload,gpufx=effect=$FX/invert.zip,format=rgba" $NULL
+    # out_format=rgba between chained gpufx: the middle ones skip the YUV conversions, and the
+    # chain gives the pixels of the same effects chained in one gpufx.
+    OUTFMT="gpufx=effect=$FX/vignette.zip:out_format=rgba,gpufx=effect=$FX/grayscale.zip:out_format=rgba,gpufx=effect=$FX/sepia.zip:out_format=nv12"
+    VKN=out-format
+    same "out_format=rgba chain on Vulkan frames equals one chained gpufx" \
+        "$(vk_md5 nv12 "$OUTFMT")" "$(sw_md5 nv12 "gpufx=effect=$FX/vignette.zip|$FX/grayscale.zip|$FX/sepia.zip")"
+    same "out_format=rgba chain on software frames equals one chained gpufx" \
+        "$(sw_md5 nv12 "$OUTFMT")" "$(sw_md5 nv12 "gpufx=effect=$FX/vignette.zip|$FX/grayscale.zip|$FX/sepia.zip")"
+    # shellcheck disable=SC2086
+    rejects "out_format the GPU does not convert" "out_format=gray is not converted" -i "$A" -an \
+        -vf "gpufx=effect=$FX/sepia.zip:out_format=gray" $NULL
+    # gpufx_upload / gpufx_download: pipelined hwupload / hwdownload, bit-exact both ways,
+    # on multiplane and one-image-per-plane frames, and mixed with hwupload / hwdownload.
+    if grep -qw gpufx_upload "$CLIPS/filters.txt"; then
+        for dev in "$VKDEV" vulkan=vk:0; do
+            for f in nv12 yuv420p rgba; do
+                for c in "gpufx_upload,gpufx_download" "hwupload,gpufx_download=latency=0" "gpufx_upload=depth=1,hwdownload"; do
+                    VKN=transfer-$f
+                    same "$f: $c is lossless ($dev)" \
+                        "$("$FF" -hide_banner -nostdin -v error -init_hw_device "$dev" -filter_hw_device vk -i "$A" -frames:v 5 -an \
+                            -vf "format=$f,$c,format=$f" -f framemd5 - 2> "$(vk_log)" | grep -v '^#' | awk -F, '{print $NF}')" \
+                        "$("$FF" -hide_banner -nostdin -v error -i "$A" -frames:v 5 -an -vf "format=$f" -f framemd5 - \
+                            2> "$CLIPS/last.log" | grep -v '^#' | awk -F, '{print $NF}')"
+                done
+            done
+        done
+        VKN=transfer-gpufx
+        same "gpufx_upload,gpufx,gpufx_download equals the software path" \
+            "$(vk_ff -i "$A" -frames:v 3 -an -vf "format=nv12,gpufx_upload,gpufx=effect=$FX/vignette.zip:params='strength=0.7',gpufx_download,format=nv12" \
+                -f framemd5 - 2> "$(vk_log)" | grep -v '^#' | awk -F, '{print $NF}')" \
+            "$(sw_md5 nv12 "gpufx=effect=$FX/vignette.zip:params='strength=0.7'")"
+        # Frames in flight at the end are flushed: every frame comes out.
+        DL_N=$(vk_ff -i "$A" -an -vf "format=nv12,gpufx_upload,gpufx_download=latency=4,format=nv12" -f framemd5 - \
+            2> "$(vk_log)" | grep -v '^#' | wc -l | tr -d ' ')
+        if [ "$DL_N" = "$MAIN_N" ]; then pass "gpufx_download flushes all $MAIN_N frames"
+        else fail "gpufx_download flushes all frames (want $MAIN_N, got $DL_N)"; show_vk_log; fi
+        # shellcheck disable=SC2086
+        rejects "gpufx_download to another format" "add format=nv12 after gpufx_download" -init_hw_device "$VKDEV" \
+            -filter_hw_device vk -i "$A" -an -vf "format=nv12,gpufx_upload,gpufx_download,format=rgba" $NULL
+    else
+        echo "  skip  this bundle has no gpufx_upload"
+    fi
     # Without disable_multiplane an nv12 frame may be one multiplane image: refused clearly
     # (or, where the driver has no multiplane nv12, processed).
     if "$FF" -hide_banner -nostdin -v error -init_hw_device vulkan=vk:0 -filter_hw_device vk -i "$A" -frames:v 2 -an \

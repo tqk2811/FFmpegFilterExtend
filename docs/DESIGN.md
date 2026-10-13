@@ -137,8 +137,8 @@ initialize the graph instead of running incorrectly.
 ## 5. The `gpufx` FFmpeg filter
 
 ```
-gpufx=effect=<zip|directory>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)'][:backend=auto|vulkan|dx12|metal|gl][:shortest=0|1]
-gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backend=...][:shortest=0|1]
+gpufx=effect=<zip|directory>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)'][:backend=auto|vulkan|dx12|metal|gl][:shortest=0|1][:out_format=<pix_fmt>]
+gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backend=...][:shortest=0|1][:out_format=<pix_fmt>]
 ```
 
 - **effect**: path to the package. The filter's number of inputs comes from the manifest.
@@ -153,6 +153,14 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   effect has it. Spaces around `|` are ignored.
 - **graph**: a whole effect graph with several inputs and outputs, in place of `effect`; see
   "GPU graph inside one filter" in section 6.
+- **out_format**: forces the pixel format of every output (on Vulkan/D3D frames: the sw_format of the
+  output frames context). It must be in the effect's output formats and converted on the GPU by libgpufx
+  (`gpufx_format_supported`), and for GPU frames FFmpeg must make storage images of it; otherwise the
+  filter fails at configuration. Default: chosen as before (software: negotiated from the output formats;
+  GPU frames: see "Vulkan frames"). Use: `out_format=rgba` between separate `gpufx` filters, so the middle
+  ones skip the YUV ↔ RGBA conversions (the last one goes back with `out_format=nv12`).
+  Limits: one format for every output of the filter; on D3D frames only nv12, p010le, rgba and rgba64le;
+  on software frames a different format downstream makes FFmpeg insert a CPU `scale`.
 - **params**: `name=value` separated by `|`. A value is a literal (`0.5`, `1,0,0`, `#ff8800`)
   or an **FFmpeg expression** in `t`, `n`, `w`, `h`, `a` (`w/h`), `sar`, `dar` (`a*sar`),
   re-evaluated for every frame. This is how you do keyframes/transitions without external tools.
@@ -320,7 +328,10 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   `SAMPLED` usage. FFmpeg 9.0 makes `yuva420p`/`yuva444p` frames contexts without any usage by default (the
   ones `hwupload` makes work), so outputs fall back to another format, e.g. `rgba`. The output
   sw_format is the source input's when the effect may output it, else the first format of the output pad
-  that libgpufx converts and that FFmpeg can make storage images of.
+  that libgpufx converts and that FFmpeg can make storage images of. `out_format` replaces that choice
+  (that format or a configuration error). Chains of separate filters keep RGBA in between with
+  `out_format=rgba` on all but the last (numbers in the README benchmark: faster than without it, still
+  slower than one `graph=`).
 - **Per frame**, no CPU wait: the filter locks each `AVVkFrame` once (`lock_frame`; a frame split upstream
   may sit on two pads), libgpufx wraps every image as a wgpu texture (`texture_from_raw`, external memory,
   first state taken from the image layout; a layout wgpu has no state for gets a raw
@@ -353,6 +364,54 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   software path (rgba, nv12, yuv420p, yuv444p, p010le, yuv420p10le, rgba64le, a graph whose two inputs are one split
   frame, two filters in a row, a changed output format); they are identical. Rust tests check
   `encode_gpu` against the CPU path byte for byte.
+
+### Transfer filters `gpufx_upload` / `gpufx_download` (Vulkan)
+
+```sh
+ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i a.mp4 \
+  -vf "format=nv12,gpufx_upload,gpufx=effect=vignette.zip,gpufx=effect=sepia.zip,gpufx_download,format=nv12" out.mp4
+```
+
+Drop-in replacements for `hwupload` / `hwdownload` on Vulkan devices (`ffmpeg/vf_gpufx_transfer.c`, plain C
+on FFmpeg's internal Vulkan helpers `libavutil/vulkan.h`, no libgpufx). Why: on NVIDIA FFmpeg 9.0 copies
+through a staging buffer (host image copy and host memory import are off), and `hwdownload` waits on the CPU
+for every copy (`ff_vk_exec_wait`), so CPU and GPU take turns.
+
+- **gpufx_upload** (`depth`, default 3): the frames context is made on `-filter_hw_device` like `hwupload`
+  (input formats: the device's sw formats whose planes map 1:1 to Vulkan planes). A ring of `depth`
+  persistently mapped, host-coherent staging buffers, one per execution context: memcpy into the slot,
+  barrier + `vkCmdCopyBufferToImage` per plane, submit without waiting. The CPU waits only when it comes
+  back to a slot whose copy is still running (`ff_vk_exec_start` waits for that slot's fence).
+- **gpufx_download** (`latency`, default 2): `activate` filter. Frame k is submitted
+  (`vkCmdCopyImageToBuffer` into slot k mod (latency+1), host-cached memory), frame k-latency is waited
+  for (normally done), invalidated, copied into a buffer from `ff_get_video_buffer` and sent with its
+  props. On EOF the frames in flight are flushed, then the status is passed on. The output format must be
+  the frames' sw_format (add `format=<sw_format>` after it, like `hwdownload`).
+  With sparse input (live sources) each frame comes out only `latency` frames later; `latency=0` turns
+  the pipelining off. Neither filter takes a frame size change mid-stream (`hwupload`/`hwdownload` do):
+  the graph stops with EINVAL.
+- **Sync**: `ff_vk_exec_add_dep_frame` (lock_frame, wait on each image's timeline semaphore at
+  `sem_value`, signal `sem_value + 1`), `ff_vk_frame_barrier` with no queue family transfer, and
+  `ff_vk_exec_submit` (which takes FFmpeg's `lock_queue`), on FFmpeg's graphics queue family, the one
+  `gpufx` and wgpu use. So they mix with `hwupload`, `hwdownload`, `gpufx` and the `*_vulkan` filters.
+  The execution holds a reference to the frame until its copy has been read back.
+- **Planes**: multiplane images (`PLANE_n` aspects) and one image per plane (`disable_multiplane=1`) both
+  work. Each plane has its own region in the staging buffer: rows aligned to
+  `optimalBufferCopyRowPitchAlignment` (and a multiple of the texel size, as `bufferRowLength` is in texels),
+  plane offsets to `optimalBufferCopyOffsetAlignment` (at least 16). The copied size is the link's size
+  (decoder frames contexts may be larger).
+- **Queues**: `ff_vk_exec_pool_init` asks for its queues with the flags libavfilter was compiled for; the
+  prebuilt libavutil creates them with `VK_KHR_internally_synchronized_queues`, unknown to the Vulkan headers
+  of the build, and `vkGetDeviceQueue2` then returns no queue. The filters fetch the queues again with the
+  device's `queue_flags` (the validation layer still reports the pool's first call once, VUID-06225).
+- Build: `integrate.sh` adds `vf_gpufx_transfer.o vulkan.o` (libavfilter's copy of `libavutil/vulkan.c`)
+  and `gpufx_upload/download_filter_deps="vulkan"`; `docker/keep-filters.txt` keeps both.
+- Tests (`scripts/test-bundle.sh`): nv12, yuv420p and rgba round trips are bit-exact, multiplane and
+  `disable_multiplane=1`, mixed with `hwupload` / `hwdownload`; `gpufx` between them equals the software
+  path; every frame comes out with `latency=4`. Also checked by hand: p010, the Vulkan validation layer
+  (no VUID from the copies; plain `hwupload`/`hwdownload` give VUID-00174/00191 there).
+
+Measured on the 90 s clips (RTX 4060 Laptop, idle GPU): see the README benchmark.
 
 ### D3D12 and D3D11 frames (C API v7; built and cross-compiled, run only by the Windows CI job)
 

@@ -47,6 +47,13 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   -vf "format=nv12,hwupload,gpufx=effect=vignette.zip,gpufx=effect=sepia.zip,hwdownload,format=nv12" out.mp4
 ```
 
+```sh
+# Faster transfers (Vulkan): gpufx_upload/gpufx_download pipeline the copies; out_format=rgba keeps
+# separate gpufx filters in RGBA between them (the last one goes back to nv12)
+ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i a.mp4 \
+  -vf "format=nv12,gpufx_upload,gpufx=effect=vignette.zip:out_format=rgba,gpufx=effect=sepia.zip:out_format=nv12,gpufx_download,format=nv12" out.mp4
+```
+
 Docs: [design](docs/DESIGN.md) · [package format and how to write shaders](docs/EFFECT_FORMAT.md)
 
 ## Benchmark
@@ -84,6 +91,26 @@ then sharpen. The CPU side uses `gblur`, `eq`, `vignette`, `colorchannelmixer`, 
 | CPU filters | 34.95 s | 655 MB | 0 |
 | 8 separate `gpufx` filters | 29.06 s | 601 MB | 459 / 84 MB |
 | one `gpufx=graph=...` | **7.13 s** | 536 MB | 203 / 82 MB |
+
+**Vulkan frames and the transfer filters** (same machine, idle GPU, 2026-10-13, range of 3 runs; RAM is
+the peak working set, VRAM the dedicated peak of the 3rd run). Transfers: clip A only, nv12, 90 s.
+
+| Filter | Time | Peak RAM | VRAM ded. |
+|---|---|---|---|
+| Decode only (nv12) | 1.82–2.09 s | 261 MB | 16 MB |
+| `hwupload,hwdownload` | 3.49–4.09 s | 280 MB | 26 MB |
+| `gpufx_upload,hwdownload` | 3.27–4.11 s | 284 MB | 32 MB |
+| `hwupload,gpufx_download` | 2.52–3.10 s | 297 MB | 35 MB |
+| `gpufx_upload,gpufx_download` | 2.34–3.11 s | 291 MB | 32 MB |
+| Chain, 8 separate `gpufx`, hwupload/hwdownload | 11.73–12.18 s | 578 MB | 578 MB |
+| Chain, 8 separate `gpufx`, gpufx_upload/download | 10.23–10.31 s | 617 MB | 578 MB |
+| Chain, 8 separate, `out_format=rgba`, hwupload/hwdownload | 10.31–11.18 s | 612 MB | 679 MB |
+| Chain, 8 separate, `out_format=rgba`, gpufx_upload/download | 8.51–9.12 s | 590 MB | 681 MB |
+| Chain, one `graph=`, hwupload/hwdownload | 8.54–9.13 s | 577 MB | 257 MB |
+| Chain, one `graph=`, gpufx_upload/download | **6.25–6.53 s** | 545 MB | 260 MB |
+
+`gpufx_download` removes most of the readback cost (`hwdownload` waits for every copy); the upload side
+gains little since `hwupload` does not wait either.
 
 What the numbers say:
 

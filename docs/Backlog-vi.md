@@ -169,3 +169,28 @@
 - **Vị trí**: [crates/gpufx-core/src/vulkan.rs](../crates/gpufx-core/src/vulkan.rs) (`GpuContext::from_vulkan`), [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`config_vulkan`).
 - **Vì sao**: theo dõi wgpu hỗ trợ queue chỉ có compute; hoặc để libgpufx tự chọn họ từ danh sách thay vì caller.
 - **Ngày ghi**: 2026-10-13
+
+### Shader YUV tuỳ chọn cho transition (chọn shader theo tình huống)
+- **Vấn đề**: mọi hiệu ứng chạy trên RGBA nên mỗi `gpufx` đổi NV12 → RGBA → NV12 và giữ texture RGBA trung gian. Transition trộn/chọn pixel (crossfade, dissolve, wipe, slide, circle, clock, push…) làm đúng được thẳng trên plane Y và UV vì `lerp` giao hoán với phép đổi YUV ↔ RGB (affine).
+- **Thiết kế đề xuất**: manifest khai báo `variants.yuv` (tuỳ chọn) với helper `gpufx_read_y/uv`, `gpufx_write_y/uv`; engine chọn bản YUV khi input và output là NV12/yuv420p và hiệu ứng đứng một mình hoặc mọi hiệu ứng nối nhau đều có bản YUV, ngược lại dùng RGBA; option `variant=auto|rgba|yuv`; CI so pixel hai bản (lệch ≤ 1–2); tham số màu (`#rrggbb`) đổi sang YUV; định dạng khác (P010, 444) quay về RGBA.
+- **Vị trí**: [crates/gpufx-core/src/convert.rs](../crates/gpufx-core/src/convert.rs), [crates/gpufx-core/src/runtime.rs](../crates/gpufx-core/src/runtime.rs), manifest ([docs/EFFECT_FORMAT-vi.md](EFFECT_FORMAT-vi.md)), gói transition trong `examples/effects`.
+- **Vì sao**: bỏ pass đổi định dạng và texture RGBA, giảm dữ liệu đọc/ghi khoảng 2,7 lần cho chuỗi chỉ có transition (chưa đo).
+- **Ngày ghi**: 2026-10-13
+
+### Các filter `gpufx` nối nhau dùng chung một wgpu device
+- **Vấn đề**: mỗi filter `gpufx` tạo device riêng; chuỗi 8 filter trên frame Vulkan tốn 578 MB VRAM so với 257 MB của một `graph=` và chậm hơn khoảng 4 s / 2158 frame (đo khi GPU đang bận game).
+- **Vị trí**: [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`config_vulkan`), [crates/gpufx-core/src/vulkan.rs](../crates/gpufx-core/src/vulkan.rs) (`GpuContext::from_vulkan`).
+- **Vì sao**: dùng chung `GpuContext` theo `VkDevice` của FFmpeg (đếm tham chiếu) giảm VRAM, thời gian khởi tạo và chi phí đồng bộ giữa các filter.
+- **Ngày ghi**: 2026-10-13
+
+### Frame D3D12/D3D11 lỗi trên RTX 4060 (Windows)
+- **Vấn đề**: `scripts/test-bundle.sh` FAIL ở "D3D12 nv12/p010le: vignette equals the software path" (output khác đường phần mềm), và `hwupload,gpufx=effect=invert.zip,hwdownload` trên device D3D11 bị segfault. Bản build trước đợt `gpufx_upload`/`gpufx_download` cũng lỗi y hệt; CI không bắt được vì runner Windows không tạo được device D3D.
+- **Vị trí**: [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`config_d3d_output`, đường frame D3D), [crates/gpufx-core/src/d3d12.rs](../crates/gpufx-core/src/d3d12.rs).
+- **Vì sao**: đường D3D chưa từng chạy trên phần cứng thật (như đường Vulkan trước khi sửa họ queue và `max_buffer_size`); cần debug với D3D12 debug layer.
+- **Ngày ghi**: 2026-10-13
+
+### `gpufx_upload`/`gpufx_download`: các giới hạn còn lại
+- **Vấn đề**: (1) đổi kích thước frame giữa chừng thì trả EINVAL (cần chờ các slot, dựng lại vùng copy và buffer, download phải xả frame đang chờ trước); (2) libavfilter build với Vulkan-Headers khác bản của libavutil dựng sẵn nên pool không lấy được queue (cờ internally synchronized queues), filter lấy lại queue bằng `queue_flags` của device — sinh VUID-VkDeviceQueueInfo2-flags-06225 một lần; (3) `out_format` dùng một format cho mọi output, chưa nhận danh sách theo từng output; (4) chưa thử `gpufx_download` với frame của `-hwaccel vulkan`; (5) chỉ có cho Vulkan, chưa có cho D3D.
+- **Vị trí**: [ffmpeg/vf_gpufx_transfer.c](../ffmpeg/vf_gpufx_transfer.c) (`check_size`, khối lấy lại queue sau `ff_vk_exec_pool_init`), [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`out_format`), [scripts/build-prebuilt.sh](../scripts/build-prebuilt.sh) (tag Vulkan-Headers).
+- **Vì sao**: (1) nguồn đổi độ phân giải làm dừng cả graph; (2) nên khớp phiên bản header với libavutil thay vì vá lúc chạy.
+- **Ngày ghi**: 2026-10-13

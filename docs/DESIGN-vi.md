@@ -136,8 +136,8 @@ tạo graph thay vì chạy sai.
 ## 5. Filter FFmpeg `gpufx`
 
 ```
-gpufx=effect=<zip|thư mục>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)'][:backend=auto|vulkan|dx12|metal|gl][:shortest=0|1]
-gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backend=...][:shortest=0|1]
+gpufx=effect=<zip|thư mục>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)'][:backend=auto|vulkan|dx12|metal|gl][:shortest=0|1][:out_format=<pix_fmt>]
+gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backend=...][:shortest=0|1][:out_format=<pix_fmt>]
 ```
 
 - **effect**: đường dẫn gói. Số input của filter lấy từ manifest.
@@ -152,6 +152,14 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   hiệu ứng có nó. Dấu cách quanh `|` được bỏ qua.
 - **graph**: cả đồ thị hiệu ứng với nhiều input và output, thay cho `effect`; xem "Đồ thị GPU trong
   một filter" ở mục 6.
+- **out_format**: ép pixel format của mọi output (với frame Vulkan/D3D: sw_format của frames context đầu
+  ra). Format phải nằm trong danh sách output của effect, libgpufx phải chuyển được trên GPU
+  (`gpufx_format_supported`), và với frame GPU thì FFmpeg phải tạo được storage image của nó; không thì
+  filter báo lỗi lúc configure. Mặc định: chọn như cũ (phần mềm: negotiate theo danh sách output; frame
+  GPU: xem "Frame Vulkan"). Dùng: `out_format=rgba` giữa các `gpufx` rời để filter ở giữa bỏ qua chuyển
+  đổi YUV ↔ RGBA (filter cuối quay về bằng `out_format=nv12`).
+  Giới hạn: một format cho mọi output của filter; với frame D3D chỉ nv12, p010le, rgba, rgba64le; với frame
+  phần mềm, filter phía sau cần format khác thì FFmpeg tự chèn `scale` chạy trên CPU.
 - **params**: `tên=giá trị` cách nhau bởi `|`. Giá trị là literal (`0.5`, `1,0,0`, `#ff8800`)
   hoặc **biểu thức FFmpeg** theo `t`, `n`, `w`, `h`, `a` (`w/h`), `sar`, `dar` (`a*sar`),
   tính lại mỗi frame. Đây là cách làm keyframe/transition không cần tool ngoài.
@@ -316,6 +324,8 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   frames context `yuva420p`/`yuva444p` không có usage nào (của `hwupload` thì dùng được), nên output chuyển sang
   format khác, ví dụ `rgba`. sw_format của output là của input nguồn nếu effect
   được phép xuất, không thì format đầu tiên của pad output mà libgpufx chuyển được và ghi được.
+  `out_format` thay cho cách chọn đó (đúng format ấy, hoặc lỗi lúc configure). Chuỗi nhiều filter rời giữ
+  RGBA ở giữa bằng `out_format=rgba` trên mọi filter trừ cái cuối (số đo ở mục Benchmark của README).
 - **Mỗi frame**, CPU không chờ: filter khoá mỗi `AVVkFrame` một lần (`lock_frame`; một frame `split` phía
   trước có thể nằm trên hai pad), libgpufx bọc mỗi image thành texture wgpu (`texture_from_raw`, bộ nhớ
   ngoài, trạng thái đầu lấy từ layout của image; layout wgpu không có trạng thái tương ứng
@@ -347,6 +357,52 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
 - Đã chạy trên lavapipe: test bundle so framemd5 của `hwupload,gpufx,…,hwdownload` với đường phần mềm (rgba,
   nv12, yuv420p, yuv444p, p010le, yuv420p10le, rgba64le, đồ thị có hai input là cùng một frame split, hai filter
   liền nhau, đổi format output): giống hệt. Test Rust so `encode_gpu` với đường CPU từng byte.
+
+### Filter truyền frame `gpufx_upload` / `gpufx_download` (Vulkan)
+
+```sh
+ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i a.mp4 \
+  -vf "format=nv12,gpufx_upload,gpufx=effect=vignette.zip,gpufx=effect=sepia.zip,gpufx_download,format=nv12" out.mp4
+```
+
+Thay thẳng cho `hwupload` / `hwdownload` trên device Vulkan (`ffmpeg/vf_gpufx_transfer.c`, C thuần dùng
+helper Vulkan nội bộ của FFmpeg `libavutil/vulkan.h`, không cần libgpufx). Lý do: trên NVIDIA, FFmpeg 9.0
+copy qua staging buffer (tắt host image copy và import bộ nhớ host), và `hwdownload` chờ trên CPU từng lần
+copy (`ff_vk_exec_wait`), nên CPU và GPU chạy lần lượt.
+
+- **gpufx_upload** (`depth`, mặc định 3): frames context tạo trên `-filter_hw_device` như `hwupload` (format
+  vào: sw format của device mà plane khớp 1:1 với plane Vulkan). Vòng `depth` staging buffer map sẵn,
+  host-coherent, mỗi execution context một cái: memcpy vào slot, barrier + `vkCmdCopyBufferToImage` từng
+  plane, submit không chờ. CPU chỉ chờ khi quay lại slot mà lần copy trước chưa xong (`ff_vk_exec_start`
+  chờ fence của slot đó).
+- **gpufx_download** (`latency`, mặc định 2): filter `activate`. Frame k được submit (`vkCmdCopyImageToBuffer`
+  vào slot k mod (latency+1), bộ nhớ host-cached), frame k-latency được chờ (thường đã xong), invalidate,
+  chép vào buffer của `ff_get_video_buffer` rồi gửi đi kèm props. Gặp EOF thì xả hết frame đang bay rồi mới
+  chuyển status. Format ra phải là sw_format của frame (thêm `format=<sw_format>` phía sau, như `hwdownload`).
+  Input thưa (nguồn live) thì mỗi frame ra trễ `latency` frame; `latency=0` tắt pipelining. Cả hai filter
+  không nhận đổi kích thước frame giữa chừng (`hwupload`/`hwdownload` thì nhận): graph dừng với EINVAL.
+- **Đồng bộ**: `ff_vk_exec_add_dep_frame` (lock_frame, chờ timeline semaphore của từng image ở `sem_value`,
+  signal `sem_value + 1`), `ff_vk_frame_barrier` không chuyển queue family, và `ff_vk_exec_submit` (giữ
+  `lock_queue` của FFmpeg), trên họ queue graphics của FFmpeg, cùng họ mà `gpufx` và wgpu dùng. Vì vậy trộn
+  được với `hwupload`, `hwdownload`, `gpufx` và các filter `*_vulkan`. Execution giữ tham chiếu frame tới khi
+  đọc xong bản copy.
+- **Plane**: image multiplane (aspect `PLANE_n`) và mỗi plane một image (`disable_multiplane=1`) đều chạy.
+  Mỗi plane có vùng riêng trong staging buffer: hàng căn theo `optimalBufferCopyRowPitchAlignment` (và là
+  bội của cỡ texel, vì `bufferRowLength` tính bằng texel), offset plane căn theo
+  `optimalBufferCopyOffsetAlignment` (ít nhất 16). Kích thước copy là kích thước link (frames context của
+  decoder có thể lớn hơn).
+- **Queue**: `ff_vk_exec_pool_init` lấy queue với cờ mà libavfilter được biên dịch; libavutil prebuilt tạo
+  queue với `VK_KHR_internally_synchronized_queues`, header Vulkan của bản build không biết cờ này, nên
+  `vkGetDeviceQueue2` không trả queue nào. Filter lấy lại queue với `queue_flags` của device (validation layer
+  vẫn báo một lần cho lần gọi đầu của pool, VUID-06225).
+- Build: `integrate.sh` thêm `vf_gpufx_transfer.o vulkan.o` (bản `libavutil/vulkan.c` của libavfilter) và
+  `gpufx_upload/download_filter_deps="vulkan"`; `docker/keep-filters.txt` giữ cả hai.
+- Test (`scripts/test-bundle.sh`): vòng nv12, yuv420p, rgba khớp từng bit, multiplane lẫn
+  `disable_multiplane=1`, trộn với `hwupload` / `hwdownload`; `gpufx` ở giữa khớp đường phần mềm; `latency=4`
+  vẫn ra đủ frame. Kiểm tay thêm: p010, validation layer (bản copy không sinh VUID nào; `hwupload`/`hwdownload`
+  gốc sinh VUID-00174/00191).
+
+Số đo trên clip 90 s (RTX 4060 Laptop, GPU rảnh): xem mục Benchmark của README.
 
 ### Frame D3D12 và D3D11 (C API v7; đã build và cross-compile, chỉ job CI Windows chạy thử)
 

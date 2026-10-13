@@ -37,8 +37,11 @@ split
 
 # Hardware frames: gpufx processes Vulkan frames in place (-init_hw_device vulkan,
 # hwupload,gpufx=...,hwdownload,format=...); hwmap maps frames between devices.
+# gpufx_upload/gpufx_download: pipelined replacements for hwupload/hwdownload (Vulkan).
 hwupload
 hwdownload
+gpufx_upload
+gpufx_download
 hwmap
 
 # Utility filters to normalise the inputs: timing, metadata and layout, and the few

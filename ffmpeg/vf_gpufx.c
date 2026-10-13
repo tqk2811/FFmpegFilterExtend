@@ -104,6 +104,7 @@ typedef struct GpufxContext {
     int64_t frame_count;
     int warned_interlaced;
     int warned_hdr;
+    enum AVPixelFormat out_format; /* forced output format, AV_PIX_FMT_NONE: chosen as before */
     /* GPU frames: every input and output is hw_fmt (Vulkan, D3D12 or D3D11). */
     int hw;
     enum AVPixelFormat hw_fmt;
@@ -345,6 +346,28 @@ static av_cold int init(AVFilterContext *ctx)
         for (uint32_t j = 0; j < gpufx_effect_output_pad_format_count(s->fx, k); j++)
             if ((ret = check_format_name(ctx, gpufx_effect_output_pad_format(s->fx, k, j), 1)) < 0)
                 return ret;
+    /* out_format: every output must be allowed to have it, and the GPU must convert it. */
+    if (s->out_format != AV_PIX_FMT_NONE) {
+        const char *name = av_get_pix_fmt_name(s->out_format);
+
+        if (!gpufx_format_supported(name)) {
+            av_log(ctx, AV_LOG_ERROR, "out_format=%s is not converted on the GPU by libgpufx "
+                   "(nv12, yuv420p, p010le, rgba...).\n", name);
+            return AVERROR(EINVAL);
+        }
+        for (unsigned k = 0; k < s->nb_outputs; k++) {
+            const uint32_t count = gpufx_effect_output_pad_format_count(s->fx, k);
+            int listed = 0;
+
+            for (uint32_t j = 0; j < count && !listed; j++)
+                listed = !strcmp(gpufx_effect_output_pad_format(s->fx, k, j), name);
+            if (!listed) {
+                av_log(ctx, AV_LOG_ERROR, "out_format=%s: output '%s' of '%s' cannot have that format.\n",
+                       name, gpufx_effect_output_name(s->fx, k), gpufx_effect_name(s->fx));
+                return AVERROR(EINVAL);
+            }
+        }
+    }
 
     s->conv     = av_calloc(s->nb_inputs, sizeof(*s->conv));
     s->in_sws   = av_calloc(s->nb_inputs, sizeof(*s->in_sws));
@@ -836,7 +859,7 @@ static int config_vulkan_output(AVFilterLink *outlink, unsigned k)
 {
     AVFilterContext *ctx = outlink->src;
     GpufxContext *s = ctx->priv;
-    const enum AVPixelFormat want = s->hw_in_fmt[s->source[k]];
+    const enum AVPixelFormat want = s->out_format != AV_PIX_FMT_NONE ? s->out_format : s->hw_in_fmt[s->source[k]];
     const uint32_t count = gpufx_effect_output_pad_format_count(s->fx, k);
 
     /* Pass -1 tries the source input's format, then each format in order. */
@@ -850,6 +873,8 @@ static int config_vulkan_output(AVFilterLink *outlink, unsigned k)
 
         for (uint32_t m = 0; m < count && !listed; m++)
             listed = !strcmp(gpufx_effect_output_pad_format(s->fx, k, m), name);
+        if (j >= 0 && s->out_format != AV_PIX_FMT_NONE)
+            break; /* out_format: that format or nothing */
         if (!listed || (j >= 0 && fmt == want) || !gpufx_format_supported(name) || !av_vkfmt_from_pixfmt(fmt))
             continue;
         if (!(ref = av_hwframe_ctx_alloc(s->hw_device)))
@@ -871,6 +896,12 @@ static int config_vulkan_output(AVFilterLink *outlink, unsigned k)
         av_buffer_unref(&ff_filter_link(outlink)->hw_frames_ctx);
         ff_filter_link(outlink)->hw_frames_ctx = ref;
         return 0;
+    }
+    if (s->out_format != AV_PIX_FMT_NONE) {
+        av_log(ctx, AV_LOG_ERROR, "Output '%s': out_format=%s cannot be written into Vulkan frames "
+               "(FFmpeg makes no storage images of it).\n", ctx->output_pads[k].name,
+               av_get_pix_fmt_name(s->out_format));
+        return AVERROR(ENOSYS);
     }
     av_log(ctx, AV_LOG_ERROR, "Output '%s': no format the effect outputs can be written into Vulkan "
            "frames on the GPU.\n", ctx->output_pads[k].name);
@@ -1093,7 +1124,7 @@ static int config_d3d_output(AVFilterLink *outlink, unsigned k)
 {
     AVFilterContext *ctx = outlink->src;
     GpufxContext *s = ctx->priv;
-    const enum AVPixelFormat want = s->hw_in_fmt[s->source[k]];
+    const enum AVPixelFormat want = s->out_format != AV_PIX_FMT_NONE ? s->out_format : s->hw_in_fmt[s->source[k]];
     const uint32_t count = gpufx_effect_output_pad_format_count(s->fx, k);
 
     for (int j = -1; j < (int)count; j++) {
@@ -1103,6 +1134,8 @@ static int config_d3d_output(AVFilterLink *outlink, unsigned k)
 
         for (uint32_t m = 0; m < count && !listed; m++)
             listed = !strcmp(gpufx_effect_output_pad_format(s->fx, k, m), name);
+        if (j >= 0 && s->out_format != AV_PIX_FMT_NONE)
+            break; /* out_format: that format or nothing */
         if (!listed || (j >= 0 && fmt == want) || !gpufx_format_supported(name) ||
             (fmt != AV_PIX_FMT_NV12 && fmt != AV_PIX_FMT_P010 && fmt != AV_PIX_FMT_RGBA && fmt != AV_PIX_FMT_RGBA64))
             continue;
@@ -1158,6 +1191,12 @@ static int config_d3d_output(AVFilterLink *outlink, unsigned k)
             ff_filter_link(outlink)->hw_frames_ctx = ref;
             return 0;
         }
+    }
+    if (s->out_format != AV_PIX_FMT_NONE) {
+        av_log(ctx, AV_LOG_ERROR, "Output '%s': out_format=%s cannot be written into %s frames "
+               "(nv12, p010le, rgba, rgba64le).\n", ctx->output_pads[k].name,
+               av_get_pix_fmt_name(s->out_format), api_name(s->hw_fmt));
+        return AVERROR(ENOSYS);
     }
     av_log(ctx, AV_LOG_ERROR, "Output '%s': no format the effect outputs can be written into %s "
            "frames on the GPU (nv12, p010le, rgba, rgba64le).\n", ctx->output_pads[k].name,
@@ -1531,9 +1570,14 @@ static int query_formats(const AVFilterContext *ctx,
         if ((ret = ff_formats_ref(ff_make_format_list(out_alpha), &cfg_out[k]->alpha_modes)) < 0)
             return ret;
         formats = NULL;
-        for (uint32_t j = 0; j < gpufx_effect_output_pad_format_count(s->fx, k); j++)
-            if ((ret = ff_add_format(&formats, av_get_pix_fmt(gpufx_effect_output_pad_format(s->fx, k, j)))) < 0)
+        if (s->out_format != AV_PIX_FMT_NONE) {
+            if ((ret = ff_add_format(&formats, s->out_format)) < 0)
                 return ret;
+        } else {
+            for (uint32_t j = 0; j < gpufx_effect_output_pad_format_count(s->fx, k); j++)
+                if ((ret = ff_add_format(&formats, av_get_pix_fmt(gpufx_effect_output_pad_format(s->fx, k, j)))) < 0)
+                    return ret;
+        }
         if ((ret = add_hw_formats(&formats)) < 0)
             return ret;
         if ((ret = ff_formats_ref(formats, &cfg_out[k]->formats)) < 0)
@@ -1766,6 +1810,7 @@ static const AVOption gpufx_options[] = {
     { "params",   "effect parameters as name=value|name=value (package.name in a chain or graph)", OFFSET(params_str),  AV_OPT_TYPE_STRING, { .str = NULL },   0, 0, FLAGS },
     { "backend",  "GPU API: auto, vulkan, dx12, metal, gl",          OFFSET(backend),     AV_OPT_TYPE_STRING, { .str = "auto" }, 0, 0, FLAGS },
     { "shortest", "end when the shortest input ends",                OFFSET(shortest),    AV_OPT_TYPE_BOOL,   { .i64 = 0 },      0, 1, FLAGS },
+    { "out_format", "output pixel format (also the sw_format of GPU frames), e.g. rgba between chained gpufx; default: chosen from the input", OFFSET(out_format), AV_OPT_TYPE_PIXEL_FMT, { .i64 = AV_PIX_FMT_NONE }, -1, INT_MAX, FLAGS },
     { NULL }
 };
 

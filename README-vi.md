@@ -44,6 +44,13 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   -vf "format=nv12,hwupload,gpufx=effect=vignette.zip,gpufx=effect=sepia.zip,hwdownload,format=nv12" out.mp4
 ```
 
+```sh
+# Truyền nhanh hơn (Vulkan): gpufx_upload/gpufx_download chạy copy nối đuôi; out_format=rgba giữ
+# các gpufx rời ở RGBA giữa chúng (filter cuối quay về nv12)
+ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i a.mp4 \
+  -vf "format=nv12,gpufx_upload,gpufx=effect=vignette.zip:out_format=rgba,gpufx=effect=sepia.zip:out_format=nv12,gpufx_download,format=nv12" out.mp4
+```
+
 Tài liệu: [thiết kế](docs/DESIGN-vi.md) · [định dạng gói và cách viết shader](docs/EFFECT_FORMAT-vi.md) · [English](README.md)
 
 ## Đo tốc độ
@@ -81,6 +88,26 @@ sharpen. Phía CPU dùng `gblur`, `eq`, `vignette`, `colorchannelmixer`, `unshar
 | Filter CPU | 34.95 s | 655 MB | 0 |
 | 8 filter `gpufx` riêng | 29.06 s | 601 MB | 459 / 84 MB |
 | một `gpufx=graph=...` | **7.13 s** | 536 MB | 203 / 82 MB |
+
+**Frame Vulkan và filter truyền frame** (cùng máy, GPU rảnh, 2026-10-13, khoảng của 3 lần chạy; RAM là
+working set đỉnh, VRAM là dedicated đỉnh của lần 3). Phần truyền: chỉ clip A, nv12, 90 s.
+
+| Filter | Thời gian | RAM đỉnh | VRAM ded. |
+|---|---|---|---|
+| Chỉ decode (nv12) | 1.82–2.09 s | 261 MB | 16 MB |
+| `hwupload,hwdownload` | 3.49–4.09 s | 280 MB | 26 MB |
+| `gpufx_upload,hwdownload` | 3.27–4.11 s | 284 MB | 32 MB |
+| `hwupload,gpufx_download` | 2.52–3.10 s | 297 MB | 35 MB |
+| `gpufx_upload,gpufx_download` | 2.34–3.11 s | 291 MB | 32 MB |
+| Chuỗi, 8 `gpufx` riêng, hwupload/hwdownload | 11.73–12.18 s | 578 MB | 578 MB |
+| Chuỗi, 8 `gpufx` riêng, gpufx_upload/download | 10.23–10.31 s | 617 MB | 578 MB |
+| Chuỗi, 8 riêng, `out_format=rgba`, hwupload/hwdownload | 10.31–11.18 s | 612 MB | 679 MB |
+| Chuỗi, 8 riêng, `out_format=rgba`, gpufx_upload/download | 8.51–9.12 s | 590 MB | 681 MB |
+| Chuỗi, một `graph=`, hwupload/hwdownload | 8.54–9.13 s | 577 MB | 257 MB |
+| Chuỗi, một `graph=`, gpufx_upload/download | **6.25–6.53 s** | 545 MB | 260 MB |
+
+`gpufx_download` bỏ được phần lớn chi phí readback (`hwdownload` chờ từng lần copy); phía upload
+lợi ít vì `hwupload` vốn cũng không chờ.
 
 Nhận xét:
 
