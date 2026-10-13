@@ -488,6 +488,9 @@ fn yuv_gpu_frames_match_cpu_frames_across_tiles() {
     let info = FrameInfo::new(0.5, 3);
     let formats = [Nv12, Yuv420p, Yuv422p, Yuv444p, Yuva420p, Yuva444p, P010, Yuv422p10];
     let mut g = graph(&ctx, "[0]vignette.zip|grayscale.zip[out]");
+    // Metal compiles with fast math: a sample landing on a rounding tie may be one step off
+    // (seen on p010 -> yuv422p10 chroma). Other backends must match byte for byte.
+    let metal = ctx.description().ends_with("(Metal)");
     for (n, (fin, fout)) in formats.iter().zip(formats.iter().cycle().skip(1)).chain(formats.iter().zip(formats.iter())).enumerate() {
         let (fin, fout) = (*fin, *fout);
         if !supported(&ctx, fin) || !supported(&ctx, fout) {
@@ -507,7 +510,35 @@ fn yuv_gpu_frames_match_cpu_frames_across_tiles() {
                 let mut out = target(&ctx, fout, w, h);
                 out.color = color;
                 let got = gpu_run(&ctx, &mut g, &[input], &[out], info);
-                assert_eq!(got, want, "{} -> {} {w}x{h} {loc:?} {range:?} seed {seed} bypass {}", fin.name(), fout.name(), info.is_none());
+                let what = format!("{} -> {} {w}x{h} {loc:?} {range:?} seed {seed} bypass {}", fin.name(), fout.name(), info.is_none());
+                if metal {
+                    assert_samples_near(&got, &want, fout, &what);
+                } else {
+                    assert_eq!(got, want, "{what}");
+                }
+            }
+        }
+    }
+}
+
+/// Same planes, every sample at most one step apart (2-byte little-endian samples for the
+/// 10-bit formats, bytes otherwise).
+fn assert_samples_near(got: &[Vec<Vec<u8>>], want: &[Vec<Vec<u8>>], format: PixelFormat, what: &str) {
+    let wide = matches!(format, PixelFormat::P010 | PixelFormat::Yuv422p10);
+    assert_eq!(got.len(), want.len(), "{what}");
+    for (f, (gf, wf)) in got.iter().zip(want).enumerate() {
+        assert_eq!(gf.len(), wf.len(), "{what}");
+        for (p, (gp, wp)) in gf.iter().zip(wf).enumerate() {
+            assert_eq!(gp.len(), wp.len(), "{what} plane {p}");
+            let samples = |b: &[u8]| -> Vec<i32> {
+                if wide {
+                    b.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c) as i32).collect()
+                } else {
+                    b.iter().map(|&v| v as i32).collect()
+                }
+            };
+            for (i, (a, b)) in samples(gp).into_iter().zip(samples(wp)).enumerate() {
+                assert!((a - b).abs() <= 1, "{what}: output {f} plane {p} sample {i}: {a} vs {b}");
             }
         }
     }
