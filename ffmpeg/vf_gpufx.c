@@ -7,7 +7,8 @@
  * as they come and fail on a mismatch instead of being converted silently.
  * libgpufx converts the common YUV formats (NV12, P010, yuv420p...) to and from
  * the RGBA the effects work in on the GPU; other input formats go through swscale.
- * Like the *_cuda filters, gpufx outputs GPU frames only (Vulkan, D3D12 or D3D11): put
+ * Like the *_cuda filters, gpufx outputs GPU frames only (Vulkan, D3D12, D3D11 or
+ * VideoToolbox): put
  * hwdownload or gpufx_download before CPU filters and encoders. Software inputs are
  * uploaded by the filter on the device of its GPU inputs, or on -filter_hw_device.
  * graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]' runs a whole effect graph in
@@ -22,6 +23,9 @@
  * ID3D12Device in the same way, synchronised with their fences. D3D11 frames run on the
  * D3D12 device of the same adapter: the output frames gpufx makes are shared textures
  * (no copy), inputs from elsewhere are copied once on the GPU.
+ * VideoToolbox frames (macOS: hwupload on -init_hw_device videotoolbox, or the decoders)
+ * are read and written in place through their IOSurfaces on the system's Metal device;
+ * without a fence to hand on, each event returns once the GPU is done.
  *
  * This file is part of FFmpeg.
  *
@@ -104,7 +108,7 @@ typedef struct GpufxContext {
     int warned_interlaced;
     int warned_hdr;
     enum AVPixelFormat out_format; /* forced output format, AV_PIX_FMT_NONE: chosen as before */
-    /* GPU frames: every output and GPU input is hw_fmt (Vulkan, D3D12 or D3D11). */
+    /* GPU frames: every output and GPU input is hw_fmt (Vulkan, D3D12, D3D11 or VideoToolbox). */
     enum AVPixelFormat hw_fmt;
     AVBufferRef *hw_device; /* the device libgpufx runs on, held while it does */
     enum AVPixelFormat *hw_in_fmt; /* sw_format of each input (of its upload frames for software) */
@@ -128,6 +132,10 @@ typedef struct GpufxContext {
 #if CONFIG_D3D11VA
     GpufxD3D11Frame *d11_in;
     GpufxD3D11Frame *d11_out;
+#endif
+#if CONFIG_VIDEOTOOLBOX
+    GpufxVtFrame *vt_in;
+    GpufxVtFrame *vt_out;
 #endif
 } GpufxContext;
 
@@ -297,10 +305,15 @@ static av_cold int init(AVFilterContext *ctx)
                "The 'effect' option (path to a .zip package) or the 'graph' option is required.\n");
         return AVERROR(EINVAL);
     }
-    /* The filter runs on FFmpeg's Vulkan, D3D12 or D3D11 device: no OpenGL or Metal frames. */
-    if (s->backend && (!av_strcasecmp(s->backend, "gl") || !av_strcasecmp(s->backend, "metal"))) {
+    /*
+     * The filter runs on FFmpeg's Vulkan, D3D12 or D3D11 device, or on Metal for VideoToolbox
+     * frames: no OpenGL frames.
+     */
+    if (s->backend && (!av_strcasecmp(s->backend, "gl") ||
+                       (!av_strcasecmp(s->backend, "metal") && !gpufx_videotoolbox_supported()))) {
         av_log(ctx, AV_LOG_ERROR, "backend=%s: gpufx runs on the Vulkan, D3D12 or D3D11 device of "
-               "its frames or of -filter_hw_device; use auto, vulkan or dx12.\n", s->backend);
+               "its frames or of -filter_hw_device (Metal for VideoToolbox frames on macOS); "
+               "use auto, vulkan or dx12.\n", s->backend);
         return AVERROR(EINVAL);
     }
     /* Versions only add functions: a newer library works. */
@@ -437,6 +450,10 @@ static av_cold void uninit(AVFilterContext *ctx)
 #if CONFIG_D3D11VA
     av_freep(&s->d11_in);
     av_freep(&s->d11_out);
+#endif
+#if CONFIG_VIDEOTOOLBOX
+    av_freep(&s->vt_in);
+    av_freep(&s->vt_out);
 #endif
     gpufx_effect_free(s->fx);
     s->fx = NULL;
@@ -973,18 +990,37 @@ static int vulkan_ok(void)
 
 /*
  * The GPU frame APIs gpufx runs on: the pixel format of their frames and the FFmpeg device
- * type that makes them. Another API (VideoToolbox on macOS) is one more entry here, plus
- * its cases in hw_ok(), config_api(), config_api_output(), upload_ok() and process_hw().
+ * type that makes them. Another API is one more entry here, plus its cases in hw_ok(),
+ * config_api(), config_api_output(), sw_format_ok(), upload_ok() and process_hw().
  */
 static const struct {
     enum AVPixelFormat fmt;
     enum AVHWDeviceType type;
     const char *name;
 } hw_apis[] = {
-    { AV_PIX_FMT_VULKAN, AV_HWDEVICE_TYPE_VULKAN,  "Vulkan" },
-    { AV_PIX_FMT_D3D12,  AV_HWDEVICE_TYPE_D3D12VA, "D3D12"  },
-    { AV_PIX_FMT_D3D11,  AV_HWDEVICE_TYPE_D3D11VA, "D3D11"  },
+    { AV_PIX_FMT_VULKAN,       AV_HWDEVICE_TYPE_VULKAN,       "Vulkan"       },
+    { AV_PIX_FMT_D3D12,        AV_HWDEVICE_TYPE_D3D12VA,      "D3D12"        },
+    { AV_PIX_FMT_D3D11,        AV_HWDEVICE_TYPE_D3D11VA,      "D3D11"        },
+    { AV_PIX_FMT_VIDEOTOOLBOX, AV_HWDEVICE_TYPE_VIDEOTOOLBOX, "VideoToolbox" },
 };
+
+/*
+ * Whether gpufx reads and writes D3D12/D3D11/VideoToolbox frames of sw_format fmt in place,
+ * and the list of those formats, in messages.
+ */
+static int sw_format_ok(enum AVPixelFormat hw_fmt, enum AVPixelFormat fmt)
+{
+    if (!gpufx_format_supported(av_get_pix_fmt_name(fmt)))
+        return 0;
+    if (hw_fmt == AV_PIX_FMT_VIDEOTOOLBOX)
+        return fmt == AV_PIX_FMT_NV12 || fmt == AV_PIX_FMT_P010;
+    return fmt == AV_PIX_FMT_NV12 || fmt == AV_PIX_FMT_P010 || fmt == AV_PIX_FMT_RGBA || fmt == AV_PIX_FMT_RGBA64;
+}
+
+static const char *sw_format_list(enum AVPixelFormat hw_fmt)
+{
+    return hw_fmt == AV_PIX_FMT_VIDEOTOOLBOX ? "nv12, p010le" : "nv12, p010le, rgba, rgba64le";
+}
 
 /* Name of the API of GPU frames of format fmt, in messages. */
 static const char *api_name(enum AVPixelFormat fmt)
@@ -1004,7 +1040,7 @@ static enum AVPixelFormat device_hw_format(enum AVHWDeviceType type)
     return AV_PIX_FMT_NONE;
 }
 
-/* Checks the frames contexts of the inputs of D3D12/D3D11 frames; returns the device. */
+/* Checks the frames contexts of the inputs of D3D12/D3D11/VideoToolbox frames; returns the device. */
 static AVHWDeviceContext *d3d_inputs(AVFilterContext *ctx, AVBufferRef **device_ref)
 {
     GpufxContext *s = ctx->priv;
@@ -1028,12 +1064,10 @@ static AVHWDeviceContext *d3d_inputs(AVFilterContext *ctx, AVBufferRef **device_
         }
         fc0 = fc0 ? fc0 : fc;
         s->hw_in_fmt[i] = fc->sw_format;
-        if (!gpufx_format_supported(av_get_pix_fmt_name(fc->sw_format)) ||
-            (fc->sw_format != AV_PIX_FMT_NV12 && fc->sw_format != AV_PIX_FMT_P010 &&
-             fc->sw_format != AV_PIX_FMT_RGBA && fc->sw_format != AV_PIX_FMT_RGBA64)) {
-            av_log(ctx, AV_LOG_ERROR, "Input '%s' has %s frames of %s; gpufx reads nv12, p010le, rgba "
-                   "and rgba64le %s frames. Convert before uploading (format=nv12).\n",
-                   ctx->input_pads[i].name, api, av_get_pix_fmt_name(fc->sw_format), api);
+        if (!sw_format_ok(s->hw_fmt, fc->sw_format)) {
+            av_log(ctx, AV_LOG_ERROR, "Input '%s' has %s frames of %s; gpufx reads %s frames of "
+                   "%s. Convert before uploading (format=nv12).\n", ctx->input_pads[i].name, api,
+                   av_get_pix_fmt_name(fc->sw_format), api, sw_format_list(s->hw_fmt));
             return NULL;
         }
     }
@@ -1041,7 +1075,10 @@ static AVHWDeviceContext *d3d_inputs(AVFilterContext *ctx, AVBufferRef **device_
     return (AVHWDeviceContext *)fc0->device_ref->data;
 }
 
-/* Moves the effect to the D3D12 or D3D11 device of the inputs; once, from config_inputs(). */
+/*
+ * Moves the effect to the D3D12 or D3D11 device of the inputs, or to Metal for VideoToolbox
+ * frames; once, from config_inputs().
+ */
 static int config_d3d(AVFilterContext *ctx)
 {
     GpufxContext *s = ctx->priv;
@@ -1071,6 +1108,14 @@ static int config_d3d(AVFilterContext *ctx)
         ret = 0;
     }
 #endif
+#if CONFIG_VIDEOTOOLBOX
+    /* The frames are IOSurfaces any Metal device opens: libgpufx uses the system's. */
+    if (s->hw_fmt == AV_PIX_FMT_VIDEOTOOLBOX) {
+        if (gpufx_effect_use_videotoolbox(s->fx) < 0)
+            return gpufx_error(ctx, "Cannot use Metal for VideoToolbox frames");
+        ret = 0;
+    }
+#endif
     if (ret < 0)
         return ret;
     if (!(s->hw_device = av_buffer_ref(ref)))
@@ -1080,7 +1125,7 @@ static int config_d3d(AVFilterContext *ctx)
 }
 
 /*
- * The frames context of a D3D12/D3D11 output, in the source input's sw_format when the
+ * The frames context of a D3D12/D3D11/VideoToolbox output, in the source input's sw_format when the
  * effect may output it, else the first format of the output gpufx writes into such
  * frames. Frames libgpufx writes as storage (D3D12 unordered access; D3D11 shared NT
  * handle textures with unordered access) if the device makes them, else frames it copies
@@ -1102,11 +1147,10 @@ static int config_d3d_output(AVFilterLink *outlink, unsigned k)
             listed = !strcmp(gpufx_effect_output_pad_format(s->fx, k, m), name);
         if (j >= 0 && s->out_format != AV_PIX_FMT_NONE)
             break; /* out_format: that format or nothing */
-        if (!listed || (j >= 0 && fmt == want) || !gpufx_format_supported(name) ||
-            (fmt != AV_PIX_FMT_NV12 && fmt != AV_PIX_FMT_P010 && fmt != AV_PIX_FMT_RGBA && fmt != AV_PIX_FMT_RGBA64))
+        if (!listed || (j >= 0 && fmt == want) || !sw_format_ok(s->hw_fmt, fmt))
             continue;
-        /* Storage first; then frames written by a copy. */
-        for (int uav = 1; uav >= 0; uav--) {
+        /* Storage first; then frames written by a copy (VideoToolbox: one kind of frames). */
+        for (int uav = 1; uav >= (s->hw_fmt == AV_PIX_FMT_VIDEOTOOLBOX); uav--) {
             AVBufferRef *ref = av_hwframe_ctx_alloc(s->hw_device);
             AVHWFramesContext *fc;
 
@@ -1160,17 +1204,17 @@ static int config_d3d_output(AVFilterLink *outlink, unsigned k)
     }
     if (s->out_format != AV_PIX_FMT_NONE) {
         av_log(ctx, AV_LOG_ERROR, "Output '%s': out_format=%s cannot be written into %s frames "
-               "(nv12, p010le, rgba, rgba64le).\n", ctx->output_pads[k].name,
-               av_get_pix_fmt_name(s->out_format), api_name(s->hw_fmt));
+               "(%s).\n", ctx->output_pads[k].name,
+               av_get_pix_fmt_name(s->out_format), api_name(s->hw_fmt), sw_format_list(s->hw_fmt));
         return AVERROR(ENOSYS);
     }
     av_log(ctx, AV_LOG_ERROR, "Output '%s': no format the effect outputs can be written into %s "
-           "frames on the GPU (nv12, p010le, rgba, rgba64le).\n", ctx->output_pads[k].name,
-           api_name(s->hw_fmt));
+           "frames on the GPU (%s).\n", ctx->output_pads[k].name,
+           api_name(s->hw_fmt), sw_format_list(s->hw_fmt));
     return AVERROR(ENOSYS);
 }
 
-#if CONFIG_D3D12VA || CONFIG_D3D11VA
+#if CONFIG_D3D12VA || CONFIG_D3D11VA || CONFIG_VIDEOTOOLBOX
 /* The frames of one event: inputs (or the blank frame of one not started yet), outputs. */
 static const AVFrame *event_frame(GpufxContext *s, unsigned n)
 {
@@ -1257,6 +1301,33 @@ static int process_d3d11(AVFilterContext *ctx, const GpufxFrameInfo *info)
 }
 #endif
 
+#if CONFIG_VIDEOTOOLBOX
+/*
+ * One event on VideoToolbox frames (CVPixelBufferRef in data[3]). There is no fence:
+ * libgpufx returns once the GPU is done with the IOSurfaces.
+ */
+static int process_videotoolbox(AVFilterContext *ctx, const GpufxFrameInfo *info)
+{
+    GpufxContext *s = ctx->priv;
+    const unsigned total = s->nb_inputs + s->nb_outputs;
+
+    for (unsigned n = 0; n < total; n++) {
+        const AVFrame *f = event_frame(s, n);
+        GpufxVtFrame *g = n < s->nb_inputs ? &s->vt_in[n] : &s->vt_out[n - s->nb_inputs];
+        const char *what = n < s->nb_inputs ? ctx->input_pads[n].name : ctx->output_pads[n - s->nb_inputs].name;
+
+        if (!(g->format = d3d_color(ctx, f, &g->color, what)))
+            return AVERROR(ENOSYS);
+        g->width        = f->width;
+        g->height       = f->height;
+        g->pixel_buffer = f->data[3];
+    }
+    if (gpufx_effect_process_videotoolbox(s->fx, s->vt_in, s->nb_inputs, s->vt_out, s->nb_outputs, info) < 0)
+        return gpufx_error(ctx, info ? "Processing failed" : "Conversion failed");
+    return 0;
+}
+#endif
+
 /* Whether frames of the GPU pixel format fmt are processed in place. */
 static int hw_ok(enum AVPixelFormat fmt)
 {
@@ -1267,6 +1338,9 @@ static int hw_ok(enum AVPixelFormat fmt)
 #endif
 #if CONFIG_D3D11VA
     case AV_PIX_FMT_D3D11:  return gpufx_d3d12_supported();
+#endif
+#if CONFIG_VIDEOTOOLBOX
+    case AV_PIX_FMT_VIDEOTOOLBOX: return gpufx_videotoolbox_supported();
 #endif
     default:                return 0;
     }
@@ -1312,6 +1386,14 @@ static int config_api(AVFilterContext *ctx)
             return AVERROR(ENOMEM);
         return config_d3d(ctx);
 #endif
+#if CONFIG_VIDEOTOOLBOX
+    case AV_PIX_FMT_VIDEOTOOLBOX:
+        s->vt_in  = av_calloc(s->nb_inputs, sizeof(*s->vt_in));
+        s->vt_out = av_calloc(s->nb_outputs, sizeof(*s->vt_out));
+        if (!s->vt_in || !s->vt_out)
+            return AVERROR(ENOMEM);
+        return config_d3d(ctx);
+#endif
     default:
         return AVERROR_BUG;
     }
@@ -1327,7 +1409,8 @@ static int config_api_output(AVFilterLink *outlink, unsigned k)
     case AV_PIX_FMT_VULKAN: return config_vulkan_output(outlink, k);
 #endif
     case AV_PIX_FMT_D3D12:
-    case AV_PIX_FMT_D3D11:  return config_d3d_output(outlink, k);
+    case AV_PIX_FMT_D3D11:
+    case AV_PIX_FMT_VIDEOTOOLBOX: return config_d3d_output(outlink, k);
     default:                return AVERROR_BUG;
     }
 }
@@ -1342,8 +1425,8 @@ static int upload_ok(enum AVPixelFormat hw_fmt, enum AVPixelFormat fmt)
     case AV_PIX_FMT_VULKAN: return !!av_vkfmt_from_pixfmt(fmt);
 #endif
     case AV_PIX_FMT_D3D12:
-    case AV_PIX_FMT_D3D11:  return fmt == AV_PIX_FMT_NV12 || fmt == AV_PIX_FMT_P010 ||
-                                   fmt == AV_PIX_FMT_RGBA || fmt == AV_PIX_FMT_RGBA64;
+    case AV_PIX_FMT_D3D11:
+    case AV_PIX_FMT_VIDEOTOOLBOX: return sw_format_ok(hw_fmt, fmt);
     default:                return 0;
     }
 }
@@ -1540,6 +1623,9 @@ static int process_hw(AVFilterContext *ctx, const GpufxFrameInfo *info)
 #endif
 #if CONFIG_D3D11VA
     case AV_PIX_FMT_D3D11:  return process_d3d11(ctx, info);
+#endif
+#if CONFIG_VIDEOTOOLBOX
+    case AV_PIX_FMT_VIDEOTOOLBOX: return process_videotoolbox(ctx, info);
 #endif
     default:                return AVERROR_BUG;
     }
@@ -1760,7 +1846,7 @@ static int query_formats(const AVFilterContext *ctx,
             return ret;
         if (!formats) {
             av_log((void *)ctx, AV_LOG_ERROR, "gpufx outputs GPU frames, but this build takes no Vulkan, "
-                   "D3D12 or D3D11 frames here.\n");
+                   "D3D12, D3D11 or VideoToolbox frames here.\n");
             return AVERROR(ENOSYS);
         }
         if ((ret = ff_formats_ref(formats, &cfg_out[k]->formats)) < 0)
@@ -1811,14 +1897,15 @@ static int config_inputs(AVFilterContext *ctx)
 
         if (f == AV_PIX_FMT_NONE || !hw_ok(f)) {
             av_log(ctx, AV_LOG_ERROR, "gpufx outputs GPU frames: add -init_hw_device "
-                   "vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk (or d3d12va/d3d11va), "
+                   "vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk (or d3d12va/d3d11va/videotoolbox), "
                    "and hwdownload/gpufx_download before CPU filters or encoders.\n");
             if (ctx->hw_device_ctx)
                 av_log(ctx, AV_LOG_ERROR, "The %s device of -filter_hw_device is not one gpufx "
-                       "runs on (this build: %s%s%s).\n",
+                       "runs on (this build: %s%s%s%s).\n",
                        av_hwdevice_get_type_name(((AVHWDeviceContext *)ctx->hw_device_ctx->data)->type),
                        hw_ok(AV_PIX_FMT_VULKAN) ? "vulkan " : "", hw_ok(AV_PIX_FMT_D3D12) ? "d3d12va " : "",
-                       hw_ok(AV_PIX_FMT_D3D11) ? "d3d11va" : "");
+                       hw_ok(AV_PIX_FMT_D3D11) ? "d3d11va " : "",
+                       hw_ok(AV_PIX_FMT_VIDEOTOOLBOX) ? "videotoolbox" : "");
             return AVERROR(EINVAL);
         }
         s->hw_fmt = f;
