@@ -384,8 +384,14 @@ else
     VKN=yuva420p-rgba
     YUVA_VK=$(vk_ff -i "$A" -frames:v 3 -an -vf "format=yuva420p,hwupload,gpufx=effect=$FX/invert.zip,hwdownload,format=rgba" \
         -f framemd5 - 2> "$(vk_log)" | grep -v '^#' | awk -F, '{print $NF}')
-    same "yuva420p in, rgba Vulkan frames out" "$YUVA_VK" "$("$FF" -hide_banner -nostdin -v error -i "$A" -frames:v 3 -an -vf "format=yuva420p,gpufx=effect=$FX/invert.zip,format=rgba" \
-            -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | awk -F, '{print $NF}')"
+    # FFmpeg does not always give yuva420p images a sampled usage (on lavapipe the usage
+    # changes from run to run: 0x400001, 0x400002...); gpufx then refuses the input, by design.
+    if [ -z "$YUVA_VK" ] && grep -q "yuva420p that cannot be sampled" "$(vk_log)"; then
+        echo "  skip  yuva420p in, rgba Vulkan frames out (FFmpeg made yuva420p frames without sampled usage)"
+    else
+        same "yuva420p in, rgba Vulkan frames out" "$YUVA_VK" "$("$FF" -hide_banner -nostdin -v error -i "$A" -frames:v 3 -an -vf "format=yuva420p,gpufx=effect=$FX/invert.zip,format=rgba" \
+                -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | awk -F, '{print $NF}')"
+    fi
     # shellcheck disable=SC2086
     rejects "Vulkan and software inputs mixed" "mix Vulkan and software frames" -init_hw_device "$VKDEV" -filter_hw_device vk \
         -i "$A" -i "$B" -an -filter_complex "[0]format=rgba,hwupload[a];[1]format=rgba[b];[a][b]gpufx=effect=$FX/crossfade.zip" $NULL
