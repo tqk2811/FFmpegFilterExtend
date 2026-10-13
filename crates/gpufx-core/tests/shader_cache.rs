@@ -6,7 +6,7 @@ mod common;
 
 use std::path::{Path, PathBuf};
 
-use gpufx_core::{Backend, Effect, FrameInfo, GpuContext, Image, ImageMut, Package};
+use gpufx_core::{Effect, FrameInfo, GpuContext, Image, ImageMut, Package};
 
 fn example() -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects");
@@ -144,7 +144,7 @@ fn conversion_pipelines_go_through_the_cache() {
 #[cfg(windows)]
 fn run_all_d3d12(dir: Option<&Path>) -> Option<(Vec<Vec<u8>>, Option<gpufx_core::ShaderCacheStats>, std::time::Duration)> {
     let start = std::time::Instant::now();
-    let ctx = GpuContext::with_shader_cache(Backend::Dx12, dir).map_err(|e| eprintln!("skipping: {e}")).ok()?;
+    let ctx = GpuContext::with_shader_cache(gpufx_core::Backend::Dx12, dir).map_err(|e| eprintln!("skipping: {e}")).ok()?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects");
     let mut all: Vec<_> = std::fs::read_dir(root).unwrap().map(|e| e.unwrap().path()).collect();
     all.sort();

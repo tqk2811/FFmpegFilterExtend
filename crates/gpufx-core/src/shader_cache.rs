@@ -34,6 +34,7 @@ const KEY_VERSION: &str = "gpufx-shader-cache-1";
 #[cfg(windows)]
 const PRECOMPILED_KEY_VERSION: &str = "gpufx-precompiled-1";
 /// Folder of the precompiled D3D12 shaders inside a package.
+#[cfg(windows)]
 pub(crate) const PRECOMPILED_DIR: &str = "compiled/dx12/";
 /// A file for a package: path inside it and content.
 #[cfg(windows)]

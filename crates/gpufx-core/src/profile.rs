@@ -32,6 +32,8 @@ const GPU_NAMES: [&str; SPANS] = ["copy-in", "effects", "copy-out"];
 
 /// CPU spans of a frame.
 #[derive(Clone, Copy)]
+// Import..Total are only recorded by the Vulkan path.
+#[cfg_attr(not(any(windows, all(unix, not(target_vendor = "apple")))), allow(dead_code))]
 pub(crate) enum Cpu {
     /// Planning and borrowing the pooled textures (`prepare`).
     Prepare = 0,
@@ -150,12 +152,12 @@ impl Profiler {
         let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
         if rx.recv().unwrap_or(false) {
             let t: Vec<u64> = match slice.get_mapped_range() {
-                Ok(view) => view.chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect(),
+                Ok(view) => view.as_chunks::<8>().0.iter().map(|c| u64::from_le_bytes(*c)).collect(),
                 Err(_) => Vec::new(),
             };
             // A frame whose passes did not all run (an error, a dropped encoder) is skipped.
-            if t.len() == SPANS * 2 && t.iter().all(|&v| v != 0) && t.chunks_exact(2).all(|p| p[1] >= p[0]) {
-                for (s, p) in t.chunks_exact(2).enumerate() {
+            if t.len() == SPANS * 2 && t.iter().all(|&v| v != 0) && t.as_chunks::<2>().0.iter().all(|p| p[1] >= p[0]) {
+                for (s, p) in t.as_chunks::<2>().0.iter().enumerate() {
                     self.gpu_ns[s] += (p[1] - p[0]) as f64 * self.period;
                 }
                 self.gpu_frames += 1;

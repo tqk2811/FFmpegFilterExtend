@@ -9,6 +9,8 @@ pub(crate) struct Lru<K, V> {
 }
 
 impl<K: PartialEq, V> Lru<K, V> {
+    // Only the Vulkan path uses new/get/insert outside tests.
+    #[cfg_attr(not(any(windows, all(unix, not(target_vendor = "apple")))), allow(dead_code))]
     pub fn new(cap: usize) -> Self {
         Lru { cap, items: Vec::new() }
     }
@@ -33,6 +35,7 @@ impl<K: PartialEq, V> Lru<K, V> {
     }
 
     /// The value of `key`, now the most recently used.
+    #[cfg_attr(not(any(windows, all(unix, not(target_vendor = "apple")))), allow(dead_code))]
     pub fn get(&mut self, key: &K) -> Option<&V> {
         let i = self.items.iter().position(|(k, _)| k == key)?;
         let item = self.items.remove(i);
@@ -42,6 +45,7 @@ impl<K: PartialEq, V> Lru<K, V> {
 
     /// Adds `value` as the most recently used, dropping the least recently used beyond
     /// the capacity. `key` must not be there yet.
+    #[cfg_attr(not(any(windows, all(unix, not(target_vendor = "apple")))), allow(dead_code))]
     pub fn insert(&mut self, key: K, value: V) {
         self.items.insert(0, (key, value));
         self.items.truncate(self.cap.max(1));
