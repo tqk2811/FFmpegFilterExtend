@@ -3,10 +3,13 @@
 //! Each pipeline gets one file named by the SHA-256 of everything that affects its
 //! compilation (final shader source with the prelude, language, entry point, output
 //! format, gpufx and wgpu versions, backend, adapter and driver). On Vulkan with
-//! `Features::PIPELINE_CACHE` the file holds the data of a `wgpu::PipelineCache`; the
-//! other backends of wgpu 30 have no on-disk cache, so nothing is written there.
+//! `Features::PIPELINE_CACHE` the file (`.gpucache`) holds the data of a
+//! `wgpu::PipelineCache`. On D3D12 with `Features::PASSTHROUGH_SHADERS` and
+//! `dxcompiler.dll` on the DLL search path, it (`.dxil`) holds the DXIL gpufx compiled
+//! itself, loaded back as a passthrough shader (see `dxil.rs`; the key then also has
+//! the DXC version and shader model). Metal and GL have no on-disk cache in wgpu 30.
 //!
-//! Each file is the wgpu blob followed by its SHA-256, checked before the blob reaches
+//! Each file is the blob followed by its SHA-256, checked before the blob reaches
 //! wgpu. The cache never makes compiling fail: an unreadable, truncated or corrupt file
 //! is ignored and rewritten; a directory that cannot be used (or, on Unix, one that
 //! other users can write) is reported once and the cache is turned off.
@@ -19,11 +22,18 @@ use sha2::{Digest, Sha256};
 
 /// Version of the key layout; bump to orphan every file written before.
 const KEY_VERSION: &str = "gpufx-shader-cache-1";
-/// Version of the wgpu crates the files are built for (see Cargo.toml).
-const WGPU_VERSION: &str = "30";
+/// Exact versions of naga, wgpu-core and wgpu-hal (from Cargo.lock, see build.rs).
+const WGPU_VERSION: &str = env!("GPUFX_WGPU_VERSIONS");
 /// Total size kept in the directory unless `GPUFX_SHADER_CACHE_MAX_MB` says otherwise.
 const DEFAULT_MAX_BYTES: u64 = 256 << 20;
 const EXT: &str = "gpucache";
+/// Extension of the DXIL files of D3D12.
+#[cfg(windows)]
+const DXIL_EXT: &str = "dxil";
+/// Set once D3D12 refused DXIL that was just compiled (no `dxil.dll`, a driver that
+/// rejects it...): later pipelines of the process skip DXC and go the normal way.
+#[cfg(windows)]
+static DXIL_REFUSED: AtomicBool = AtomicBool::new(false);
 
 /// Counters of one [`ShaderCache`], for tests and logs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -39,6 +49,11 @@ pub(crate) struct ShaderCache {
     dir: PathBuf,
     /// Adapter part of the key, computed once.
     adapter_key: String,
+    /// Vulkan: `wgpu::PipelineCache` files.
+    pipeline_cache: bool,
+    /// D3D12: DXIL files compiled with this DXC.
+    #[cfg(windows)]
+    dxc: Option<&'static crate::dxil::DxcCompiler>,
     max_bytes: u64,
     disabled: AtomicBool,
     loaded: AtomicU64,
@@ -53,13 +68,40 @@ pub(crate) struct Entry {
     loaded: Option<Vec<u8>>,
 }
 
+/// What a pipeline is made of, besides its shader.
+pub(crate) struct PipelineDesc<'a> {
+    pub(crate) label: &'a str,
+    pub(crate) layout: &'a wgpu::PipelineLayout,
+    /// Entries of the one bind group of `layout`.
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) entries: &'a [wgpu::BindGroupLayoutEntry],
+    pub(crate) entry: &'a str,
+}
+
+/// Whether a shader cache directory is given (`dir`, else `GPUFX_SHADER_CACHE`): devices
+/// then ask for the features the cache needs.
+pub(crate) fn configured(dir: Option<&Path>) -> bool {
+    dir.is_some() || std::env::var_os("GPUFX_SHADER_CACHE").is_some_and(|v| !v.is_empty())
+}
+
 impl ShaderCache {
     /// The cache of `dir` (from `GPUFX_SHADER_CACHE` when `None`), or `None` when it is
     /// not set or the device cannot use one.
     pub(crate) fn new(dir: Option<PathBuf>, device: &wgpu::Device, info: &wgpu::AdapterInfo) -> Option<Self> {
         let dir = dir.or_else(|| std::env::var_os("GPUFX_SHADER_CACHE").filter(|v| !v.is_empty()).map(PathBuf::from))?;
-        if !device.features().contains(wgpu::Features::PIPELINE_CACHE) || wgpu::util::pipeline_cache_key(info).is_none() {
-            // D3D12, Metal, GL: wgpu 30 has no on-disk pipeline cache (driver caches still apply).
+        let pipeline_cache = device.features().contains(wgpu::Features::PIPELINE_CACHE) && wgpu::util::pipeline_cache_key(info).is_some();
+        #[cfg(windows)]
+        let dxc =
+            (!pipeline_cache && info.backend == wgpu::Backend::Dx12 && device.features().contains(wgpu::Features::PASSTHROUGH_SHADERS))
+                .then(crate::dxil::DxcCompiler::get)
+                .flatten();
+        #[cfg(windows)]
+        let usable = pipeline_cache || dxc.is_some();
+        #[cfg(not(windows))]
+        let usable = pipeline_cache;
+        if !usable {
+            // Metal, GL, or D3D12 without dxcompiler.dll: wgpu 30 has no on-disk cache
+            // there (driver caches still apply).
             return None;
         }
         if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -93,6 +135,9 @@ impl ShaderCache {
         let cache = ShaderCache {
             dir,
             adapter_key,
+            pipeline_cache,
+            #[cfg(windows)]
+            dxc,
             max_bytes,
             disabled: AtomicBool::new(false),
             loaded: AtomicU64::new(0),
@@ -108,7 +153,7 @@ impl ShaderCache {
     }
 
     /// File name for a pipeline: hex SHA-256 of every input of its compilation.
-    fn file_name(&self, parts: &[&str]) -> String {
+    fn file_name(&self, parts: &[&str], ext: &str) -> String {
         let mut h = Sha256::new();
         for p in [KEY_VERSION, env!("CARGO_PKG_VERSION"), WGPU_VERSION, &self.adapter_key].into_iter().chain(parts.iter().copied()) {
             // Length prefix: no two lists of parts hash the same.
@@ -118,7 +163,7 @@ impl ShaderCache {
         let digest = h.finalize();
         let mut name: String = digest.iter().map(|b| format!("{b:02x}")).collect();
         name.push('.');
-        name.push_str(EXT);
+        name.push_str(ext);
         name
     }
 
@@ -127,14 +172,10 @@ impl ShaderCache {
         if self.disabled.load(Ordering::Relaxed) {
             return None;
         }
-        let path = self.dir.join(self.file_name(parts));
+        let path = self.dir.join(self.file_name(parts, EXT));
         let loaded = std::fs::read(&path).ok().and_then(verified);
         if loaded.is_some() {
-            self.loaded.fetch_add(1, Ordering::Relaxed);
-            // Lets the size limit drop the files not used for the longest time.
-            if let Ok(f) = std::fs::File::options().append(true).open(&path) {
-                let _ = f.set_modified(std::time::SystemTime::now());
-            }
+            self.used(&path);
         }
         // SAFETY: the data was written by gpufx (our SHA-256 matched) into a directory
         // only this user can write. wgpu then checks its header (magic, version, ABI,
@@ -156,9 +197,22 @@ impl ShaderCache {
         if data.is_empty() || entry.loaded.as_deref() == Some(&data[..]) {
             return;
         }
-        let mut file = data;
+        self.write(&entry.path, data);
+    }
+
+    /// Counts a file that was used and marks it as recently used.
+    fn used(&self, path: &Path) {
+        self.loaded.fetch_add(1, Ordering::Relaxed);
+        // Lets the size limit drop the files not used for the longest time.
+        if let Ok(f) = std::fs::File::options().append(true).open(path) {
+            let _ = f.set_modified(std::time::SystemTime::now());
+        }
+    }
+
+    /// Writes `data` and its SHA-256 to `path`.
+    fn write(&self, path: &Path, mut file: Vec<u8>) {
         file.extend_from_slice(&Sha256::digest(&file));
-        match write_atomic(&entry.path, &file) {
+        match write_atomic(path, &file) {
             Ok(()) => {
                 self.written.fetch_add(1, Ordering::Relaxed);
             }
@@ -173,22 +227,82 @@ impl ShaderCache {
         }
     }
 
-    /// A compute pipeline of `desc`, seeded from and written back to `cache` when there
-    /// is one. `parts` name every input of the compilation besides the adapter.
+    /// The compute pipeline of `desc` running `module`, through `cache` when there is
+    /// one. `parts` name every input of the compilation besides the adapter.
     pub(crate) fn compute_pipeline(
         cache: Option<&Self>,
         device: &wgpu::Device,
-        desc: &wgpu::ComputePipelineDescriptor<'_>,
+        desc: &PipelineDesc<'_>,
+        module: naga::Module,
         parts: &[&str],
     ) -> wgpu::ComputePipeline {
+        #[cfg(windows)]
+        if let Some(pipeline) = cache.and_then(|c| c.dxil_pipeline(device, desc, &module, parts)) {
+            return pipeline;
+        }
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(desc.label),
+            source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module)),
+        });
+        let cache = cache.filter(|c| c.pipeline_cache);
         let entry = cache.and_then(|c| c.begin(device, parts));
-        let pipeline =
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor { cache: entry.as_ref().map(|e| &e.cache), ..desc.clone() });
+        let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some(desc.label),
+            layout: Some(desc.layout),
+            module: &shader,
+            entry_point: Some(desc.entry),
+            compilation_options: Default::default(),
+            cache: entry.as_ref().map(|e| &e.cache),
+        });
         // The cache object is dropped right after: only the file stays.
         if let (Some(c), Some(e)) = (cache, entry) {
             c.finish(e);
         }
         pipeline
+    }
+
+    /// D3D12: the pipeline from the DXIL file of `parts`, or from DXIL compiled now and
+    /// then written. `None` sends the pipeline down the normal path (no DXC, HLSL or
+    /// DXIL error, a layout `dxil.rs` does not cover, a file the driver refuses).
+    #[cfg(windows)]
+    fn dxil_pipeline(
+        &self,
+        device: &wgpu::Device,
+        desc: &PipelineDesc<'_>,
+        module: &naga::Module,
+        parts: &[&str],
+    ) -> Option<wgpu::ComputePipeline> {
+        let dxc = self.dxc?;
+        if self.disabled.load(Ordering::Relaxed) || DXIL_REFUSED.load(Ordering::Relaxed) {
+            return None;
+        }
+        let ep = module.entry_points.iter().find(|ep| ep.name == desc.entry && ep.stage == naga::ShaderStage::Compute)?;
+        let [x, y, z] = ep.workgroup_size;
+        // The registers of the HLSL follow the layout: it is part of the key.
+        let layout = format!("{:?}", desc.entries);
+        let key: Vec<&str> =
+            ["dxil", crate::dxil::SHADER_MODEL.to_str(), &dxc.version, &layout].into_iter().chain(parts.iter().copied()).collect();
+        let path = self.dir.join(self.file_name(&key, DXIL_EXT));
+        if let Some(dxil) = std::fs::read(&path).ok().and_then(verified) {
+            if let Some(pipeline) = passthrough_pipeline(device, desc, (x, y, z), &dxil) {
+                self.used(&path);
+                return Some(pipeline);
+            }
+            // Refused (another DXC wrote it, a driver update...): rewritten below.
+        }
+        let (hlsl, name) = crate::dxil::hlsl(module, desc.entries, desc.entry)?;
+        let dxil = dxc.compile(&hlsl, &name)?;
+        let Some(pipeline) = passthrough_pipeline(device, desc, (x, y, z), &dxil) else {
+            // Fresh DXIL refused too: D3D12 takes none on this machine (no dxil.dll...).
+            // A file that was there is useless now.
+            let _ = std::fs::remove_file(&path);
+            if !DXIL_REFUSED.swap(true, Ordering::Relaxed) {
+                eprintln!("gpufx: D3D12 refused the DXIL shaders, compiling them the normal way");
+            }
+            return None;
+        };
+        self.write(&path, dxil);
+        Some(pipeline)
     }
 
     /// Removes temp files older than an hour, then the least recently used files while
@@ -208,7 +322,7 @@ impl ShaderCache {
                         let _ = std::fs::remove_file(&path);
                     }
                 }
-                path.extension().is_some_and(|x| x == EXT)
+                path.extension().is_some_and(|x| x == EXT || cfg!(windows) && x == "dxil")
             })
             .filter_map(|e| {
                 let m = e.metadata().ok()?;
@@ -229,6 +343,40 @@ impl ShaderCache {
             }
         }
     }
+}
+
+/// The compute pipeline of `desc` from `dxil`, `None` if wgpu or the driver refuses it.
+#[cfg(windows)]
+fn passthrough_pipeline(
+    device: &wgpu::Device,
+    desc: &PipelineDesc<'_>,
+    workgroup_size: (u32, u32, u32),
+    dxil: &[u8],
+) -> Option<wgpu::ComputePipeline> {
+    let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+    let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    // SAFETY: the DXIL was compiled by gpufx from naga's HLSL with the registers of
+    // wgpu-hal's root signature for this layout (dxil.rs), now or in an earlier run; a
+    // file is only used when its SHA-256 matches, from a directory only this user can
+    // write, and the D3D12 runtime checks the hash and signature of the DXIL container.
+    let module = unsafe {
+        device.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
+            label: Some(desc.label),
+            entry_points: std::borrow::Cow::Owned(vec![wgpu::PassthroughShaderEntryPoint { name: desc.entry.into(), workgroup_size }]),
+            dxil: Some(std::borrow::Cow::Borrowed(dxil)),
+            ..Default::default()
+        })
+    };
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some(desc.label),
+        layout: Some(desc.layout),
+        module: &module,
+        entry_point: Some(desc.entry),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let failed = pollster::block_on(validation.pop()).is_some() | pollster::block_on(internal.pop()).is_some();
+    (!failed).then_some(pipeline)
 }
 
 /// The wgpu blob of a cache file, if its trailing SHA-256 matches.

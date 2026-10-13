@@ -5,6 +5,8 @@
 mod convert;
 #[cfg(windows)]
 pub mod d3d12;
+#[cfg(windows)]
+mod dxil;
 pub mod expr;
 pub mod frame;
 pub mod graph;

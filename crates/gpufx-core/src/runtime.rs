@@ -10,7 +10,7 @@ use crate::manifest::{PassDef, ShaderLanguage};
 use crate::mips::MipGen;
 use crate::package::Package;
 use crate::params::ParamBlock;
-use crate::shader_cache::{ShaderCache, ShaderCacheStats};
+use crate::shader_cache::{PipelineDesc, ShaderCache, ShaderCacheStats};
 use crate::Error;
 
 /// Graphics API to run on. `Auto` lets wgpu pick the best one for the platform.
@@ -147,13 +147,18 @@ impl GpuContext {
     /// A device on `adapter` with the features and limits gpufx uses (see [`device_limits`]).
     pub(crate) fn open_adapter(adapter: &wgpu::Adapter, label: &str, cache_dir: Option<&std::path::Path>) -> Result<Arc<Self>, Error> {
         let required_limits = device_limits(&adapter.limits());
+        let mut features = crate::profile::features();
+        if adapter.get_info().backend == wgpu::Backend::Dx12 && crate::shader_cache::configured(cache_dir) {
+            // The DXIL shader cache (dxil.rs) loads its shaders as passthrough shaders.
+            features |= wgpu::Features::PASSTHROUGH_SHADERS;
+        }
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some(label),
             required_limits,
             // PIPELINE_CACHE: only Vulkan has it in wgpu 30; it costs nothing until a cache
             // is created. The format features let GPU frames have 16-bit and r8/rg8
             // storage planes (see GpuFrame).
-            required_features: adapter.features() & crate::profile::features(),
+            required_features: adapter.features() & features,
             ..Default::default()
         }))
         .map_err(|e| Error::Gpu(e.to_string()))?;
@@ -764,10 +769,6 @@ fn compile_pass(ctx: &GpuContext, pkg: &Package, params: &ParamBlock, index: usi
     }
 
     let device = &ctx.device;
-    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some(&def.shader),
-        source: wgpu::ShaderSource::Naga(std::borrow::Cow::Owned(module)),
-    });
 
     let mut entries = vec![
         uniform_entry(0),
@@ -815,14 +816,8 @@ fn compile_pass(ctx: &GpuContext, pkg: &Package, params: &ParamBlock, index: usi
     let pipeline = ShaderCache::compute_pipeline(
         ctx.shader_cache.as_deref(),
         device,
-        &wgpu::ComputePipelineDescriptor {
-            label: Some(&format!("gpufx pass {index}")),
-            layout: Some(&pipeline_layout),
-            module: &shader,
-            entry_point: Some(entry),
-            compilation_options: Default::default(),
-            cache: None,
-        },
+        &PipelineDesc { label: &format!("gpufx pass {index} ({})", def.shader), layout: &pipeline_layout, entries: &entries, entry },
+        module,
         &[language, entry, format, &source],
     );
     Ok(Pass { pipeline, layout, inputs, output: def.output.clone() })

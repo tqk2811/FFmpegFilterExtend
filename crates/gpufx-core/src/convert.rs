@@ -14,7 +14,7 @@ use std::sync::{Arc, OnceLock};
 use crate::frame::{ColorInfo, FrameMut, Layout, PixelFormat, PlaneKind};
 use crate::lru::Lru;
 use crate::pool::PoolKey;
-use crate::shader_cache::ShaderCache;
+use crate::shader_cache::{PipelineDesc, ShaderCache};
 use crate::Error;
 
 /// RGBA texture format that keeps the precision of `format`: `rgba16float` (about 11
@@ -97,10 +97,7 @@ fn pipeline(
     entries: &[wgpu::BindGroupLayoutEntry],
 ) -> (wgpu::ComputePipeline, wgpu::BindGroupLayout) {
     let source = format!("{}{body}", include_str!("convert.wgsl"));
-    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some(label),
-        source: wgpu::ShaderSource::Wgsl(std::borrow::Cow::Borrowed(&source)),
-    });
+    let module = naga::front::wgsl::parse_str(&source).unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(&source)));
     let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some(label), entries });
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(label),
@@ -110,14 +107,8 @@ fn pipeline(
     let pipeline = ShaderCache::compute_pipeline(
         cache,
         device,
-        &wgpu::ComputePipelineDescriptor {
-            label: Some(label),
-            layout: Some(&pipeline_layout),
-            module: &module,
-            entry_point: Some("main"),
-            compilation_options: Default::default(),
-            cache: None,
-        },
+        &PipelineDesc { label, layout: &pipeline_layout, entries, entry: "main" },
+        module,
         &["convert", "main", &source],
     );
     (pipeline, layout)

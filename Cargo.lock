@@ -337,6 +337,7 @@ version = "0.1.0"
 dependencies = [
  "ash",
  "image",
+ "libloading",
  "naga",
  "pollster",
  "serde",

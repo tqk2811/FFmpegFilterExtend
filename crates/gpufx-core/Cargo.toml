@@ -23,11 +23,15 @@ sha2 = "0.10"
 ash = { version = "0.38", default-features = false, features = ["std"] }
 
 # D3D12/D3D11 frames (src/d3d12.rs): the windows crate wgpu-hal's DX12 backend uses.
+# DXIL shader cache (src/dxil.rs): naga's HLSL writer and dxcompiler.dll, loaded at run time.
 [target.'cfg(windows)'.dependencies]
+naga = { version = "30", features = ["hlsl-out"] }
+libloading = "0.8"
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D_Dxc",
     "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Direct3D12",
     "Win32_Graphics_Dxgi",
