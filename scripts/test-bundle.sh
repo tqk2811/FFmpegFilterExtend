@@ -511,10 +511,21 @@ for api in d3d12va d3d11va; do
         continue
     fi
     echo "  ($API on ${DXDEV#*=})"; dx_ran="$dx_ran $API"
+    # A real GPU rounds a few samples of the vignette one step apart from the software
+    # path (4 of 259200 on an RTX 4060): within one step, not byte-equal.
     for f in nv12 p010le; do
-        same "$API $f: vignette equals the software path" \
-            "$(dx_md5 $f "gpufx=effect=$FX/vignette.zip:params='strength=0.7'")" \
-            "$(sw_md5 $f "gpufx=effect=$FX/vignette.zip:params='strength=0.7'")"
+        V="gpufx=effect=$FX/vignette.zip:params='strength=0.7'"
+        if [ $f = nv12 ]; then bytes=1 step=1; else bytes=2 step=64; fi  # p010le: 10 bits << 6
+        rm -f "$CLIPS/dx.yuv" "$CLIPS/sw.yuv"
+        raw "$CLIPS/dx.yuv" -init_hw_device "$DXDEV" -filter_hw_device dx -i "$A" \
+            -vf "format=$f,hwupload,$V,hwdownload,format=$f" -pix_fmt $f || true
+        raw "$CLIPS/sw.yuv" -i "$A" -vf "format=$f,$V" -pix_fmt $f || true
+        DMAX=-
+        if [ -s "$CLIPS/dx.yuv" ] && [ "$(wc -c < "$CLIPS/dx.yuv")" = "$(wc -c < "$CLIPS/sw.yuv")" ]; then
+            DMAX=$(diff_stats "$CLIPS/dx.yuv" "$CLIPS/sw.yuv" $bytes | cut -d' ' -f1); DMAX=${DMAX:--}
+        fi
+        if [ "$DMAX" != - ] && [ "$DMAX" -le $step ]; then pass "$API $f: vignette within one step of the software path"
+        else fail "$API $f: vignette within one step of the software path (max difference $DMAX)"; cat "$CLIPS/last.log"; fi
     done
     # Two gpufx in a row: the second waits for the first (fences).
     same "$API: invert twice equals the software path" \
