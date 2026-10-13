@@ -135,6 +135,28 @@ scripts/pack-effects.sh                    # chỉ đóng gói hiệu ứng: exa
 Thêm hoặc sửa hiệu ứng **không cần build lại FFmpeg**: chạy `scripts/pack-effects.sh`
 (Windows: `scripts\pack-effects.ps1`) rồi dùng file `.zip` mới.
 
+### Test
+
+Test GPU tự bỏ qua (in dòng `skipping: ...`) khi không có adapter phù hợp, nên chạy xanh vẫn có thể sót
+phần chưa kiểm: thêm `-- --nocapture` để thấy các dòng đó.
+
+- `GPUFX_TEST_BACKEND=vulkan|dx12|metal|gl` chọn cố định backend (mặc định: backend tốt nhất). Trên Windows
+  chạy bộ test hai lần, một lần `vulkan` và một lần `dx12`.
+- Test shader cache D3D12 cần `dxcompiler.dll` trên `PATH`, thiếu thì bị bỏ qua. Lấy bằng
+  `scripts/fetch-dxc.sh build/dxc` rồi thêm `build/dxc` vào `PATH`.
+- CI chạy bộ test trên lavapipe (Linux, Vulkan), WARP (Windows, D3D12) và Metal (macOS). WARP chạy shader
+  bằng CPU nên bài kiểm hiệu ứng chậm nhất bị bỏ qua ở đó; Metal có thể làm tròn một mẫu YUV lệch một bậc
+  so với đường CPU, test YUV chỉ chấp nhận điều này trên Metal.
+
+### Những gì chưa được kiểm
+
+- **macOS**: không có máy Mac; chỉ chạy `cargo test` trên runner macOS của CI (Metal). Chưa có bản FFmpeg
+  build cho macOS nên filter `gpufx` chưa từng chạy ở đó.
+- **Linux trên GPU thật**: Linux mới chạy trên lavapipe (Vulkan phần mềm), trong CI và máy ảo. Frame Vulkan
+  dùng chung với FFmpeg mới chạy trên GPU thật ở Windows.
+- **Frame D3D12/D3D11 trong FFmpeg**: mới chạy trên WARP (CI), chưa chạy trên GPU thật.
+- **OpenGL**: wgpu có hỗ trợ nhưng chưa có test hay job CI nào chạy trên nó.
+
 ### Build nhanh trên bản FFmpeg build sẵn (khuyên dùng)
 
 Lấy bản FFmpeg 9.0 shared build sẵn từ

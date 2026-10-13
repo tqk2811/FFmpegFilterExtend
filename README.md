@@ -139,6 +139,28 @@ scripts/pack-effects.sh                    # only package the effects: examples/
 Adding or editing effects **does not require rebuilding FFmpeg**: run `scripts/pack-effects.sh`
 (Windows: `scripts\pack-effects.ps1`) and use the new `.zip` file.
 
+### Tests
+
+GPU tests skip themselves (with a `skipping: ...` line) when no adapter fits, so a green run can hide
+skipped checks: add `-- --nocapture` to see them.
+
+- `GPUFX_TEST_BACKEND=vulkan|dx12|metal|gl` pins the backend (default: the best one). On Windows run the
+  suite once with `vulkan` and once with `dx12`.
+- The D3D12 shader cache tests need `dxcompiler.dll` on `PATH`; without it they skip. Fetch it with
+  `scripts/fetch-dxc.sh build/dxc` and put `build/dxc` on `PATH`.
+- CI runs the suite on lavapipe (Linux, Vulkan), WARP (Windows, D3D12) and Metal (macOS). WARP runs shaders
+  on the CPU, so the slowest effect check is skipped there; Metal may round a YUV sample one step away from
+  the CPU path, which the YUV tests allow on Metal only.
+
+### What has not been tested
+
+- **macOS**: no Mac device; only `cargo test` on the CI macOS runner (Metal). There is no FFmpeg bundle for
+  macOS, so the `gpufx` filter has never run there.
+- **Linux on a real GPU**: Linux only runs on lavapipe (software Vulkan), in CI and in a VM. Vulkan frames
+  shared with FFmpeg have been run on real GPUs only on Windows.
+- **D3D12/D3D11 frames in FFmpeg**: only on WARP (CI); not yet on GPU hardware.
+- **OpenGL**: wgpu supports it, but no test or CI job runs on it.
+
 ### Fast build on a prebuilt FFmpeg (recommended)
 
 Take the prebuilt FFmpeg 9.0 shared build from
