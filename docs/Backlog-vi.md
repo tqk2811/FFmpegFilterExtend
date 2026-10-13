@@ -122,9 +122,10 @@
 - **Vì sao**: phạm vi B-Vulkan là đường zero-copy chạy đúng với `hwupload`/`hwdownload`; phần còn lại cần GPU thật hoặc thay đổi lớn (view multiplane, cache bind group).
 - **Ngày ghi**: 2026-10-12
 
-### B-D3D12 / B-D3D11: chưa chạy trên Windows, các giới hạn còn lại
+### B-D3D12 / B-D3D11: các giới hạn còn lại
 - **Vấn đề**:
-  - Code chỉ được build và cross-compile trên Linux (`cargo clippy --target x86_64-pc-windows-gnu`, `build-prebuilt.sh win64`). Lần chạy đầu là job CI `ffmpeg-windows` trên WARP; test bỏ qua (skip) khi wgpu không share được device (adapter bị wgpu lọc, không có `ID3D11Device5`), nên CI xanh chưa chắc là đã chạy. Đường frame D3D12/D3D11 chưa từng chạy trên phần cứng thật: runner hosted (chỉ có WARP) không tạo được device d3d12va (-22) / d3d11va (887a0004 DXGI_ERROR_UNSUPPORTED) ngay trong FFmpeg, nên test báo skip kể cả với `REQUIRE_D3D=1` (CI vẫn xanh). Chưa thử trên GPU thật (NVIDIA/AMD/Intel), chưa thử decoder (`-hwaccel d3d12va`/`d3d11va`).
+  - CI không kiểm được: runner hosted (chỉ có WARP) không tạo được device d3d12va (-22) / d3d11va (887a0004 DXGI_ERROR_UNSUPPORTED) ngay trong FFmpeg, nên test báo skip kể cả với `REQUIRE_D3D=1`. Mới chạy trên một GPU thật (NVIDIA RTX 4060 Laptop, 2026-10-14, đạt hết); chưa thử AMD/Intel, chưa thử decoder (`-hwaccel d3d12va`/`d3d11va`).
+  - D3D11: wgpu giữ lần nạp `d3d12.dll` duy nhất (FFmpeg không nạp nó cho d3d11va), nên `from_d3d11` ghim DLL tới hết process. Gỡ được khi wgpu nhả object D3D12 đúng thứ tự.
   - Dựa vào việc D3D12 trả cùng một device cho cùng adapter trong một process; với Agility SDK hoặc runtime D3D12 khác thì bị từ chối (có thông báo). wgpu-hal có `device_from_raw` cho DX12 thì nên chuyển sang.
   - D3D12: mỗi lần gọi chờ CPU lần submit trước, vì upload D3D12 của FFmpeg ghi vào frame mà không chờ fence của nó (an toàn nhưng mất pipelining một frame).
   - Texture array (decoder), frame lớn hơn kích thước, output không UAV: tốn một lần copy GPU (một frame VRAM mỗi pad). D3D11 input không share được (hwupload, decoder): một lần copy trên immediate context. `GpuFrame` nhận view theo layer thì bỏ được copy của texture array D3D12.
@@ -132,7 +133,7 @@
   - D3D11: cache texture đã mở giữ tối đa 64 tham chiếu tới texture pool của FFmpeg cho tới khi effect bị giải phóng (VRAM của pool sống lâu hơn nếu pool bị huỷ sớm, ví dụ khi reinit).
   - Một submission D3D12 thất bại làm device chia sẻ ngừng dùng (giống Vulkan), chưa có cách phục hồi.
 - **Vị trí**: [crates/gpufx-core/src/d3d12.rs](../crates/gpufx-core/src/d3d12.rs), [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`config_d3d`, `process_d3d12`, `process_d3d11`), [scripts/test-bundle.sh](../scripts/test-bundle.sh), [scripts/build-prebuilt.sh](../scripts/build-prebuilt.sh).
-- **Vì sao**: không có máy Windows khi làm; cần đọc log job `ffmpeg-windows` và chạy thử trên GPU thật.
+- **Vì sao**: cần chạy thử trên GPU AMD/Intel và với decoder D3D.
 - **Ngày ghi**: 2026-10-12
 
 ### Test "yuva420p in, rgba Vulkan frames out" lỗi chập chờn trên CI linux64
@@ -178,12 +179,6 @@
 - **Vì sao**: (1) nên để pool sở hữu bind group theo id lease, hoặc đánh dấu id bị trim để graph bỏ binding; (5) giới hạn pool đầu ra sẽ đưa 8 filter riêng về gần mức của graph.
 - **Ngày ghi**: 2026-10-13
 
-### Frame D3D12/D3D11 lỗi trên RTX 4060 (Windows)
-- **Vấn đề**: `scripts/test-bundle.sh` FAIL ở "D3D12 nv12/p010le: vignette equals the software path" (output khác đường phần mềm), và `hwupload,gpufx=effect=invert.zip,hwdownload` trên device D3D11 bị segfault. Bản build trước đợt `gpufx_upload`/`gpufx_download` cũng lỗi y hệt; CI không bắt được vì runner Windows không tạo được device D3D.
-- **Vị trí**: [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`config_d3d_output`, đường frame D3D), [crates/gpufx-core/src/d3d12.rs](../crates/gpufx-core/src/d3d12.rs).
-- **Vì sao**: đường D3D chưa từng chạy trên phần cứng thật (như đường Vulkan trước khi sửa họ queue và `max_buffer_size`); cần debug với D3D12 debug layer.
-- **Ngày ghi**: 2026-10-13
-
 ### `gpufx_upload`/`gpufx_download`: các giới hạn còn lại
 - **Vấn đề**: (1) đổi kích thước frame giữa chừng thì trả EINVAL (cần chờ các slot, dựng lại vùng copy và buffer, download phải xả frame đang chờ trước); (2) libavfilter build với Vulkan-Headers khác bản của libavutil dựng sẵn nên pool không lấy được queue (cờ internally synchronized queues), filter lấy lại queue bằng `queue_flags` của device — sinh VUID-VkDeviceQueueInfo2-flags-06225 một lần; (3) `out_format` dùng một format cho mọi output, chưa nhận danh sách theo từng output; (4) chưa thử `gpufx_download` với frame của `-hwaccel vulkan`; (5) chỉ có cho Vulkan, chưa có cho D3D.
 - **Vị trí**: [ffmpeg/vf_gpufx_transfer.c](../ffmpeg/vf_gpufx_transfer.c) (`check_size`, khối lấy lại queue sau `ff_vk_exec_pool_init`), [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`out_format`), [scripts/build-prebuilt.sh](../scripts/build-prebuilt.sh) (tag Vulkan-Headers).
@@ -215,3 +210,9 @@
   - Không giới hạn kích thước pool đầu ra: frame sẽ phải chờ hoặc báo lỗi, hại hiệu suất.
 - **Vì sao nên làm**: chuỗi effect/transition thường giữ nguyên kích thước nên pool dùng chung áp dụng được cho phần lớn trường hợp; ước tính giảm vài chục tới hơn 100 MB với rgba (chưa đo).
 - **Ngày ghi**: 2026-10-13
+
+### [Thấp] Chuỗi `gpufx` riêng với frame CPU: tự giữ frame trên GPU
+- **Vấn đề**: không có `hwupload`/`gpufx_upload` ở đầu thì mỗi `gpufx` nhận frame CPU và trả frame CPU (quy tắc hw/sw ở `config_output`), nên chuỗi 8 filter riêng upload + readback 8 lần mỗi frame: 29.8 s so với 6–13 s khi upload một lần (docs/BENCHMARK-vi.md). Người dùng phải tự biết thêm bước upload.
+- **Vị trí**: [ffmpeg/vf_gpufx.c:1565](../ffmpeg/vf_gpufx.c#L1565) (`query_formats`), [ffmpeg/vf_gpufx.c:1627-1654](../ffmpeg/vf_gpufx.c#L1627-L1654) (quy tắc frame GPU vào thì GPU ra).
+- **Vì sao**: hướng có thể làm: khi output nối thẳng vào một `gpufx` khác thì đưa ra frame GPU (Vulkan) trên device riêng của gpufx, filter cuối tự readback. Cần tạo hw device/frames context ngay trong filter và thoả thuận định dạng giữa hai filter, nên không đơn giản; trước mắt README đã ghi khuyến nghị.
+- **Ngày ghi**: 2026-10-14
