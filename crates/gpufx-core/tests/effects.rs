@@ -141,6 +141,11 @@ fn shader_errors_point_at_the_author_file() {
 #[test]
 fn falling_leaves_depend_only_on_time() {
     let Some(ctx) = gpu() else { return };
+    if common::is_warp(&ctx) {
+        // ~35 frames per effect take over 8 minutes on WARP; lavapipe and real GPUs cover it.
+        eprintln!("skipping: the falling leaves take minutes on WARP");
+        return;
+    }
     let (w, h) = (160, 90);
     let src = gradient(w, h);
     let inputs = [Image { data: &src, width: w, height: h, stride: w * 4 }];
