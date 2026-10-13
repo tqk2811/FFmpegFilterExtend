@@ -109,6 +109,8 @@ pub(crate) struct FrameIo {
     pub(crate) direct_gpu: bool,
     /// The input textures of the GPU frame being recorded, for the slots made for it.
     frame_ins: Vec<Option<wgpu::Texture>>,
+    /// The output textures of that frame, for the effects writing them in place.
+    frame_outs: Vec<Option<wgpu::Texture>>,
 }
 
 /// The planned textures of a graph for one set of inputs.
@@ -118,6 +120,8 @@ struct Layout {
     sizes: Vec<(u32, u32)>,
     pad_mips: Vec<bool>,
     node_mips: Vec<bool>,
+    /// For each effect, the output frame its last pass writes in place, if any.
+    direct_out: Vec<Option<usize>>,
 }
 
 impl FrameIo {
@@ -171,11 +175,46 @@ impl Plan {
     }
 }
 
+/// For each effect, the output frame its last pass may write in place of a pooled
+/// texture and a copy: a straight RGBA8 output (the storage format of a pass that is not
+/// deep) that is the only use of the effect: read by no other effect, by no mip chain
+/// and by no other pass of the effect, nor written by another pass.
+fn direct_outputs(effects: &[Effect], topo: &Topology, outs: &[Desc], node_mips: &[bool]) -> Vec<Option<usize>> {
+    let mut direct = vec![None; effects.len()];
+    for (j, (src, out)) in topo.outputs.iter().zip(outs).enumerate() {
+        let Source::Node(k) = *src else { continue };
+        if out.format != PixelFormat::Rgba || out.premultiplied || node_mips[k] {
+            continue;
+        }
+        if topo.outputs.iter().filter(|s| **s == Source::Node(k)).count() != 1
+            || topo.node_inputs.iter().flatten().any(|s| *s == Source::Node(k))
+        {
+            continue;
+        }
+        // The compiled passes: their inputs are resolved (a pass without any reads the one before).
+        let Ok(passes) = effects[k].passes(false) else { continue };
+        let Some(last) = passes.last() else { continue };
+        let elsewhere =
+            passes.iter().any(|p| p.inputs.contains(&last.output)) || passes[..passes.len() - 1].iter().any(|p| p.output == last.output);
+        if !elsewhere {
+            direct[k] = Some(j);
+        }
+    }
+    direct
+}
+
 /// Assigns the pass outputs of every effect to pooled textures: a texture goes back to
 /// the pool (per size) after the last pass that reads it, counted over the whole graph
 /// in execution order. Graph outputs stay alive until they are read back. The outputs of
 /// the effects in `mips` get pooled textures with a mip chain, kept apart from the others.
-fn plan(effects: &[Effect], topo: &Topology, sizes: &[(u32, u32)], mips: &[bool], deep: bool) -> Result<Plan, Error> {
+fn plan(
+    effects: &[Effect],
+    topo: &Topology,
+    sizes: &[(u32, u32)],
+    mips: &[bool],
+    direct_out: &[Option<usize>],
+    deep: bool,
+) -> Result<Plan, Error> {
     let finals: Vec<&str> =
         effects.iter().map(|fx| fx.program.package.manifest.passes.last().expect("validated").output.as_str()).collect();
     let mut last: HashMap<(usize, &str), usize> = HashMap::new();
@@ -222,7 +261,9 @@ fn plan(effects: &[Effect], topo: &Topology, sizes: &[(u32, u32)], mips: &[bool]
                 }
                 end >= g
             });
-            if !assign[k].contains_key(&pass.output) {
+            // An output frame written in place takes no pooled texture.
+            let in_place = direct_out[k].is_some() && pass.output == finals[k];
+            if !in_place && !assign[k].contains_key(&pass.output) {
                 let key = (sizes[k].0, sizes[k].1, mips[k] && pass.output == finals[k]);
                 let slot = free.get_mut(&key).and_then(|f| f.pop()).unwrap_or_else(|| {
                     slots.push(key);
@@ -337,7 +378,10 @@ fn prepare(
             k.direct = k.format == PixelFormat::Rgba && !inputs[i].premultiplied && !pad_mips[i];
         }
     }
+    // And the last pass of an effect writes a straight RGBA8 output frame in place.
+    let direct_out = if in_place { direct_outputs(effects, topo, outs, &node_mips) } else { vec![None; effects.len()] };
     let stale = io.deep != deep
+        || io.layout.as_ref().is_some_and(|l| l.direct_out != direct_out)
         || if bypass { planned.len() < keys.len() } else { planned.len() != keys.len() }
         || planned.iter().zip(&keys).any(|(p, k)| p != k);
     if stale {
@@ -351,7 +395,7 @@ fn prepare(
         check_nodes(effects, topo, None, &streams)?;
         let pads: Vec<(u32, u32)> = keys.iter().map(|k| (k.width, k.height)).collect();
         let sizes = topo.node_sizes(&pads);
-        let plan = plan(effects, topo, &sizes, &node_mips, deep)?;
+        let plan = plan(effects, topo, &sizes, &node_mips, &direct_out, deep)?;
         // Drop the bindings of the old textures; they go back to the pool's trimming.
         io.input_mips.clear();
         io.node_mips.clear();
@@ -367,7 +411,7 @@ fn prepare(
         }
         io.deep = deep;
         io.memory = MemoryStats { pass_textures: plan.slots.len(), pass_texture_bytes: plan.bytes(deep), ..Default::default() };
-        io.layout = Some(Layout { keys, plan, sizes, pad_mips, node_mips });
+        io.layout = Some(Layout { keys, plan, sizes, pad_mips, node_mips, direct_out });
     }
     acquire(effects, topo, io, &ctx)
 }
@@ -399,7 +443,9 @@ fn acquire(effects: &mut [Effect], topo: &Topology, io: &mut FrameIo, ctx: &Arc<
     let leases = ctx.pool.take(device, &wants);
     let ids: Vec<u64> = leases.iter().map(|l| l.id).collect();
     io.borrowed = ids.clone();
-    if ids == io.bound_ids {
+    // Slots are made once per layout even when nothing is pooled (frames read and written
+    // in place), so empty ids match only once they are.
+    if ids == io.bound_ids && !io.inputs.is_empty() {
         io.layout = Some(layout);
         return Ok(());
     }
@@ -420,7 +466,14 @@ fn acquire(effects: &mut [Effect], topo: &Topology, io: &mut FrameIo, ctx: &Arc<
     let pool: Vec<wgpu::Texture> = textures.collect();
     for &k in &topo.order {
         let sources: Vec<wgpu::Texture> = topo.node_inputs[k].iter().map(|&s| source_texture(effects, &io.inputs, s)).collect();
-        let outputs = layout.plan.assign[k].iter().map(|(name, &slot)| (name.clone(), pool[slot].clone())).collect();
+        let mut outputs: HashMap<String, wgpu::Texture> =
+            layout.plan.assign[k].iter().map(|(name, &slot)| (name.clone(), pool[slot].clone())).collect();
+        if let Some(j) = layout.direct_out[k] {
+            // Written in place: the frame being recorded, bound again for each frame.
+            let last = effects[k].package().manifest.passes.last().expect("validated").output.clone();
+            let frame = io.frame_outs.get(j).cloned().flatten();
+            outputs.insert(last, frame.unwrap_or_else(|| crate::convert::stand_in(device, wgpu::TextureUsages::STORAGE_BINDING)));
+        }
         if let Err(e) = effects[k].bind(&sources.iter().collect::<Vec<_>>(), outputs, layout.sizes[k], deep) {
             io.release();
             io.layout = Some(layout);
@@ -627,8 +680,10 @@ pub(crate) fn run_gpu(
     let out_descs: Vec<Desc> = outs.iter().map(desc).collect();
     let t0 = std::time::Instant::now();
     io.frame_ins = inputs.iter().map(|f| f.planes.first().cloned()).collect();
+    io.frame_outs = outs.iter().map(|f| f.planes.first().cloned()).collect();
     let prepared = prepare(effects, topo, io, &ins, &out_descs, bypass, true);
     io.frame_ins.clear();
+    io.frame_outs.clear();
     prepared?;
     if crate::profile::enabled() {
         let ctx = effects[0].program.ctx.clone();
@@ -675,15 +730,23 @@ fn record_gpu(
             slot.use_gpu_frame(device, queue, conv, &f.planes, &f.color);
         }
     }
-    if !bypass && direct.contains(&true) {
+    let direct_out = io.layout.as_ref().map(|l| l.direct_out.clone()).unwrap_or_default();
+    if !bypass {
         for &k in &topo.order {
-            if topo.node_inputs[k].iter().any(|s| matches!(*s, Source::Input(i) if direct[i])) {
+            let reads = topo.node_inputs[k].iter().any(|s| matches!(*s, Source::Input(i) if direct[i]));
+            let writes = direct_out[k].map(|j| &outs[j].planes[0]);
+            if reads || writes.is_some() {
                 let sources: Vec<wgpu::Texture> = topo.node_inputs[k].iter().map(|&s| source_texture(effects, &io.inputs, s)).collect();
-                effects[k].rebind(&sources.iter().collect::<Vec<_>>(), None)?;
+                effects[k].rebind(&sources.iter().collect::<Vec<_>>(), writes)?;
             }
         }
     }
     for (k, out) in outs.iter().enumerate() {
+        if !bypass && direct_out.contains(&Some(k)) {
+            // Written by the effect itself: no conversion pass.
+            io.gpu_outputs[k].unbind();
+            continue;
+        }
         let src = if bypass { Source::Input(topo.pad_of(topo.outputs[k])) } else { topo.outputs[k] };
         let tex = source_texture(effects, &io.inputs, src);
         io.gpu_outputs[k].bind(device, queue, conv, &tex, &out.planes, &out.color)?;
@@ -1254,7 +1317,7 @@ impl EffectGraph {
             return Err(Error::Unsupported(format!("the {} takes {} input(s), got {}", self.what, self.topo.nb_inputs, sizes.len())));
         }
         let (_, mips) = mip_sources(&self.effects, &self.topo);
-        let plan = plan(&self.effects, &self.topo, &self.topo.node_sizes(sizes), &mips, deep)?;
+        let plan = plan(&self.effects, &self.topo, &self.topo.node_sizes(sizes), &mips, &vec![None; self.effects.len()], deep)?;
         Ok((plan.slots.len(), plan.bytes(deep)))
     }
 

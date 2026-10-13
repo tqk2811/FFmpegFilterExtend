@@ -350,8 +350,19 @@ fn graph_with_mips(ctx: &Arc<GpuContext>, text: &str, mips: &MipPackage) -> Effe
 /// three frames of new textures and new content, and checks both write the same bytes.
 /// Returns the memory stats of the in-place graph.
 fn direct_matches_copies(text: &str, ins: &[PixelFormat], out: PixelFormat, info: Option<&FrameInfo>) -> Option<gpufx_core::MemoryStats> {
+    in_place_matches_copies(text, ins, &[out], &[info; 3]).map(|(direct, _)| direct)
+}
+
+/// [`direct_matches_copies`] with any outputs and one `info` per frame (`None`: bypassed).
+/// Returns the memory stats of the in-place graph and of the copying one.
+fn in_place_matches_copies(
+    text: &str,
+    ins: &[PixelFormat],
+    outs: &[PixelFormat],
+    infos: &[Option<&FrameInfo>],
+) -> Option<(gpufx_core::MemoryStats, gpufx_core::MemoryStats)> {
     let ctx = own_gpu()?;
-    if !ins.iter().chain([&out]).all(|&f| supported(&ctx, f)) {
+    if !ins.iter().chain(outs).all(|&f| supported(&ctx, f)) {
         return None;
     }
     let mips = MipPackage::new();
@@ -359,15 +370,17 @@ fn direct_matches_copies(text: &str, ins: &[PixelFormat], out: PixelFormat, info
     let mut copied = graph_with_mips(&ctx, text, &mips);
     let mut direct = graph_with_mips(&ctx, text, &mips);
     direct.allow_direct_gpu();
-    for frame in 0..3 {
+    for (frame, &info) in infos.iter().enumerate() {
+        let frame = frame as u32;
         let data: Vec<Vec<Vec<u8>>> = ins.iter().enumerate().map(|(i, &f)| pattern(f, w, h, frame * 5 + i as u32)).collect();
         let upload_all = || ins.iter().zip(&data).map(|(&f, d)| upload(&ctx, f, d, w, h)).collect::<Vec<_>>();
-        let want = gpu_run(&ctx, &mut copied, &upload_all(), &[target(&ctx, out, w, h)], info);
-        let got = gpu_run(&ctx, &mut direct, &upload_all(), &[target(&ctx, out, w, h)], info);
+        let targets = || outs.iter().map(|&f| target(&ctx, f, w, h)).collect::<Vec<_>>();
+        let want = gpu_run(&ctx, &mut copied, &upload_all(), &targets(), info);
+        let got = gpu_run(&ctx, &mut direct, &upload_all(), &targets(), info);
         assert_eq!(got, want, "`{text}`, frame {frame}");
         assert_eq!(ctx.pool_stats().borrowed, 0, "given back by release_frame");
     }
-    Some(direct.memory())
+    Some((direct.memory(), copied.memory()))
 }
 
 #[test]
@@ -404,5 +417,46 @@ fn rgba_gpu_frames_are_copied_when_they_cannot_be_read_in_place() {
     // A deep graph works in rgba16float.
     if let Some(m) = direct_matches_copies("[0]grayscale.zip[out]", &[Rgba], P010, Some(&info)) {
         assert_eq!(m.input_textures, 1);
+    }
+}
+
+#[test]
+fn rgba_gpu_outputs_are_written_in_place() {
+    use PixelFormat::*;
+    let info = FrameInfo::new(0.5, 3);
+    let on = [Some(&info); 3];
+    // One pass: its output is the frame, no pooled texture at all.
+    if let Some((direct, copied)) = in_place_matches_copies("[0]grayscale.zip[out]", &[Rgba], &[Rgba], &on) {
+        assert_eq!((direct.pass_textures, copied.pass_textures), (0, 1));
+    }
+    // Two passes: the first keeps its pooled texture, the last writes the frame.
+    if let Some((direct, copied)) = in_place_matches_copies("[0]gaussian-blur.zip[out]", &[Nv12], &[Rgba], &on) {
+        assert_eq!((direct.pass_textures, copied.pass_textures), (1, 2));
+    }
+    // Bypassed between two frames: the output conversion comes back, then goes again.
+    if let Some((direct, _)) = in_place_matches_copies("[0]grayscale.zip[out]", &[Rgba], &[Rgba], &[Some(&info), None, Some(&info), None]) {
+        assert_eq!(direct.pass_textures, 0);
+    }
+}
+
+#[test]
+fn rgba_gpu_outputs_are_copied_when_they_cannot_be_written_in_place() {
+    use PixelFormat::*;
+    let info = FrameInfo::new(0.5, 3);
+    let on = [Some(&info); 3];
+    // An output another effect reads: copied; the other output, a vignette, is written in place.
+    let text = "[0]grayscale.zip[g]; [g]split[x][y]; [y]vignette.zip[v]";
+    if let Some((direct, copied)) = in_place_matches_copies(text, &[Rgba], &[Rgba, Rgba], &on) {
+        assert_eq!((direct.pass_textures, copied.pass_textures), (1, 2));
+    }
+    // An effect written twice (`null` copies nothing): both outputs are converted.
+    if let Some((direct, copied)) = in_place_matches_copies("[0]grayscale.zip[g]; [g]split[a][b]", &[Rgba], &[Rgba, Rgba], &on) {
+        assert_eq!(direct.pass_textures, copied.pass_textures);
+    }
+    // Other output formats: deep, or not RGBA.
+    for out in [Rgba64, Nv12] {
+        if let Some((direct, copied)) = in_place_matches_copies("[0]grayscale.zip[out]", &[Rgba], &[out], &on) {
+            assert_eq!(direct.pass_textures, copied.pass_textures, "{}", out.name());
+        }
     }
 }

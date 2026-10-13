@@ -110,7 +110,7 @@
 - **Vấn đề**:
   - Chỉ nhận mỗi plane một `VkImage` (`disable_multiplane=1`). Image multiplane (mặc định của FFmpeg cho nv12, p010, yuv420p… khi driver hỗ trợ) bị từ chối; muốn nhận thì cần view từng plane (wgpu có `TEXTURE_FORMAT_NV12`/`P010` cho 2 plane, chưa có cho 3 plane) hoặc tự tạo `VkImageView` theo aspect.
   - FFmpeg 9.0 mặc định tạo frames context `yuva420p`/`yuva444p` không có usage nào (`AVVulkanFramesContext.usage` = 0): output Vulkan của gpufx không thể là các format đó (chuyển sang format khác của manifest, ví dụ `rgba`), input có frames context như vậy bị từ chối (frame của `hwupload` thì dùng được).
-  - Output vẫn qua pass chuyển đổi (copy-out) từ texture pass trong pool sang image output, kể cả khi output là `rgba` và hiệu ứng cuối có thể ghi thẳng image (input `rgba` thẳng thì đã đọc tại chỗ).
+  - Đọc/ghi tại chỗ (input và output `rgba` thẳng) dựng lại bind group của các hiệu ứng liên quan mỗi frame, vì wrapper wgpu của image đổi mỗi frame; có thể cache theo `VkImage` của pool FFmpeg. Output mà hiệu ứng khác cũng đọc thì vẫn copy-out; có thể ghi thẳng nếu frames context của output có `SAMPLED` (thêm `TEXTURE_BINDING` khi import, [vulkan.rs:667](../crates/gpufx-core/src/vulkan.rs#L667)). Graph deep (p010, rgba64…) vẫn copy cả hai đầu.
   - Frame của decoder Vulkan (`-hwaccel vulkan`) là image multiplane nên bị từ chối lúc configure: cần copy trên GPU sang image từng plane (hoặc hỗ trợ view multiplane) mới dùng được; hiện phải `hwdownload,hwupload`. Đường barrier thô cho layout lạ có sẵn nhưng chưa có test.
   - Struct feature chỉ có trong extension mà FFmpeg không đưa vào chuỗi tạo device đọc thành false; struct không có trong bảng của `vulkan.rs` thì giữ giá trị của driver (bảng theo wgpu-hal 30, phải cập nhật khi nâng wgpu).
   - Submit bị wgpu từ chối làm device dùng chung không dùng được cho frame Vulkan tới hết process (an toàn, không signal giá trị cũ, nhưng không tự phục hồi).
@@ -199,4 +199,19 @@
 - **Vấn đề**: (1) đổi kích thước frame giữa chừng thì trả EINVAL (cần chờ các slot, dựng lại vùng copy và buffer, download phải xả frame đang chờ trước); (2) libavfilter build với Vulkan-Headers khác bản của libavutil dựng sẵn nên pool không lấy được queue (cờ internally synchronized queues), filter lấy lại queue bằng `queue_flags` của device — sinh VUID-VkDeviceQueueInfo2-flags-06225 một lần; (3) `out_format` dùng một format cho mọi output, chưa nhận danh sách theo từng output; (4) chưa thử `gpufx_download` với frame của `-hwaccel vulkan`; (5) chỉ có cho Vulkan, chưa có cho D3D.
 - **Vị trí**: [ffmpeg/vf_gpufx_transfer.c](../ffmpeg/vf_gpufx_transfer.c) (`check_size`, khối lấy lại queue sau `ff_vk_exec_pool_init`), [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`out_format`), [scripts/build-prebuilt.sh](../scripts/build-prebuilt.sh) (tag Vulkan-Headers).
 - **Vì sao**: (1) nguồn đổi độ phân giải làm dừng cả graph; (2) nên khớp phiên bản header với libavutil thay vì vá lúc chạy.
+- **Ngày ghi**: 2026-10-13
+
+### [Thấp] Test `toggling_the_effects_reuses_every_resource` đỏ chập chờn
+- **Vấn đề**: khoảng 1/4 số lần chạy `cargo test -p gpufx-core --test color`, số lần cấp phát ra `[2, 3, 5, 6, 7, 7]` thay vì `[2, 3, 3, 3, 3, 3]`. Có từ trước đợt đọc/ghi frame Vulkan tại chỗ (thấy ở `20ebb5d`).
+- **Vị trí**: [crates/gpufx-core/tests/color.rs:468](../crates/gpufx-core/tests/color.rs#L468). Test dùng `gpu()` chung context với các test khác cùng file, nên pool texture dùng chung có thể bị test khác mượn đúng lúc, làm graph phải bind lại.
+- **Vì sao nên làm**: test đỏ giả che lỗi thật; sửa giống `tests/gpu_frames.rs` (`own_gpu()`: một device riêng cho test đếm cấp phát).
+- **Ngày ghi**: 2026-10-13
+
+### [Vừa] Đọc/ghi frame Vulkan tại chỗ: wrapper image giữ quá frame, pass cuối ghi thiếu pixel
+- **Vấn đề**:
+  - Sau `process_vulkan`, `Bound` của hiệu ứng (view, bind group, `outputs`) và `InputSlot.texture` vẫn giữ wrapper wgpu của image FFmpeg của frame vừa xong tới frame sau hoặc tới khi graph bị huỷ. Nếu FFmpeg giải phóng `AVVkFrame` trước (hết stream, pool co lại), wgpu huỷ `VkImageView` của image đã mất. Kiểu giữ này đã có từ trước với bind group của pass chuyển đổi (`InputSlot::use_gpu_frame`, `GpuOutputSlot::bind`), giờ có thêm ở hiệu ứng.
+  - Output ghi tại chỗ được import với trạng thái `UNINITIALIZED`: pass cuối mà không ghi đủ mọi pixel thì phần thiếu là nội dung cũ của frame trong pool FFmpeg (trước đây là nội dung cũ của texture trong pool gpufx).
+  - Cách làm hiện tại rải điều kiện qua ba chỗ phải khớp nhau (`prepare`/`direct_outputs`, `acquire` với stand-in, `record_gpu` bind lại).
+- **Vị trí**: [crates/gpufx-core/src/graph.rs](../crates/gpufx-core/src/graph.rs) (`direct_outputs`, `acquire`, `record_gpu`), [crates/gpufx-core/src/runtime.rs](../crates/gpufx-core/src/runtime.rs) (`Effect::rebind`).
+- **Vì sao nên làm**: an toàn lifetime và dễ bảo trì hơn nếu bind group chứa image của frame chỉ dựng lúc encode và bỏ sau submit, tách khỏi binding của texture trong pool (hoặc bind lại sang stand-in sau submit). Chưa có test với `VkImage` thật (test dùng texture wgpu thường).
 - **Ngày ghi**: 2026-10-13

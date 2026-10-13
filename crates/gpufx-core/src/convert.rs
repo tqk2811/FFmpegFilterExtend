@@ -552,6 +552,11 @@ impl GpuOutputSlot {
         Ok(())
     }
 
+    /// No pass until bound again: the output is written by an effect.
+    pub fn unbind(&mut self) {
+        self.bind_groups.clear();
+    }
+
     pub fn encode(&self, conv: &Converter, cpass: &mut wgpu::ComputePass) -> Result<(), Error> {
         let (format, w, h) = self.key;
         for (p, bg) in self.bind_groups.iter().enumerate() {

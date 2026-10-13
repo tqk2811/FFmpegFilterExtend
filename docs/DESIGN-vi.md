@@ -340,7 +340,10 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   giống hệt đường phần mềm; mỗi input giữ một texture RGBA đã chuyển (như khi upload), còn output chính là
   frame trong pool của FFmpeg. Input `rgba` thẳng của graph không deep, không hiệu ứng nào đọc mip chain của
   nó, thì không cần cả hai: hiệu ứng sample thẳng image (không pass copy-in), và các hiệu ứng đọc nó được bind
-  lại vào image mới mỗi frame.
+  lại vào image mới mỗi frame. Tương tự, output `rgba` thẳng (`out_format=rgba`) của graph như vậy do pass cuối
+  của hiệu ứng tạo ra nó ghi thẳng, không texture trong pool và không pass copy-out, khi không gì khác đọc
+  output của hiệu ứng đó (hiệu ứng khác hay output khác của graph, mip chain, pass khác của chính hiệu ứng).
+  Mọi trường hợp khác, và frame bị bypass, vẫn đi đường copy.
 - **Đo thời gian:** `GPUFX_PROFILE=1` xin device timestamp query và khi giải phóng mỗi graph thì in thời gian GPU
   mỗi frame của copy-in, hiệu ứng, copy-out, cùng thời gian CPU mỗi frame (prepare, bind, record, import,
   submit). Nó tách frame thành ba compute pass và chờ frame trễ bốn frame, nên khi bật thì thời gian chạy
