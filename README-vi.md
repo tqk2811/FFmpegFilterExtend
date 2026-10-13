@@ -53,6 +53,14 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   -vf "format=nv12,gpufx_upload,gpufx=effect=vignette.zip:out_format=rgba,gpufx=effect=sepia.zip:out_format=nv12,gpufx_download,format=nv12" out.mp4
 ```
 
+Giữ frame trên GPU suốt chuỗi. Không có bước upload ở đầu thì mỗi `gpufx` nhận frame CPU, tự upload rồi
+readback kết quả, nên chuỗi 8 filter riêng chép mỗi frame 16 lần (29.8 s so với 6–13 s trên clip của
+[bảng đo](docs/BENCHMARK-vi.md)). Từ nhanh tới chậm:
+
+1. một `gpufx=graph=...` chứa mọi hiệu ứng;
+2. các filter riêng kẹp giữa `gpufx_upload` và `gpufx_download`, `out_format=rgba` trên mọi filter trừ cái cuối;
+3. các filter riêng kẹp giữa `hwupload` và `hwdownload`.
+
 Tài liệu: [thiết kế](docs/DESIGN-vi.md) · [định dạng gói và cách viết shader](docs/EFFECT_FORMAT-vi.md) · [đo tốc độ](docs/BENCHMARK-vi.md) · [English](README.md)
 
 ## Build

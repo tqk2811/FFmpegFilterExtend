@@ -56,6 +56,14 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   -vf "format=nv12,gpufx_upload,gpufx=effect=vignette.zip:out_format=rgba,gpufx=effect=sepia.zip:out_format=nv12,gpufx_download,format=nv12" out.mp4
 ```
 
+Keep frames on the GPU across a chain. Without an upload in front, every `gpufx` takes software frames,
+uploads them and reads its result back, so a chain of 8 separate filters copies each frame 16 times
+(29.8 s against 6–13 s on the [benchmark](docs/BENCHMARK.md) clips). Fastest first:
+
+1. one `gpufx=graph=...` with every effect;
+2. separate filters between `gpufx_upload` and `gpufx_download`, `out_format=rgba` on all but the last;
+3. separate filters between `hwupload` and `hwdownload`.
+
 Docs: [design](docs/DESIGN.md) · [package format and how to write shaders](docs/EFFECT_FORMAT.md) · [benchmark](docs/BENCHMARK.md)
 
 ## Build
