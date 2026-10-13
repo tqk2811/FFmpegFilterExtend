@@ -46,10 +46,38 @@ const EXT: &str = "gpucache";
 /// Extension of the DXIL files of D3D12.
 #[cfg(windows)]
 const DXIL_EXT: &str = "dxil";
-/// Set once D3D12 refused DXIL that was just compiled (no `dxil.dll`, a driver that
-/// rejects it...): later pipelines of the process skip DXC and go the normal way.
-#[cfg(windows)]
-static DXIL_REFUSED: AtomicBool = AtomicBool::new(false);
+/// Distinct shaders whose freshly compiled DXIL D3D12 must refuse before the device
+/// stops using DXIL: one odd shader is not a device without `dxil.dll`.
+const REFUSALS_TO_DISABLE: usize = 2;
+
+/// D3D12 refusals of freshly compiled DXIL on one device.
+#[derive(Default)]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) struct DxilRefusals {
+    /// Keys of the refused shaders, up to [`REFUSALS_TO_DISABLE`].
+    keys: std::sync::Mutex<Vec<String>>,
+    /// Set once enough distinct shaders were refused: the device skips DXC from then on.
+    off: AtomicBool,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl DxilRefusals {
+    pub(crate) fn is_off(&self) -> bool {
+        self.off.load(Ordering::Relaxed)
+    }
+
+    /// Notes that the shader of `key` was refused; `true` when this turns DXIL off.
+    pub(crate) fn refused(&self, key: &str) -> bool {
+        let mut keys = self.keys.lock().unwrap_or_else(|e| e.into_inner());
+        if self.is_off() || keys.iter().any(|k| k == key) {
+            return false;
+        }
+        keys.push(key.to_string());
+        let off = keys.len() >= REFUSALS_TO_DISABLE;
+        self.off.store(off, Ordering::Relaxed);
+        off
+    }
+}
 
 /// Counters of one [`ShaderCache`], for tests and logs.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -83,6 +111,12 @@ pub(crate) struct ShaderCache {
     /// package, file content).
     #[cfg(windows)]
     record: Option<std::sync::Mutex<Vec<PackagedFile>>>,
+    /// D3D12: fresh DXIL refused by this device.
+    #[cfg(windows)]
+    refusals: DxilRefusals,
+    /// D3D12: a trusted package blob was refused (logged once).
+    #[cfg(windows)]
+    package_refused: AtomicBool,
     max_bytes: u64,
     disabled: AtomicBool,
     loaded: AtomicU64,
@@ -203,6 +237,10 @@ impl ShaderCache {
             trust_precompiled: trust,
             #[cfg(windows)]
             record: None,
+            #[cfg(windows)]
+            refusals: Default::default(),
+            #[cfg(windows)]
+            package_refused: AtomicBool::new(false),
             max_bytes,
             disabled: AtomicBool::new(false),
             loaded: AtomicU64::new(0),
@@ -338,10 +376,14 @@ impl ShaderCache {
         parts: &[&str],
         pkg: Option<&Package>,
     ) -> Option<wgpu::ComputePipeline> {
-        if !self.dx12 || DXIL_REFUSED.load(Ordering::Relaxed) {
+        let ep = module.entry_points.iter().find(|ep| ep.name == desc.entry && ep.stage == naga::ShaderStage::Compute);
+        let Some(ep) = ep.filter(|_| self.dx12 && !self.refusals.is_off()) else {
+            if self.record.is_some() {
+                // Recorders use the flag for "a pipeline is missing".
+                self.disabled.store(true, Ordering::Relaxed);
+            }
             return None;
-        }
-        let ep = module.entry_points.iter().find(|ep| ep.name == desc.entry && ep.stage == naga::ShaderStage::Compute)?;
+        };
         let size = (ep.workgroup_size[0], ep.workgroup_size[1], ep.workgroup_size[2]);
         // The registers of the HLSL follow the layout: it is part of the key.
         let layout = format!("{:?}", desc.entries);
@@ -354,9 +396,14 @@ impl ShaderCache {
         });
         if let (Some(pkg), Some(name), true) = (pkg, &packaged, self.trust_precompiled) {
             let dxil = pkg.file(name).ok().map(<[u8]>::to_vec).and_then(verified);
-            if let Some(pipeline) = dxil.and_then(|dxil| passthrough_pipeline(device, desc, size, &dxil)) {
-                self.precompiled.fetch_add(1, Ordering::Relaxed);
-                return Some(pipeline);
+            if let Some(dxil) = dxil {
+                if let Some(pipeline) = passthrough_pipeline(device, desc, size, &dxil) {
+                    self.precompiled.fetch_add(1, Ordering::Relaxed);
+                    return Some(pipeline);
+                }
+                if !self.package_refused.swap(true, Ordering::Relaxed) {
+                    eprintln!("gpufx: warning: D3D12 refused the precompiled DXIL of a package, compiling its shaders the normal way");
+                }
             }
         }
         if let (Some(record), Some(name)) = (&self.record, packaged) {
@@ -394,10 +441,10 @@ impl ShaderCache {
         let (hlsl, name) = crate::dxil::hlsl(module, desc.entries, desc.entry)?;
         let dxil = dxc.compile(&hlsl, &name)?;
         let Some(pipeline) = passthrough_pipeline(device, desc, size, &dxil) else {
-            // Fresh DXIL refused too: D3D12 takes none on this machine (no dxil.dll...).
-            // A file that was there is useless now.
+            // Fresh DXIL refused too. After a second distinct shader, D3D12 likely takes
+            // none on this device (no dxil.dll...). A file that was there is useless now.
             let _ = std::fs::remove_file(&path);
-            if !DXIL_REFUSED.swap(true, Ordering::Relaxed) {
+            if self.refusals.refused(&path.to_string_lossy()) {
                 eprintln!("gpufx: D3D12 refused the DXIL shaders, compiling them the normal way");
             }
             return None;
@@ -457,10 +504,14 @@ fn passthrough_pipeline(
 ) -> Option<wgpu::ComputePipeline> {
     let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
     let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
-    // SAFETY: the DXIL was compiled by gpufx from naga's HLSL with the registers of
-    // wgpu-hal's root signature for this layout (dxil.rs), now or in an earlier run; a
-    // file is only used when its SHA-256 matches, from a directory only this user can
-    // write, and the D3D12 runtime checks the hash and signature of the DXIL container.
+    // SAFETY: the DXIL is either compiled now by gpufx from naga's HLSL with the
+    // registers of wgpu-hal's root signature for this layout (dxil.rs), or read from a
+    // file whose trailing SHA-256 matches. That checksum proves integrity only, not who
+    // wrote the file. Cache directory files were written by gpufx in a directory other
+    // users cannot write (checked on Unix). Blobs inside a package come from whoever
+    // built it: they are used only with GPUFX_TRUST_PRECOMPILED=1, which trusts every
+    // package the process opens. The D3D12 runtime still checks the hash and signature
+    // of the DXIL container.
     let module = unsafe {
         device.create_shader_module_passthrough(wgpu::ShaderModuleDescriptorPassthrough {
             label: Some(desc.label),
@@ -527,6 +578,8 @@ impl ShaderCache {
             dxc: Some(dxc),
             trust_precompiled: false,
             record: Some(Default::default()),
+            refusals: Default::default(),
+            package_refused: AtomicBool::new(false),
             max_bytes: 0,
             disabled: AtomicBool::new(false),
             loaded: AtomicU64::new(0),
@@ -559,5 +612,29 @@ pub fn precompile(pkg: &Package) -> Result<Vec<(String, Vec<u8>)>, crate::Error>
     {
         let _ = pkg;
         Err(crate::Error::Gpu("precompiling D3D12 shaders needs Windows".into()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DxilRefusals;
+
+    #[test]
+    fn dxil_stays_on_until_two_distinct_shaders_are_refused() {
+        let r = DxilRefusals::default();
+        assert!(!r.refused("a"));
+        assert!(!r.refused("a"), "the same shader twice is one refusal");
+        assert!(!r.is_off());
+        assert!(r.refused("b"));
+        assert!(r.is_off());
+        assert!(!r.refused("c"), "only reported once");
+    }
+
+    #[test]
+    fn refusals_are_per_device() {
+        let (r1, r2) = (DxilRefusals::default(), DxilRefusals::default());
+        r1.refused("a");
+        r1.refused("b");
+        assert!(r1.is_off() && !r2.is_off());
     }
 }

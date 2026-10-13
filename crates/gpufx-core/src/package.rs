@@ -120,17 +120,27 @@ impl Package {
     pub fn pack(dir: &Path, out: &Path, precompile: bool) -> Result<usize, Error> {
         let pkg = Package::open(dir)?;
         let compiled = if precompile { crate::precompile(&pkg)? } else { Vec::new() };
+        // The zip being written must not end up inside itself.
+        let out_abs = std::path::absolute(out).ok();
         let mut files = Vec::new();
         let mut stack = vec![dir.to_path_buf()];
         while let Some(d) = stack.pop() {
             for entry in std::fs::read_dir(&d)? {
-                let path = entry?.path();
-                if path.is_dir() {
+                let entry = entry?;
+                let path = entry.path();
+                // Symlinks and junctions are not followed: they could pull in files from
+                // outside the package, or loop.
+                let kind = std::fs::symlink_metadata(&path)?.file_type();
+                if kind.is_symlink() {
+                    continue;
+                }
+                if kind.is_dir() {
                     // Stale blobs of another version must not ship.
-                    if path != dir.join("compiled") {
+                    let top_compiled = d == dir && entry.file_name().to_string_lossy().eq_ignore_ascii_case("compiled");
+                    if !top_compiled {
                         stack.push(path);
                     }
-                } else {
+                } else if kind.is_file() && (out_abs.is_none() || std::path::absolute(&path).ok() != out_abs) {
                     files.push(path);
                 }
             }

@@ -539,14 +539,16 @@ VRAM có hạn, nên bộ nhớ GPU giữ ở mức thấp nhất và không nh�
   gpufx tự sinh HLSL bằng naga (register khớp root signature của wgpu-hal, `dxil.rs`), biên dịch ra DXIL
   (`cs_6_0`), lưu thành `<sha256>.dxil` (khoá thêm phiên bản DXC và shader model) rồi nạp lại bằng
   `Features::PASSTHROUGH_SHADERS` (chỉ xin trên D3D12 khi có cấu hình cache). Blob bị D3D12 từ chối thì
-  biên dịch lại; nếu DXIL vừa biên dịch cũng bị từ chối (thiếu `dxil.dll`...) thì xoá file và cả process
-  thôi dùng DXIL. Không có DXC thì đi đường thường.
+  biên dịch lại; nếu DXIL vừa biên dịch cũng bị từ chối (thiếu `dxil.dll`...) thì xoá file; đủ hai shader
+  khác nhau bị từ chối như vậy thì device đó thôi dùng DXIL. Không có DXC thì đi đường thường.
 - `gpufx pack --precompile <dir> <out.zip>` biên dịch mọi pass (output 8 bit và `rgba16float`, giá trị
   `expr` mặc định) trên device D3D12 (WARP là đủ) và lưu `compiled/dx12/<sha256>.dxil` (kèm checksum)
   vào gói; khoá không có adapter, driver hay phiên bản DXC nên máy không có DXC vẫn dùng được. Thư mục
   `compiled/` có sẵn trong `<dir>` không bao giờ được chép. Lúc chạy chỉ dùng blob khi
   `GPUFX_TRUST_PRECOMPILED=1` (khi đó không cần `GPUFX_SHADER_CACHE`): gói chưa được ký và passthrough
-  shader không được wgpu kiểm. Blob thiếu hoặc bị từ chối thì đi đường thường;
+  shader không được wgpu kiểm. Biến này được đọc lúc tạo context, sau đó tin mọi gói context đó mở;
+  SHA-256 nối cuối chỉ chứng minh file nguyên vẹn, không chứng minh ai dựng gói. Blob thiếu hoặc bị từ
+  chối thì đi đường thường (blob bị từ chối được log một lần);
   `ShaderCacheStats::precompiled` đếm số lần dùng được.
 - Metal, GL: wgpu 30 không có cache ra đĩa, chỉ dựa vào cache của driver.
 

@@ -104,6 +104,9 @@
 - **Vấn đề**: cache DXIL của D3D12 và `gpufx pack --precompile` (thư mục `compiled/dx12/`) đã có, còn lại:
   - Metal: wgpu 30 không có cache ra đĩa; `metallib` cần `xcrun metal`, chỉ làm được khi pack trên macOS (không có thì runtime tự biên dịch MSL).
   - Ký gói (`signature`, DESIGN mục 7): hiện DXIL trong gói chỉ được dùng khi đặt `GPUFX_TRUST_PRECOMPILED=1` cho cả process; gói đã ký nên được tin mà không cần biến môi trường (TODO ở `trust_precompiled`).
+  - Cách tin tạm trước khi có chữ ký: allowlist SHA-256 theo từng gói; chỉ tin gói nằm trong thư mục mà chỉ user hiện tại ghi được; khi máy có DXC thì biên dịch lại rồi so với blob trong gói.
+  - Blob biên dịch sẵn chỉ phủ tham số `expr` mặc định; giá trị khác vẫn biên dịch lúc chạy.
+  - Không có negative cache cho blob mà driver cũ từ chối: mỗi lần chạy lại thử blob đó rồi mới đi đường thường.
 - **Vị trí**: [crates/gpufx-core/src/shader_cache.rs](../crates/gpufx-core/src/shader_cache.rs) (`trust_precompiled`, `dxil_pipeline`, `precompile`), [crates/gpufx-core/src/package.rs](../crates/gpufx-core/src/package.rs) (`Package::pack`).
 - **Vì sao**: passthrough shader không được wgpu kiểm tra (bytecode lạ có thể làm sập driver), nên biến môi trường toàn process là cách tin thô; Metal hiện vẫn biên dịch lại mỗi lần chạy.
 - **Ngày ghi**: 2026-10-13

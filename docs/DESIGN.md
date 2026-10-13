@@ -555,13 +555,16 @@ VRAM is limited, so GPU memory is kept as low as possible and nothing is duplica
   compiles it to DXIL (`cs_6_0`), keeps it as `<sha256>.dxil` (key adds DXC version and shader model)
   and loads it back with `Features::PASSTHROUGH_SHADERS` (requested only on D3D12 when a cache is
   configured). A blob D3D12 refuses is recompiled; if freshly compiled DXIL is refused too (no
-  `dxil.dll`...), the file is removed and the process stops using DXIL. Without DXC, the normal path.
+  `dxil.dll`...), the file is removed; once two distinct shaders are refused that way, that device stops
+  using DXIL. Without DXC, the normal path.
 - `gpufx pack --precompile <dir> <out.zip>` compiles every pass (8-bit and `rgba16float` outputs, default
   `expr` values) on a D3D12 device (WARP is enough) and stores `compiled/dx12/<sha256>.dxil` (checksum
   appended) in the package; the key has no adapter, driver or DXC version, so machines without DXC
   can use it. A `compiled/` folder in `<dir>` is never copied. At run time the blobs are used only with
   `GPUFX_TRUST_PRECOMPILED=1` (then even without `GPUFX_SHADER_CACHE`): packages are not signed yet and
-  passthrough shaders are not checked by wgpu. Missing or refused blobs fall back to the normal path;
+  passthrough shaders are not checked by wgpu. The variable is read when a context is created and then
+  trusts every package that context opens; the appended SHA-256 only proves integrity, not who built the
+  package. Missing or refused blobs fall back to the normal path (a refused blob is logged once);
   `ShaderCacheStats::precompiled` counts the hits.
 - Metal, GL: no on-disk cache in wgpu 30; only driver caches apply.
 
