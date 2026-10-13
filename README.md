@@ -27,7 +27,9 @@ Video effects powered by **GPU shaders** for FFmpeg, loaded from external **`.zi
   place on FFmpeg's own `ID3D12Device`, synchronised with their fences; `AV_PIX_FMT_D3D11` frames run on the D3D12
   device of the same adapter through shared NT handles (outputs without a copy, other inputs with one GPU copy).
   nv12 and p010le. Not yet run on GPU hardware (CI runs them on WARP).
-- Optional on-disk shader cache: `GPUFX_SHADER_CACHE=<dir>` (Vulkan; see [design](docs/DESIGN.md)).
+- Optional on-disk shader cache: `GPUFX_SHADER_CACHE=<dir>` (Vulkan pipeline cache; D3D12 DXIL when
+  `dxcompiler.dll` is on the DLL search path). `gpufx pack --precompile` puts D3D12 shaders in a package, used only
+  with `GPUFX_TRUST_PRECOMPILED=1` (see [design](docs/DESIGN.md)).
 
 ```sh
 ffmpeg -i a.mp4 -i b.mp4 -filter_complex \

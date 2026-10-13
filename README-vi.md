@@ -24,7 +24,9 @@ Hiệu ứng video chạy bằng **shader trên GPU** cho FFmpeg, nạp từ **g
   chính `ID3D12Device` của FFmpeg, đồng bộ bằng fence của frame; frame `AV_PIX_FMT_D3D11` chạy trên device D3D12 cùng
   adapter qua shared NT handle (output không copy, input khác tốn một lần copy GPU). nv12 và p010le.
   Chưa chạy trên GPU thật (CI chạy trên WARP).
-- Cache shader trên đĩa (tuỳ chọn): `GPUFX_SHADER_CACHE=<thư mục>` (Vulkan; xem [thiết kế](docs/DESIGN-vi.md)).
+- Cache shader trên đĩa (tuỳ chọn): `GPUFX_SHADER_CACHE=<thư mục>` (pipeline cache của Vulkan; DXIL của D3D12 khi
+  tìm thấy `dxcompiler.dll` trên đường tìm DLL). `gpufx pack --precompile` gói sẵn shader D3D12 vào gói, chỉ dùng khi
+  `GPUFX_TRUST_PRECOMPILED=1` (xem [thiết kế](docs/DESIGN-vi.md)).
 
 ```sh
 ffmpeg -i a.mp4 -i b.mp4 -filter_complex \

@@ -100,11 +100,13 @@
 - **Vì sao**: muốn các output độc lập thật thì phải tự viết đồng bộ frame thay framesync (hoặc framesync có hỗ trợ nhiều output); số liệu VRAM nên hiện ra cho người dùng (log verbose hoặc hàm C).
 - **Ngày ghi**: 2026-10-12
 
-### Cache shader: D3D12 (DXIL), `pack --precompile`, pipeline chuyển đổi
-- **Vấn đề**: `GPUFX_SHADER_CACHE` mới chỉ có tác dụng trên Vulkan (`wgpu::PipelineCache`). Chưa làm: D3D12 bước 2 (naga → HLSL → `dxcompiler.dll` ra DXIL, nạp lại bằng `Features::PASSTHROUGH_SHADERS` + `create_shader_module_passthrough`), Metal `metallib`, `gpufx pack --precompile` (thư mục `compiled/`, chỉ dùng khi gói đã ký hoặc `GPUFX_TRUST_PRECOMPILED=1`). Pipeline chuyển đổi YUV dựng sẵn (`convert.rs`) cũng chưa đi qua cache.
-- **Vị trí**: [crates/gpufx-core/src/shader_cache.rs](../crates/gpufx-core/src/shader_cache.rs), [crates/gpufx-core/src/runtime.rs](../crates/gpufx-core/src/runtime.rs) (`compile_pass`), [crates/gpufx-cli/src/main.rs](../crates/gpufx-cli/src/main.rs).
-- **Vì sao**: D3D12 là chỗ biên dịch chậm nhất (FXC/DXC trên WARP), cần gọi DXC trực tiếp và một runner Windows để kiểm; passthrough shader không được wgpu kiểm tra nên phải làm cẩn thận phần ký gói.
-- **Ngày ghi**: 2026-10-12
+### Cache shader: Metal `metallib`, ký gói cho shader biên dịch sẵn
+- **Vấn đề**: cache DXIL của D3D12 và `gpufx pack --precompile` (thư mục `compiled/dx12/`) đã có, còn lại:
+  - Metal: wgpu 30 không có cache ra đĩa; `metallib` cần `xcrun metal`, chỉ làm được khi pack trên macOS (không có thì runtime tự biên dịch MSL).
+  - Ký gói (`signature`, DESIGN mục 7): hiện DXIL trong gói chỉ được dùng khi đặt `GPUFX_TRUST_PRECOMPILED=1` cho cả process; gói đã ký nên được tin mà không cần biến môi trường (TODO ở `trust_precompiled`).
+- **Vị trí**: [crates/gpufx-core/src/shader_cache.rs](../crates/gpufx-core/src/shader_cache.rs) (`trust_precompiled`, `dxil_pipeline`, `precompile`), [crates/gpufx-core/src/package.rs](../crates/gpufx-core/src/package.rs) (`Package::pack`).
+- **Vì sao**: passthrough shader không được wgpu kiểm tra (bytecode lạ có thể làm sập driver), nên biến môi trường toàn process là cách tin thô; Metal hiện vẫn biên dịch lại mỗi lần chạy.
+- **Ngày ghi**: 2026-10-13
 
 ### Frame Vulkan: các giới hạn còn lại
 - **Vấn đề**:
@@ -135,16 +137,6 @@
 - **Vị trí**: [crates/gpufx-core/src/d3d12.rs](../crates/gpufx-core/src/d3d12.rs), [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`config_d3d`, `process_d3d12`, `process_d3d11`), [scripts/test-bundle.sh](../scripts/test-bundle.sh), [scripts/build-prebuilt.sh](../scripts/build-prebuilt.sh).
 - **Vì sao**: không có máy Windows khi làm; cần đọc log job `ffmpeg-windows` và chạy thử trên GPU thật.
 - **Ngày ghi**: 2026-10-12
-
-### Cache shader bước 2 và `pack --precompile`: thiết kế đã chốt
-- **Vấn đề**: phần thiết kế chưa làm của mục "Cache shader" (chuyển từ kế hoạch GPU đã xoá):
-  - D3D12 bước 2: naga → HLSL → `dxcompiler.dll` (đã đi kèm bản win64) ra DXIL, lưu file; lần sau nạp bằng `Features::PASSTHROUGH_SHADERS` + `create_shader_module_passthrough` (`unsafe`, wgpu không kiểm tra nên chỉ nạp file mình đã ghi và khớp hash). Driver vẫn phải tạo pipeline state. Metal tương tự với `metallib` nếu cần.
-  - `gpufx pack --precompile`: gói kèm thư mục `compiled/` với bytecode theo từng backend, tên file là hash SHA-256 như cache runtime nhưng không có phần adapter/driver. DXIL: naga → HLSL → DXC (có bản Linux, ký sẵn từ 1.8.2505), không phụ thuộc GPU, là chỗ có lợi nhất. SPIR-V: naga sinh rất nhanh, chỉ thêm nếu đo thấy đáng. Metal: `metallib` cần `xcrun metal`, chỉ làm được khi pack trên macOS; không có thì bỏ qua, runtime tự biên dịch MSL. Mã máy của GPU (pipeline state, ISA) không biên dịch sẵn được, vẫn do `GPUFX_SHADER_CACHE` lo.
-  - An toàn: gói là dữ liệu không tin cậy và passthrough shader không được wgpu kiểm tra (bytecode lạ có thể làm sập driver), nên chỉ dùng `compiled/` khi gói đã ký (`signature`, DESIGN mục 7) hoặc `GPUFX_TRUST_PRECOMPILED=1`; ngược lại biên dịch từ nguồn. Gói luôn giữ nguồn shader; bytecode không khớp hash của nguồn hiện tại thì bỏ qua.
-  - Khi làm xong: ghi biến môi trường mới vào README, DESIGN (cả hai thứ tiếng).
-- **Vị trí**: [crates/gpufx-core/src/shader_cache.rs](../crates/gpufx-core/src/shader_cache.rs), [crates/gpufx-cli/src/main.rs](../crates/gpufx-cli/src/main.rs).
-- **Vì sao**: đo trên CI, FXC mất 50–160 s cho shader lá trên WARP (DXC nhanh hơn nhưng vẫn đáng kể); wgpu 30 không có cache ra đĩa cho D3D12/Metal/GL (`create_pipeline_cache` là stub rỗng).
-- **Ngày ghi**: 2026-10-13
 
 ### Test "yuva420p in, rgba Vulkan frames out" lỗi chập chờn trên CI linux64
 - **Vấn đề**: test này trong `scripts/test-bundle.sh` lỗi trên job CI linux64 hai lần (run 38324146152, cả hai lần chạy, không có log lỗi), rồi qua ở lần chạy kế tiếp (a4296b2). Không tái hiện được trên máy local (80/80 lần qua). Log Vulkan theo từng test giờ in ra nguyên nhân nếu lỗi lặp lại.
@@ -202,7 +194,7 @@
 - **Ngày ghi**: 2026-10-13
 
 ### [Thấp] Test `toggling_the_effects_reuses_every_resource` đỏ chập chờn
-- **Vấn đề**: khoảng 1/4 số lần chạy `cargo test -p gpufx-core --test color`, số lần cấp phát ra `[2, 3, 5, 6, 7, 7]` thay vì `[2, 3, 3, 3, 3, 3]`. Có từ trước đợt đọc/ghi frame Vulkan tại chỗ (thấy ở `20ebb5d`).
+- **Vấn đề**: khoảng 1/4 số lần chạy `cargo test -p gpufx-core --test color`, số lần cấp phát ra `[2, 3, 5, 6, 7, 7]` thay vì `[2, 3, 3, 3, 3, 3]`. Có từ trước đợt đọc/ghi frame Vulkan tại chỗ (thấy ở `20ebb5d`). Ngày 2026-10-13 trên máy có GPU NVIDIA: đỏ 4/4 lần khi chạy cả file song song (master `c9dbb78`), chạy riêng test thì xanh.
 - **Vị trí**: [crates/gpufx-core/tests/color.rs:468](../crates/gpufx-core/tests/color.rs#L468). Test dùng `gpu()` chung context với các test khác cùng file, nên pool texture dùng chung có thể bị test khác mượn đúng lúc, làm graph phải bind lại.
 - **Vì sao nên làm**: test đỏ giả che lỗi thật; sửa giống `tests/gpu_frames.rs` (`own_gpu()`: một device riêng cho test đếm cấp phát).
 - **Ngày ghi**: 2026-10-13

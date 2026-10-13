@@ -538,7 +538,7 @@ VRAM is limited, so GPU memory is kept as low as possible and nothing is duplica
 - One file per pipeline (`<sha256>.gpucache`), the hash covering the final shader source (prelude
   included), language, entry point, output format (`rgba8unorm`/`rgba16float`), gpufx and wgpu
   versions, backend and adapter (name, vendor, device, driver, driver_info). No mtime checks.
-- Vulkan only: the device requests `Features::PIPELINE_CACHE` when the adapter has it, and each pass
+- Vulkan: the device requests `Features::PIPELINE_CACHE` when the adapter has it, and each pass
   pipeline is created with a `wgpu::PipelineCache` seeded from its file (`fallback: true`, so data of
   another driver or wgpu version is dropped by wgpu's header check) and dropped right after; nothing
   stays in memory. Files are written through a temporary file + rename; unreadable or corrupt files are
@@ -548,8 +548,22 @@ VRAM is limited, so GPU memory is kept as low as possible and nothing is duplica
   ignored, recompiled, rewritten). The directory must be private to the user: on Unix a directory
   writable by other users is refused with a warning, since the files reach the driver. Stale temp
   files (over 1 h) and the size limit are handled once per device.
-- D3D12, Metal, GL: wgpu 30 has no on-disk pipeline cache; only driver caches apply (known limit,
-  DXIL caching is in [Backlog-vi.md](Backlog-vi.md)). The built-in conversion pipelines are not cached.
+- The key also holds the exact naga, wgpu-core and wgpu-hal versions (read from `Cargo.lock` by
+  `build.rs`). Effect passes and the built-in conversion pipelines both go through the cache.
+- D3D12: wgpu 30 has no on-disk pipeline cache there. When `dxcompiler.dll` is on the DLL search path,
+  gpufx writes the HLSL itself with naga (registers matching wgpu-hal's root signature, `dxil.rs`),
+  compiles it to DXIL (`cs_6_0`), keeps it as `<sha256>.dxil` (key adds DXC version and shader model)
+  and loads it back with `Features::PASSTHROUGH_SHADERS` (requested only on D3D12 when a cache is
+  configured). A blob D3D12 refuses is recompiled; if freshly compiled DXIL is refused too (no
+  `dxil.dll`...), the file is removed and the process stops using DXIL. Without DXC, the normal path.
+- `gpufx pack --precompile <dir> <out.zip>` compiles every pass (8-bit and `rgba16float` outputs, default
+  `expr` values) on a D3D12 device (WARP is enough) and stores `compiled/dx12/<sha256>.dxil` (checksum
+  appended) in the package; the key has no adapter, driver or DXC version, so machines without DXC
+  can use it. A `compiled/` folder in `<dir>` is never copied. At run time the blobs are used only with
+  `GPUFX_TRUST_PRECOMPILED=1` (then even without `GPUFX_SHADER_CACHE`): packages are not signed yet and
+  passthrough shaders are not checked by wgpu. Missing or refused blobs fall back to the normal path;
+  `ShaderCacheStats::precompiled` counts the hits.
+- Metal, GL: no on-disk cache in wgpu 30; only driver caches apply.
 
 ## 7. Effect package security
 
