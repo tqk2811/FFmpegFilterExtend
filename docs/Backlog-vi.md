@@ -54,12 +54,6 @@
 - **Vì sao**: chưa cần cho FFmpeg; đổi sang khoá theo từng gói khi có app dùng nhiều thread.
 - **Ngày ghi**: 2026-10-12
 
-### Bản build chưa kèm giấy phép của các crate Rust
-- **Vấn đề**: `libgpufx` liên kết tĩnh wgpu, naga, image, zip… Giấy phép của các crate này (MIT, Apache-2.0, BSD, Zlib, có thể cả MPL-2.0, Unicode-3.0) yêu cầu kèm thông báo khi phân phối bản nhị phân, nhưng bản build `dist/<target>` và pre-release chưa có file tổng hợp giấy phép bên thứ ba.
-- **Vị trí**: [scripts/build-prebuilt.sh](../scripts/build-prebuilt.sh), CI pre-release.
-- **Vì sao**: cần thêm bước sinh `THIRD-PARTY-LICENSES` (ví dụ `cargo about`) và `cargo deny check licenses` trong CI để không có crate GPL lọt vào.
-- **Ngày ghi**: 2026-10-12
-
 ### Hiệu ứng thu nhỏ ảnh chưa dùng mipmap của input
 - **Vấn đề**: engine đã có `"mipmaps": true` cho input (api 2, chuỗi mip sinh trên GPU mỗi frame), nhưng `fit`, `push-box`, `photo-collection` vẫn lấy mẫu ở mức 0, nên ảnh lớn hơn khung nhiều (ảnh 4000 px trong `fit`, hộp nhỏ của `push-box`) vẫn răng cưa/nhấp nháy. Nền mờ của `fit` dùng 64 tap bilinear rải đều trên bán kính, bán kính lớn (trên khoảng 64 px) có thể lộ bóng lặp; đọc từ mức mip phù hợp sẽ hết.
 - **Vị trí**: `examples/effects/{fit,push-box,photo-collection}`, [crates/gpufx-core/src/mips.rs](../crates/gpufx-core/src/mips.rs).

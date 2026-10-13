@@ -84,6 +84,7 @@ for dir in "$SRC"/examples/effects/*/; do
 done
 cp "$SRC/README.md" "$SRC/README-vi.md" "$OUT/"
 cp "$SRC/LICENSE" "$OUT/LICENSE-gpufx.txt"
+"$SRC/scripts/third-party-licenses.sh" "$OUT/THIRD-PARTY-LICENSES-gpufx.txt" "$RUST_TARGET"
 cp "$WORK/ffmpeg/COPYING.LGPLv2.1" "$OUT/FFMPEG-LICENSE.txt"
 
 if [ -n "${HOST_UID:-}" ]; then

@@ -19,8 +19,10 @@
 #                    installed mingw-w64 has no d3d12video.h (v12.0.0). gpufx takes D3D12
 #                    and D3D11 frames when the prebuilt libavutil has d3d12va / d3d11va.
 #   REQUIRE_D3D      win64: 1 makes building without D3D12/D3D11 frames an error (CI).
+#   REQUIRE_LICENSES 1 makes a missing cargo-about an error (CI); without it the bundle
+#                    has no THIRD-PARTY-LICENSES-gpufx.txt (the Rust crate licenses).
 # Output: dist/<target>/ (bin, lib on Linux, effects/*.zip, include/gpufx.h)
-# Needs: cargo, a C compiler, make, pkg-config, curl, patchelf (linux64), nasm (optional,
+# Needs: cargo (cargo-about for the crate licenses), a C compiler, make, pkg-config, curl, patchelf (linux64), nasm (optional,
 # for SIMD); win64 also mingw-w64, binutils (strings), the x86_64-pc-windows-gnu Rust target and unzip.
 set -eu
 TARGET=${1:-linux64}
@@ -237,5 +239,6 @@ fi
 mkdir -p "$OUT/include"
 cp "$ROOT/crates/gpufx-ffi/include/gpufx.h" "$OUT/include/"
 cp "$ROOT/LICENSE" "$OUT/LICENSE-gpufx.txt"
+"$ROOT/scripts/third-party-licenses.sh" "$OUT/THIRD-PARTY-LICENSES-gpufx.txt" "$RUST_TARGET"
 "$ROOT/scripts/pack-effects.sh" -o "$OUT/effects" > /dev/null
 echo "==> done: $OUT ($(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' "$ROOT/docker/keep-filters.txt" | wc -l) filters)"

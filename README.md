@@ -250,7 +250,8 @@ The sources and licenses of the leaf images are in [assets/leaves/README.md](ass
 
 The `libgpufx` library and the sample effects can be used in closed-source software, but you must include
 the copyright notices: the repo's MIT, Apache 2.0 / CC BY 3.0 if you use the two leaf effects, and the licenses
-of the Rust crates that `libgpufx` links against.
+of the Rust crates that `libgpufx` links against (`THIRD-PARTY-LICENSES-gpufx.txt` in the build, made with `cargo about`;
+CI checks the crate licenses with `cargo deny check licenses`, see `deny.toml`).
 
 When you distribute a build that includes FFmpeg, you must comply with FFmpeg's license: include the license text
 and copyright notices, let users replace the libraries (the build uses shared libraries), and

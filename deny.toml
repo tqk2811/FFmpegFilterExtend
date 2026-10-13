@@ -1,0 +1,24 @@
+# cargo deny check licenses (CI job "licenses"): every crate the bundles link must be
+# under one of these permissive licenses. A crate under GPL, LGPL or an unknown license
+# fails the check. Keep about.toml's `accepted` list in step.
+[graph]
+# The targets the bundles are built for.
+targets = ["x86_64-unknown-linux-gnu", "x86_64-pc-windows-gnu"]
+exclude-dev = true
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+# The workspace crates (gpufx-*) are not published.
+ignore = true

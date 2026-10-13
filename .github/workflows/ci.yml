@@ -45,6 +45,16 @@ jobs:
         shell: bash
         run: scripts/pack-effects.sh --check
 
+  # Licenses of every crate the bundles link (deny.toml): no GPL or unknown license.
+  licenses:
+    name: Crate licenses
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
+
   # Prebuilt shared FFmpeg 9.0 (tqk2811/FFmpegBuild) with only libavfilter rebuilt:
   # gpufx plus the short filter list of docker/keep-filters.txt. A few minutes each.
   ffmpeg-linux64:
@@ -63,7 +73,10 @@ jobs:
           sudo apt-get update
           # The distro ffmpeg only makes test clips: the bundle has no video sources.
           sudo apt-get install -y mesa-vulkan-drivers ffmpeg patchelf nasm
-      - run: scripts/build-prebuilt.sh linux64
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+      - run: REQUIRE_LICENSES=1 scripts/build-prebuilt.sh linux64
       - name: Logs of the failed build
         if: failure()
         run: tail -n 100 build/prebuilt-linux64/*.log || true
@@ -94,8 +107,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y mingw-w64 nasm ffmpeg
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
       # Building without D3D12/D3D11 frames would make the Windows tests meaningless.
-      - run: REQUIRE_D3D=1 scripts/build-prebuilt.sh win64
+      - run: REQUIRE_D3D=1 REQUIRE_LICENSES=1 scripts/build-prebuilt.sh win64
       - name: Logs of the failed build
         if: failure()
         run: tail -n 100 build/prebuilt-win64/*.log || true
@@ -139,7 +155,7 @@ jobs:
     # Only the newest KEEP_RELEASES pre-releases are kept. PRs from forks and Dependabot
     # are skipped: their token cannot write releases.
     name: Pre-release (tag = commit id)
-    needs: [rust, ffmpeg-linux64, ffmpeg-windows]
+    needs: [rust, licenses, ffmpeg-linux64, ffmpeg-windows]
     if: >-
       github.actor != 'dependabot[bot]' &&
       (github.event_name != 'pull_request' ||

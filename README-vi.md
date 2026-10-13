@@ -246,7 +246,8 @@ Nguồn và giấy phép của ảnh lá ở [assets/leaves/README.md](assets/le
 
 Thư viện `libgpufx` và các hiệu ứng mẫu dùng được trong phần mềm đóng nguồn, nhưng phải kèm
 thông báo bản quyền: MIT của repo, Apache 2.0 / CC BY 3.0 nếu dùng hai hiệu ứng lá, và giấy
-phép của các crate Rust mà `libgpufx` liên kết.
+phép của các crate Rust mà `libgpufx` liên kết (file `THIRD-PARTY-LICENSES-gpufx.txt` trong bản build, sinh bằng `cargo about`;
+CI kiểm giấy phép crate bằng `cargo deny check licenses`, xem `deny.toml`).
 
 Khi phân phối bản build kèm FFmpeg, bạn phải tuân theo giấy phép của FFmpeg: kèm nội dung giấy
 phép và thông báo bản quyền, để người dùng thay được thư viện (bản build là shared library), và
