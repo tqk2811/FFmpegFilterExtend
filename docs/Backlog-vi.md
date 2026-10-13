@@ -190,12 +190,6 @@
 - **Vì sao**: (1) nguồn đổi độ phân giải làm dừng cả graph; (2) nên khớp phiên bản header với libavutil thay vì vá lúc chạy.
 - **Ngày ghi**: 2026-10-13
 
-### [Thấp] Test `toggling_the_effects_reuses_every_resource` đỏ chập chờn
-- **Vấn đề**: khoảng 1/4 số lần chạy `cargo test -p gpufx-core --test color`, số lần cấp phát ra `[2, 3, 5, 6, 7, 7]` thay vì `[2, 3, 3, 3, 3, 3]`. Có từ trước đợt đọc/ghi frame Vulkan tại chỗ (thấy ở `20ebb5d`). Ngày 2026-10-13 trên máy có GPU NVIDIA: đỏ 4/4 lần khi chạy cả file song song (master `c9dbb78`), chạy riêng test thì xanh.
-- **Vị trí**: [crates/gpufx-core/tests/color.rs:468](../crates/gpufx-core/tests/color.rs#L468). Test dùng `gpu()` chung context với các test khác cùng file, nên pool texture dùng chung có thể bị test khác mượn đúng lúc, làm graph phải bind lại.
-- **Vì sao nên làm**: test đỏ giả che lỗi thật; sửa giống `tests/gpu_frames.rs` (`own_gpu()`: một device riêng cho test đếm cấp phát).
-- **Ngày ghi**: 2026-10-13
-
 ### [Vừa] Đọc/ghi frame Vulkan tại chỗ: wrapper giữ qua frame, pass cuối ghi thiếu pixel
 - **Vấn đề**:
   - Wrapper wgpu của image FFmpeg (và view, bind group dựng từ chúng) được cache theo `VkImage` (16 frame mỗi pad, `ImportCache` trong `vulkan.rs`, `Lru` trong `InputSlot`, `GpuOutputSlot`, `Effect::rebind`), nên được giữ qua frame tới khi bị đẩy khỏi cache hoặc graph bị huỷ. Filter giữ ref các frames context Vulkan của input/output (`hold_vk_frames` trong `vf_gpufx.c`) tới sau `gpufx_effect_free`, nên image không bị giải phóng trước wrapper. Còn hở: frames context bị thay giữa chừng (cấu hình lại link) thì ref cũ vẫn giữ tới khi filter bị huỷ (tốn VRAM, không sai); dùng `process_vulkan` từ Rust mà không giữ image như vậy thì wrapper có thể sống lâu hơn image. Đường D3D12/D3D11 chưa có cache, vẫn giữ wrapper của frame cuối tới frame sau.

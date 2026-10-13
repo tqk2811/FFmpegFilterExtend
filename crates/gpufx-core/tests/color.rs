@@ -445,7 +445,13 @@ fn convert_bypasses_the_effects() {
 
 #[test]
 fn toggling_the_effects_reuses_every_resource() {
-    let Some(ctx) = gpu() else { return };
+    // A device of its own: the buffer pool lives in the context, and another test running
+    // in parallel may hold the buffers this chain borrowed last time, which makes it take
+    // others and bind them again, counted as allocations.
+    if gpu().is_none() {
+        return;
+    }
+    let Ok(ctx) = GpuContext::new(common::backend()) else { return };
     let crossfade = Effect::new(ctx.clone(), Package::open(examples().join("crossfade")).unwrap()).unwrap();
     let mut chain = EffectChain::new(vec![("crossfade".into(), crossfade), ("b".into(), identity(&ctx, "toggle"))]).unwrap();
     let color = ColorInfo { matrix: Matrix::Bt709, ..Default::default() };
