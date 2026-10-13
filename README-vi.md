@@ -97,8 +97,9 @@ phần chưa kiểm: thêm `-- --nocapture` để thấy các dòng đó.
   chạy bộ test hai lần, một lần `vulkan` và một lần `dx12`.
 - Test shader cache D3D12 cần `dxcompiler.dll` trên `PATH`, thiếu thì bị bỏ qua. Lấy bằng
   `scripts/fetch-dxc.sh build/dxc` rồi thêm `build/dxc` vào `PATH`.
-- CI chạy bộ test trên lavapipe (Linux, Vulkan), WARP (Windows, D3D12) và Metal (macOS). WARP chạy shader
-  bằng CPU nên bài kiểm hiệu ứng chậm nhất bị bỏ qua ở đó; Metal có thể làm tròn một mẫu YUV lệch một bậc
+- CI chạy bộ test trên lavapipe (Linux, Vulkan) và Metal (macOS). Trên Windows CI chỉ chạy fmt và clippy:
+  WARP, adapter duy nhất của runner hosted, chạy shader bằng CPU và mất nhiều phút, nên test D3D12 chạy
+  trên GPU của máy local. Metal có thể làm tròn một mẫu YUV lệch một bậc
   so với đường CPU, test YUV chỉ chấp nhận điều này trên Metal.
 
 ### Những gì chưa được kiểm

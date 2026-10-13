@@ -29,28 +29,17 @@ jobs:
       - name: Software Vulkan driver (lavapipe)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y mesa-vulkan-drivers
-      # The bundles ship DXC; test with it too (wgpu otherwise compiles with FXC).
-      - name: DirectX Shader Compiler
-        if: runner.os == 'Windows'
-        shell: bash
-        run: |
-          scripts/fetch-dxc.sh build/dxc
-          cygpath -w "$PWD/build/dxc" >> "$GITHUB_PATH"
       - run: cargo fmt --all -- --check
       - run: cargo clippy --release --all-targets -- -D warnings
-      # GPU tests skip themselves when the runner has no usable adapter. Each runner pins the
-      # backend it really has (lavapipe on Linux, WARP on Windows); --nocapture shows
-      # each "skipping: ..." line, which libtest otherwise hides for a passing test.
+      # GPU tests skip themselves when the runner has no usable adapter. Linux pins the backend
+      # it really has (lavapipe); --nocapture shows each "skipping: ..." line, which libtest
+      # otherwise hides for a passing test. Windows runs no tests: WARP, its only adapter, runs
+      # shaders on the CPU for many minutes, so the D3D12 tests run on a local GPU instead.
       - name: cargo test (Vulkan)
         if: runner.os == 'Linux'
         run: cargo test --release -- --nocapture
         env:
           GPUFX_TEST_BACKEND: vulkan
-      - name: cargo test (D3D12)
-        if: runner.os == 'Windows'
-        run: cargo test --release -- --nocapture
-        env:
-          GPUFX_TEST_BACKEND: dx12
       - name: cargo test
         if: runner.os == 'macOS'
         run: cargo test --release

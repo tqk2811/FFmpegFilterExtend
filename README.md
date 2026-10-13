@@ -100,8 +100,9 @@ skipped checks: add `-- --nocapture` to see them.
   suite once with `vulkan` and once with `dx12`.
 - The D3D12 shader cache tests need `dxcompiler.dll` on `PATH`; without it they skip. Fetch it with
   `scripts/fetch-dxc.sh build/dxc` and put `build/dxc` on `PATH`.
-- CI runs the suite on lavapipe (Linux, Vulkan), WARP (Windows, D3D12) and Metal (macOS). WARP runs shaders
-  on the CPU, so the slowest effect check is skipped there; Metal may round a YUV sample one step away from
+- CI runs the suite on lavapipe (Linux, Vulkan) and Metal (macOS). On Windows it only runs fmt and clippy:
+  WARP, the only adapter of hosted runners, runs shaders on the CPU and takes many minutes, so the D3D12
+  tests run on a local GPU instead. Metal may round a YUV sample one step away from
   the CPU path, which the YUV tests allow on Metal only.
 
 ### What has not been tested
