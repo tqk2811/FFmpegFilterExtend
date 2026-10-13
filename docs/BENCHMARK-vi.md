@@ -34,11 +34,15 @@ sharpen. Phía CPU dùng `gblur`, `eq`, `vignette`, `colorchannelmixer`, `unshar
 |---|---|---|---|
 | Filter CPU | 34.95 s | 655 MB | 0 |
 | 8 `gpufx` riêng, frame CPU (mỗi filter upload + readback) | 29.77 s | 586 MB | 202 / – |
+| `hwupload`, 8 `gpufx` riêng, `hwdownload` (frame nằm trên GPU) | 9.83 s † | 547 MB | 316 / – |
+| `gpufx_upload`, 8 `gpufx` riêng có `out_format=rgba`, `gpufx_download` | 5.95 s † | 527 MB | 421 / – |
 | một `gpufx=graph=...` | **7.05 s** | 491 MB | 202 / – |
+
+† Frame Vulkan, lần nhanh nhất trong 3 lần chạy ở bảng sau (đo khi máy đang chạy desktop bình thường).
 
 `gpufx` trả ra đúng loại frame nó nhận (đầu vào CPU thì đầu ra CPU), nên với frame CPU mỗi `gpufx` riêng
 tự upload input và readback output. Upload một lần ở đầu thì frame nằm
-trên GPU suốt giữa các filter: xem các dòng "Chuỗi" ở bảng sau (5.95–13.27 s).
+trên GPU suốt giữa các filter (các dòng có dấu †; đủ các lần chạy ở bảng sau).
 
 **Frame Vulkan và filter truyền frame** (cùng máy, 2026-10-13, khoảng của 3 lần chạy, máy đang chạy desktop bình thường (trình duyệt, Discord, Steam; GPU tải vài %) nên độ lệch rộng; RAM là
 working set đỉnh, VRAM là dedicated đỉnh của lần 3). Các dòng gpufx ở hai bảng đầu được đo lại trên bản build này (chưa đo lại VRAM shared); dòng CPU, `xfade_vulkan` và DX12 giữ số của bản build trước. Phần truyền: chỉ clip A, nv12, 90 s.
