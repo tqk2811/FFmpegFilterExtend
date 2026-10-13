@@ -68,7 +68,7 @@ fn graphs_in_a_row_share_one_readback_buffer() {
     let mut first = graph(&ctx, "[0]invert.zip[out]");
     let want = run(&mut first, &src, w, h, 0);
     let one = ctx.pool_stats();
-    // The readback buffer is pooled with the output words of the same size.
+    // The readback buffer goes back to the pool idle, next to the graph's own resources.
     assert!(one.idle_bytes >= own_bytes(&first) + first.memory().readback_bytes, "{one:?}");
     let mut graphs: Vec<EffectGraph> = (0..7).map(|_| graph(&ctx, "[0]invert.zip[out]")).collect();
     for f in 0..3 {

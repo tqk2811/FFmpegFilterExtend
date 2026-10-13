@@ -68,16 +68,16 @@ fn context(backend: Backend) -> Result<Arc<GpuContext>, gpufx_core::Error> {
     Ok(ctx)
 }
 
-/// The device effects are opened on until they are given theirs (see [`ready`]); shared
-/// while an effect is on it.
+/// The device effects are opened on until they are given theirs (see [`ready`]). It holds
+/// no GPU memory, so it is kept for the life of the process.
 fn noop_context() -> Result<Arc<GpuContext>, String> {
-    static CACHE: Mutex<Weak<GpuContext>> = Mutex::new(Weak::new());
+    static CACHE: Mutex<Option<Arc<GpuContext>>> = Mutex::new(None);
     let mut cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some(ctx) = cache.upgrade() {
-        return Ok(ctx);
+    if let Some(ctx) = cache.as_ref() {
+        return Ok(ctx.clone());
     }
     let ctx = GpuContext::noop().map_err(|e| e.to_string())?;
-    *cache = Arc::downgrade(&ctx);
+    *cache = Some(ctx.clone());
     Ok(ctx)
 }
 
@@ -407,6 +407,14 @@ fn ready(fx: &mut GpufxEffect) -> Result<(), String> {
         move_to(fx, &ctx, ctx.description())?;
     }
     Ok(())
+}
+
+/// Frames from a host device need the effect on that device, given by `use`.
+fn on_host_device(fx: &GpufxEffect, call: &str) -> Result<(), String> {
+    match fx.pending {
+        Some(_) => Err(format!("call {call} before processing its frames")),
+        None => Ok(()),
+    }
 }
 
 unsafe fn open_chain(paths: &[&str], backend: *const c_char) -> Result<*mut GpufxEffect, String> {
@@ -926,6 +934,7 @@ pub unsafe extern "C" fn gpufx_effect_process_vulkan(
 ) -> c_int {
     guard(-1, || {
         let fx = fx.as_mut().ok_or("effect is NULL")?;
+        on_host_device(fx, "gpufx_effect_use_vulkan")?;
         vk::process(fx, inputs, nb_inputs, outs, nb_outputs, info.as_ref().map(frame_info))?;
         Ok(0)
     })
@@ -1136,6 +1145,7 @@ pub unsafe extern "C" fn gpufx_effect_process_d3d12(
 ) -> c_int {
     guard(-1, || {
         let fx = fx.as_mut().ok_or("effect is NULL")?;
+        on_host_device(fx, "gpufx_effect_use_d3d12")?;
         dx::process_d3d12(fx, inputs, nb_inputs, outs, nb_outputs, info.as_ref().map(frame_info))?;
         Ok(0)
     })
@@ -1161,6 +1171,7 @@ pub unsafe extern "C" fn gpufx_effect_process_d3d11(
 ) -> c_int {
     guard(-1, || {
         let fx = fx.as_mut().ok_or("effect is NULL")?;
+        on_host_device(fx, "gpufx_effect_use_d3d11")?;
         dx::process_d3d11(fx, inputs, nb_inputs, outs, nb_outputs, info.as_ref().map(frame_info))?;
         Ok(0)
     })
@@ -1217,6 +1228,22 @@ mod tests {
             // The parameter set before the move is kept: a quarter of the way to the inverse, not the full 245.
             assert!((60..80).contains(&out[0]), "{out:?}");
             assert_eq!(gpufx_effect_use_default_device(fx), 0);
+            gpufx_effect_free(fx);
+        }
+    }
+
+    #[test]
+    fn host_frames_before_use_fail_clearly() {
+        let _serial = serial();
+        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects");
+        let fx = open(&examples.join("invert"));
+        assert!(!fx.is_null(), "{:?}", unsafe { CStr::from_ptr(gpufx_last_error()) });
+        unsafe {
+            // Still on the noop device: running there would write nothing and report success.
+            let rc = gpufx_effect_process_vulkan(fx, ptr::null_mut(), 0, ptr::null_mut(), 0, ptr::null());
+            assert_eq!(rc, -1);
+            let err = CStr::from_ptr(gpufx_last_error()).to_str().unwrap().to_string();
+            assert!(err.contains("gpufx_effect_use_vulkan"), "{err}");
             gpufx_effect_free(fx);
         }
     }
