@@ -416,17 +416,17 @@ LATE_VK=$(vk_ff -i "$A" -itsoffset 0.5 -i "$B" -an -filter_complex \
     -f framemd5 - 2> "$(vk_log)" | grep -v '^#' | wc -l | tr -d ' ')
 if [ "$LATE_VK" = "$MAIN_N" ]; then pass "late second input on Vulkan frames keeps all $MAIN_N frames"
 else fail "late second input on Vulkan frames (want $MAIN_N, got $LATE_VK)"; show_vk_log; fi
-# yuva420p: FFmpeg cannot make storage images of it, so the output falls back to rgba.
+# yuva420p: the output keeps the input format when the GPU can store it; out_format=rgba pins it.
 VKN=yuva420p-rgba
-YUVA_VK=$(vk_ff -i "$A" -frames:v 3 -an -vf "format=yuva420p,hwupload,gpufx=effect=$FX/invert.zip,hwdownload,format=rgba" \
+YUVA_VK=$(vk_ff -i "$A" -frames:v 3 -an -vf "format=yuva420p,hwupload,gpufx=effect=$FX/invert.zip:out_format=rgba,hwdownload,format=rgba" \
     -f framemd5 - 2> "$(vk_log)" | grep -v '^#' | awk -F, '{print $NF}')
 # FFmpeg does not always give yuva420p images a sampled usage (on lavapipe the usage
 # changes from run to run: 0x400001, 0x400002...); gpufx then refuses the input, by design.
 if [ -z "$YUVA_VK" ] && grep -q "yuva420p that cannot be sampled" "$(vk_log)"; then
     echo "  skip  yuva420p in, rgba Vulkan frames out (FFmpeg made yuva420p frames without sampled usage)"
 else
-    # Software yuva420p frames go up as they are, or as rgba when FFmpeg cannot sample them.
-    same "yuva420p in, rgba Vulkan frames out" "$YUVA_VK" "$(gpu_ff -i "$A" -frames:v 3 -an -vf "format=yuva420p,gpufx=effect=$FX/invert.zip,hwdownload,format=rgba" \
+    # Software yuva420p frames go up as they are (or as rgba); both sides force rgba output.
+    same "yuva420p in, rgba Vulkan frames out" "$YUVA_VK" "$(gpu_ff -i "$A" -frames:v 3 -an -vf "format=yuva420p,gpufx=effect=$FX/invert.zip:out_format=rgba,hwdownload,format=rgba" \
             -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | awk -F, '{print $NF}')"
 fi
 # Vulkan and software inputs together: gpufx uploads the software one on the same device.
