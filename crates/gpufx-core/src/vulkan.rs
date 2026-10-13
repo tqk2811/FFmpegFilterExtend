@@ -17,7 +17,7 @@ use wgpu::hal::{self, api::Vulkan};
 
 use crate::frame::{ColorInfo, GpuFrame, PixelFormat};
 use crate::graph::EffectGraph;
-use crate::runtime::{FrameInfo, GpuContext, GPU_FEATURES};
+use crate::runtime::{device_limits, FrameInfo, GpuContext, GPU_FEATURES};
 use crate::Error;
 
 /// A Vulkan device to share, as `AVVulkanDeviceContext` describes it.
@@ -454,6 +454,15 @@ impl GpuContext {
 
         let entry = ash::Entry::from_static_fn(ash::StaticFn { get_instance_proc_addr: hook_gipa });
         let ash_instance = ash::Instance::load(entry.static_fn(), instance);
+        // wgpu records render passes and graphics barriers: on a compute-only family the
+        // driver loses the device (NVIDIA lists one before the graphics family).
+        let families = ash_instance.get_physical_device_queue_family_properties(phd);
+        let graphics = families
+            .get(desc.queue_family as usize)
+            .is_some_and(|f| f.queue_flags.contains(vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE));
+        if !graphics {
+            return Err(gpu_err(format!("queue family {} has no graphics and compute queue", desc.queue_family)));
+        }
         let mut inst_ext = static_names(&desc.instance_extensions);
         if !inst_ext.contains(&ash::khr::get_physical_device_properties2::NAME) {
             inst_ext.push(ash::khr::get_physical_device_properties2::NAME);
@@ -473,12 +482,7 @@ impl GpuContext {
         .map_err(gpu_err)?;
         let exposed = hal_instance.expose_adapter(phd).ok_or_else(|| gpu_err("wgpu cannot use this physical device"))?;
         let features = exposed.features & GPU_FEATURES;
-        let supported = &exposed.capabilities.limits;
-        let limits = wgpu::Limits {
-            max_storage_buffer_binding_size: supported.max_storage_buffer_binding_size,
-            max_buffer_size: supported.max_buffer_size,
-            ..Default::default()
-        };
+        let limits = device_limits(&exposed.capabilities.limits);
         let flags = desc.queue_flags;
         let ash_device = ash::Device::load_with(
             |name| {

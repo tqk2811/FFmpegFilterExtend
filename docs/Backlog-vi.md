@@ -151,3 +151,21 @@
 - **Vị trí**: [scripts/test-bundle.sh](../scripts/test-bundle.sh), job linux64 trong [.github/workflows/ci.yml](../.github/workflows/ci.yml).
 - **Vì sao**: nghi do lavapipe hành xử khác tuỳ máy chủ (host) của runner; cần đọc log Vulkan khi lỗi lặp lại.
 - **Ngày ghi**: 2026-10-13
+
+### Frame Vulkan: `vk_store` đặt access SHADER_READ|WRITE gây cảnh báo validation
+- **Vấn đề**: sau gpufx, `hwdownload` dùng `vkf->access` làm srcAccess trên queue transfer, validation báo `VUID-VkImageMemoryBarrier2-srcAccessMask-03909/07454`. Không gây mất device; việc đồng bộ đã đi qua timeline semaphore nên có thể đặt `VK_ACCESS_2_NONE`.
+- **Vị trí**: [ffmpeg/vf_gpufx.c:916](../ffmpeg/vf_gpufx.c#L916).
+- **Vì sao**: để chạy sạch dưới validation layer; cần build lại avfilter và chạy với layer để kiểm.
+- **Ngày ghi**: 2026-10-13
+
+### Test `exprs` tràn stack ở bản debug trên Windows
+- **Vấn đề**: `expressions_are_compiled_into_wgsl_and_glsl` báo `has overflowed its stack` khi `cargo test` (debug) trên Windows có GPU, ở nhánh GLSL. Chạy với `RUST_MIN_STACK=16777216` thì xanh.
+- **Vị trí**: [crates/gpufx-core/tests/exprs.rs](../crates/gpufx-core/tests/exprs.rs); có thể do frontend GLSL của naga đệ quy sâu ở bản debug.
+- **Vì sao**: thread của filter FFmpeg cũng có stack giới hạn; cần biết bản release có an toàn không, rồi chạy phần biên dịch trên thread stack lớn hoặc đặt `RUST_MIN_STACK` cho test.
+- **Ngày ghi**: 2026-10-13
+
+### Frame Vulkan: bắt buộc họ queue có graphics, chưa có test cho nhánh từ chối
+- **Vấn đề**: gpufx thuần compute nhưng wgpu ghi render pass và barrier đồ hoạ, nên phải chạy trên họ queue có graphics; không chạy song song được trên họ compute riêng (vd cạnh encoder của FFmpeg). Nhánh `from_vulkan` từ chối họ không có graphics chỉ được kiểm bằng tay (ffmpeg cũ chọn họ 2 trên RTX 4060), chưa có test tự động vì cần GPU thật.
+- **Vị trí**: [crates/gpufx-core/src/vulkan.rs](../crates/gpufx-core/src/vulkan.rs) (`GpuContext::from_vulkan`), [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`config_vulkan`).
+- **Vì sao**: theo dõi wgpu hỗ trợ queue chỉ có compute; hoặc để libgpufx tự chọn họ từ danh sách thay vì caller.
+- **Ngày ghi**: 2026-10-13

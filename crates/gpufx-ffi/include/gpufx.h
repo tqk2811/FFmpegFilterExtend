@@ -303,9 +303,9 @@ typedef struct GpufxVulkanDevice {
     void *device;                 /* VkDevice */
     uint32_t api_version;         /* API version of the instance, at least 1.1 */
     /*
-     * The queue gpufx submits to (a family with compute, and the queue in it), and the
-     * VkDeviceQueueCreateFlags it was created with. While gpufx_effect_process_vulkan()
-     * runs, no other thread may submit to that queue (lock it around the call).
+     * The queue gpufx submits to (a family with graphics and compute, since wgpu records render
+     * passes; and the queue in it), and the VkDeviceQueueCreateFlags it was created with.
+     * While gpufx_effect_process_vulkan() runs, no other thread may submit to that queue (lock it around the call).
      */
     uint32_t queue_family;
     uint32_t queue_index;

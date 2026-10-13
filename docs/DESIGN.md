@@ -310,7 +310,8 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   feature struct with the same struct of FFmpeg's creation chain (promoted structs, such as timeline
   semaphores, take their fields from FFmpeg's `VkPhysicalDeviceVulkan11/12/13Features`). Queues created with flags
   (`VK_KHR_internally_synchronized_queues`) are fetched with `vkGetDeviceQueue2`.
-- **Queue.** The first queue family with compute, queue 0. The filter holds FFmpeg's `lock_queue` around
+- **Queue.** The first queue family with graphics and compute, queue 0 (wgpu records render passes and graphics
+  barriers: on the compute-only family that NVIDIA lists first the device is lost; libgpufx refuses such a family). The filter holds FFmpeg's `lock_queue` around
   each call, so FFmpeg's own submissions (hwupload, other Vulkan filters) never race with wgpu's.
 - **Frames.** One `VkImage` per plane, in FFmpeg's per-plane formats (`R8`, `R8G8`, `R8G8B8A8`, `R16`,
   `R16G16`, `R16G16B16A16` `_UNORM`): inputs need `disable_multiplane=1` on the device (or frames made that

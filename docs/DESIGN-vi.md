@@ -306,7 +306,8 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
   struct feature của extension với struct cùng loại trong chuỗi tạo device của FFmpeg (struct đã nâng lên lõi, như timeline
   semaphore, lấy trường từ `VkPhysicalDeviceVulkan11/12/13Features` của FFmpeg). Queue tạo với cờ
   (`VK_KHR_internally_synchronized_queues`) được lấy bằng `vkGetDeviceQueue2`.
-- **Queue.** Họ queue đầu tiên có compute, queue 0. Filter giữ `lock_queue` của FFmpeg quanh mỗi lần gọi, nên
+- **Queue.** Họ queue đầu tiên có cả graphics lẫn compute, queue 0 (wgpu ghi render pass và barrier đồ hoạ: trên họ
+  chỉ có compute mà NVIDIA liệt kê trước thì device bị lost; libgpufx từ chối họ như vậy). Filter giữ `lock_queue` của FFmpeg quanh mỗi lần gọi, nên
   lệnh submit của FFmpeg (hwupload, filter Vulkan khác) không tranh với wgpu.
 - **Frame.** Mỗi plane một `VkImage`, theo format từng plane của FFmpeg (`R8`, `R8G8`, `R8G8B8A8`, `R16`,
   `R16G16`, `R16G16B16A16` `_UNORM`): input cần device có `disable_multiplane=1` (hoặc frame tạo theo cách đó);

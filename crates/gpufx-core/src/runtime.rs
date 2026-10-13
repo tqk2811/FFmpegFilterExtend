@@ -55,6 +55,19 @@ pub(crate) const GPU_FEATURES: wgpu::Features = wgpu::Features::PIPELINE_CACHE
     .union(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM)
     .union(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES);
 
+/// Limits a device asks for, from what the adapter supports. Output planes are encoded into
+/// storage buffers: allow what the adapter allows, an 8K RGBA64 frame is above the 128 MiB default.
+/// `max_buffer_size` stays within `u32::MAX`: wgpu-core asserts it when it creates a device, and a
+/// raw Vulkan adapter (`expose_adapter`) reports the driver's `maxBufferSize` unclamped (NVIDIA: above 4 GiB).
+pub(crate) fn device_limits(supported: &wgpu::Limits) -> wgpu::Limits {
+    let max_buffer_size = supported.max_buffer_size.min(u32::MAX as u64);
+    wgpu::Limits {
+        max_storage_buffer_binding_size: supported.max_storage_buffer_binding_size.min(max_buffer_size),
+        max_buffer_size,
+        ..Default::default()
+    }
+}
+
 /// A GPU device. One context can be shared by many effects.
 pub struct GpuContext {
     pub(crate) device: wgpu::Device,
@@ -108,16 +121,9 @@ impl GpuContext {
         Self::open_adapter(&adapter, "gpufx", cache_dir)
     }
 
-    /// A device on `adapter` with the features and limits gpufx uses.
+    /// A device on `adapter` with the features and limits gpufx uses (see [`device_limits`]).
     pub(crate) fn open_adapter(adapter: &wgpu::Adapter, label: &str, cache_dir: Option<&std::path::Path>) -> Result<Arc<Self>, Error> {
-        // Output planes are encoded into storage buffers: allow what the adapter allows,
-        // an 8K RGBA64 frame is above the 128 MiB default.
-        let supported = adapter.limits();
-        let required_limits = wgpu::Limits {
-            max_storage_buffer_binding_size: supported.max_storage_buffer_binding_size,
-            max_buffer_size: supported.max_buffer_size,
-            ..Default::default()
-        };
+        let required_limits = device_limits(&adapter.limits());
         let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
             label: Some(label),
             required_limits,
@@ -763,5 +769,22 @@ fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
         visibility: wgpu::ShaderStages::COMPUTE,
         ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
         count: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::device_limits;
+
+    #[test]
+    fn device_limits_keep_max_buffer_size_within_u32() {
+        // A raw Vulkan adapter on NVIDIA reports maxBufferSize above 4 GiB; wgpu-core panics on it.
+        let huge = wgpu::Limits { max_buffer_size: 1 << 40, max_storage_buffer_binding_size: 1 << 40, ..Default::default() };
+        let limits = device_limits(&huge);
+        assert_eq!(limits.max_buffer_size, u32::MAX as u64);
+        assert_eq!(limits.max_storage_buffer_binding_size, u32::MAX as u64);
+
+        let small = wgpu::Limits { max_buffer_size: 256 << 20, ..Default::default() };
+        assert_eq!(device_limits(&small).max_buffer_size, 256 << 20);
     }
 }
