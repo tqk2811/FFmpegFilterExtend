@@ -177,10 +177,15 @@
 - **Vì sao**: bỏ pass đổi định dạng và texture RGBA, giảm dữ liệu đọc/ghi khoảng 2,7 lần cho chuỗi chỉ có transition (chưa đo).
 - **Ngày ghi**: 2026-10-13
 
-### Các filter `gpufx` nối nhau dùng chung một wgpu device
-- **Vấn đề**: mỗi filter `gpufx` tạo device riêng; chuỗi 8 filter trên frame Vulkan tốn 578 MB VRAM so với 257 MB của một `graph=` và chậm hơn khoảng 4 s / 2158 frame (đo khi GPU đang bận game).
-- **Vị trí**: [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`config_vulkan`), [crates/gpufx-core/src/vulkan.rs](../crates/gpufx-core/src/vulkan.rs) (`GpuContext::from_vulkan`).
-- **Vì sao**: dùng chung `GpuContext` theo `VkDevice` của FFmpeg (đếm tham chiếu) giảm VRAM, thời gian khởi tạo và chi phí đồng bộ giữa các filter.
+### Pool texture dùng chung: các giới hạn còn lại
+- **Vấn đề**:
+  - (1) Graph còn sống nhưng ngừng chạy (hoặc vừa đổi kích thước) vẫn giữ texture trong bind group/`InputSlot`/mip chain. Trim bỏ entry khỏi pool nhưng VRAM chưa được giải phóng, và `pool_stats` báo thấp hơn thực tế.
+  - (2) Ở `vulkan.rs`/`d3d12.rs`, các đường lỗi nằm giữa `encode_gpu` và `release_frame` giữ lease tới lần encode sau.
+  - (3) Trim chỉ chạy khi có `give_back`; khi mọi graph cùng dừng thì phần rảnh giữ mãi. Ngưỡng `IDLE_FRAMES × số user` lâu với nhiều graph.
+  - (4) Texture tạm của D3D12 chưa vào pool.
+  - (5) Pool frame đầu ra (`VkImage`) FFmpeg cấp riêng cho mỗi filter chiếm phần chênh còn lại: 8 filter riêng 322 MB so với 260 MB của graph; với `out_format=rgba` là 442 MB. Pool trước `crossfade` lên tới 10 frame.
+- **Vị trí**: [crates/gpufx-core/src/pool.rs](../crates/gpufx-core/src/pool.rs) (`give_back`), [crates/gpufx-core/src/graph.rs](../crates/gpufx-core/src/graph.rs) (`acquire`, `FrameIo`), [crates/gpufx-core/src/vulkan.rs](../crates/gpufx-core/src/vulkan.rs), [crates/gpufx-core/src/d3d12.rs](../crates/gpufx-core/src/d3d12.rs), [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`initial_pool_size` của frames ctx đầu ra).
+- **Vì sao**: (1) nên để pool sở hữu bind group theo id lease, hoặc đánh dấu id bị trim để graph bỏ binding; (5) giới hạn pool đầu ra sẽ đưa 8 filter riêng về gần mức của graph.
 - **Ngày ghi**: 2026-10-13
 
 ### Frame D3D12/D3D11 lỗi trên RTX 4060 (Windows)

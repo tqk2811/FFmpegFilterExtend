@@ -4,11 +4,12 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::convert::{read_outputs, readback_buffer, texture_2d_mips, work_format, GpuOutputSlot, InputKey, InputSlot, OutputSlot};
+use crate::convert::{read_outputs, readback_buffer, work_format, GpuOutputSlot, InputKey, InputSlot, OutputSlot};
 use crate::frame::{Frame, FrameMut, GpuFrame, PixelFormat};
 use crate::manifest::StreamInfo;
 use crate::mips::MipChain;
 use crate::params::ParamBlock;
+use crate::pool::PoolKey;
 use crate::runtime::{Effect, FrameInfo, Image, ImageMut};
 use crate::Error;
 
@@ -87,6 +88,43 @@ pub(crate) struct FrameIo {
     /// Mip chains of the input pads and effect outputs an effect input wants mipmapped.
     input_mips: Vec<Option<MipChain>>,
     node_mips: Vec<Option<MipChain>>,
+    /// What `prepare` planned for the current inputs; the textures come from the pool.
+    layout: Option<Layout>,
+    /// Ids of the pooled resources the bind groups were made for: the input slots and
+    /// pass textures, then the output words. Another id back from the pool rebinds.
+    bound_ids: Vec<u64>,
+    out_ids: Vec<u64>,
+    /// Borrowed for the frame being recorded, given back once it is submitted.
+    borrowed: Vec<u64>,
+    /// The pool's id of this borrower, and the context of the pool.
+    user: u64,
+    ctx: Option<Arc<crate::GpuContext>>,
+}
+
+/// The planned textures of a graph for one set of inputs.
+struct Layout {
+    keys: Vec<InputKey>,
+    plan: Plan,
+    sizes: Vec<(u32, u32)>,
+    pad_mips: Vec<bool>,
+    node_mips: Vec<bool>,
+}
+
+impl FrameIo {
+    /// Gives back what the last frame borrowed: its submission was made (or nothing was).
+    pub(crate) fn release(&mut self) {
+        if let Some(ctx) = &self.ctx {
+            if !self.borrowed.is_empty() {
+                ctx.pool.give_back(self.user, &std::mem::take(&mut self.borrowed));
+            }
+        }
+    }
+}
+
+impl Drop for FrameIo {
+    fn drop(&mut self) {
+        self.release();
+    }
 }
 
 /// Which input pads and effect outputs some effect reads through a `mipmaps` input.
@@ -264,7 +302,6 @@ fn prepare(
     }
 
     let ctx = effects[0].program.ctx.clone();
-    let (device, conv) = (&ctx.device, &ctx.conv);
     let keys: Vec<InputKey> = inputs
         .iter()
         .map(|f| InputKey {
@@ -275,19 +312,20 @@ fn prepare(
             gpu,
         })
         .collect();
+    let planned: &[InputKey] = io.layout.as_ref().map_or(&[], |l| &l.keys);
     // A bypass call may bring only the first inputs: keep the slots of the others, and
     // their depth, so toggling the filter on and off does not rebuild anything.
-    let others = if bypass { io.inputs.get(inputs.len()..).unwrap_or_default() } else { &[][..] };
-    let deep = keys.iter().chain(others.iter().map(|slot| &slot.key)).any(|k| work_format(k.format) != wgpu::TextureFormat::Rgba8Unorm)
+    let others = if bypass { planned.get(inputs.len()..).unwrap_or_default() } else { &[][..] };
+    let deep = keys.iter().chain(others).any(|k| work_format(k.format) != wgpu::TextureFormat::Rgba8Unorm)
         || outs.iter().any(|o| work_format(o.format) != wgpu::TextureFormat::Rgba8Unorm);
     let stale = io.deep != deep
-        || if bypass { io.inputs.len() < keys.len() } else { io.inputs.len() != keys.len() }
-        || io.inputs.iter().zip(&keys).any(|(slot, k)| slot.key != *k);
+        || if bypass { planned.len() < keys.len() } else { planned.len() != keys.len() }
+        || planned.iter().zip(&keys).any(|(p, k)| p != k);
     if stale {
         let mut keys = keys.clone();
         // Missing inputs keep their keys, or take input 0's when there are none yet.
         for i in keys.len()..topo.nb_inputs {
-            keys.push(io.inputs.get(i).map_or(keys[0], |slot| slot.key));
+            keys.push(planned.get(i).copied().unwrap_or(keys[0]));
         }
         // Size rules of the manifests; pixel formats are the caller's to check.
         let streams: Vec<StreamInfo> = keys.iter().map(|k| StreamInfo { format: None, width: k.width, height: k.height }).collect();
@@ -296,42 +334,86 @@ fn prepare(
         let sizes = topo.node_sizes(&pads);
         let (pad_mips, node_mips) = mip_sources(effects, topo);
         let plan = plan(effects, topo, &sizes, &node_mips, deep)?;
-        // Drop the old textures before making new ones.
+        // Drop the bindings of the old textures; they go back to the pool's trimming.
         io.input_mips.clear();
         io.node_mips.clear();
         io.inputs.clear();
         io.outputs.clear();
         io.gpu_outputs.clear();
         io.readback = None;
+        io.bound_ids.clear();
+        io.out_ids.clear();
         for fx in effects.iter_mut() {
             fx.bound = None;
         }
         io.deep = deep;
-        io.allocations += 1;
-        io.inputs = keys
-            .iter()
-            .enumerate()
-            .map(|(i, &k)| InputSlot::new(device, conv, &format!("gpufx input {i}"), k, deep, pad_mips[i]))
-            .collect();
-        let format = if deep { wgpu::TextureFormat::Rgba16Float } else { wgpu::TextureFormat::Rgba8Unorm };
-        let usage = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
-        let pool: Vec<wgpu::Texture> =
-            plan.slots.iter().map(|&(w, h, mips)| texture_2d_mips(device, "gpufx pass output", w, h, format, usage, mips)).collect();
-        for &k in &topo.order {
-            let sources: Vec<wgpu::Texture> = topo.node_inputs[k].iter().map(|&s| source_texture(effects, &io.inputs, s)).collect();
-            let outputs = plan.assign[k].iter().map(|(name, &slot)| (name.clone(), pool[slot].clone())).collect();
-            effects[k].bind(&sources.iter().collect::<Vec<_>>(), outputs, sizes[k], deep)?;
-        }
-        io.input_mips = io.inputs.iter().zip(&pad_mips).map(|(slot, &m)| m.then(|| ctx.mips.chain(device, &slot.texture))).collect();
-        io.node_mips = (0..effects.len()).map(|k| node_mips[k].then(|| ctx.mips.chain(device, effects[k].output()))).collect();
-        io.memory = MemoryStats {
-            pass_textures: plan.slots.len(),
-            pass_texture_bytes: plan.bytes(deep),
-            input_textures: io.inputs.iter().map(|s| s.texture_count()).sum(),
-            input_texture_bytes: io.inputs.iter().map(|s| s.texture_bytes()).sum(),
-            readback_bytes: 0,
-        };
+        io.memory = MemoryStats { pass_textures: plan.slots.len(), pass_texture_bytes: plan.bytes(deep), ..Default::default() };
+        io.layout = Some(Layout { keys, plan, sizes, pad_mips, node_mips });
     }
+    acquire(effects, topo, io, &ctx)
+}
+
+/// Borrows the input slot and pass textures of a frame from the context pool, and
+/// rebinds the slots and effects when the pool gave other textures than last time.
+fn acquire(effects: &mut [Effect], topo: &Topology, io: &mut FrameIo, ctx: &Arc<crate::GpuContext>) -> Result<(), Error> {
+    let (device, conv) = (&ctx.device, &ctx.conv);
+    // Given back after the submission of the frame before, unless the caller did.
+    io.release();
+    if io.user == 0 {
+        io.user = ctx.pool.new_user();
+        io.ctx = Some(ctx.clone());
+    }
+    // Taken out while the slots are rebuilt, put back below.
+    let layout = io.layout.take().expect("planned before");
+    let deep = io.deep;
+    let format = if deep { wgpu::TextureFormat::Rgba16Float } else { wgpu::TextureFormat::Rgba8Unorm };
+    let usage = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
+    let mut keys = Vec::new();
+    let mut counts = Vec::new();
+    for (i, &k) in layout.keys.iter().enumerate() {
+        let slot = InputSlot::pool_keys(k, deep, layout.pad_mips[i]);
+        counts.push(slot.len());
+        keys.extend(slot);
+    }
+    keys.extend(layout.plan.slots.iter().map(|&(width, height, mips)| PoolKey::Texture { width, height, format, usage, mips }));
+    let wants: Vec<(PoolKey, Option<u64>)> = keys.iter().enumerate().map(|(n, &k)| (k, io.bound_ids.get(n).copied())).collect();
+    let leases = ctx.pool.take(device, &wants);
+    let ids: Vec<u64> = leases.iter().map(|l| l.id).collect();
+    io.borrowed = ids.clone();
+    if ids == io.bound_ids {
+        io.layout = Some(layout);
+        return Ok(());
+    }
+    io.bound_ids.clear();
+    let mut textures = leases.iter().map(|l| l.texture().clone());
+    io.input_mips.clear();
+    io.node_mips.clear();
+    io.inputs = layout
+        .keys
+        .iter()
+        .zip(&counts)
+        .map(|(&k, &n)| InputSlot::new(device, conv, k, deep, textures.by_ref().take(n).collect()))
+        .collect();
+    let pool: Vec<wgpu::Texture> = textures.collect();
+    for &k in &topo.order {
+        let sources: Vec<wgpu::Texture> = topo.node_inputs[k].iter().map(|&s| source_texture(effects, &io.inputs, s)).collect();
+        let outputs = layout.plan.assign[k].iter().map(|(name, &slot)| (name.clone(), pool[slot].clone())).collect();
+        if let Err(e) = effects[k].bind(&sources.iter().collect::<Vec<_>>(), outputs, layout.sizes[k], deep) {
+            io.release();
+            io.layout = Some(layout);
+            return Err(e);
+        }
+    }
+    io.input_mips = io.inputs.iter().zip(&layout.pad_mips).map(|(slot, &m)| m.then(|| ctx.mips.chain(device, &slot.texture))).collect();
+    io.node_mips = (0..effects.len()).map(|k| layout.node_mips[k].then(|| ctx.mips.chain(device, effects[k].output()))).collect();
+    for slot in &mut io.outputs {
+        slot.unbind();
+    }
+    io.memory.input_textures = io.inputs.iter().map(|s| s.texture_count()).sum();
+    io.memory.input_texture_bytes = io.inputs.iter().map(|s| s.texture_bytes()).sum();
+    io.bound_ids = ids;
+    io.layout = Some(layout);
+    io.allocations += 1;
     Ok(())
 }
 
@@ -377,14 +459,35 @@ pub(crate) fn run(
     if io.outputs.len() != outs.len() || io.outputs.iter().zip(outs.iter()).any(|(slot, o)| slot.key != (o.format, o.width, o.height)) {
         io.outputs.clear();
         io.readback = None;
+        io.out_ids.clear();
         let mut offset = 0;
         for o in outs.iter() {
-            let slot = OutputSlot::new(device, o.format, o.width, o.height, offset)?;
+            let slot = match OutputSlot::new(device, o.format, o.width, o.height, offset) {
+                Ok(slot) => slot,
+                Err(e) => {
+                    io.release();
+                    return Err(e);
+                }
+            };
             offset = slot.end();
             io.outputs.push(slot);
         }
         io.readback = Some(readback_buffer(device, offset));
         io.memory.readback_bytes = offset;
+    }
+    // The output words are pooled too: the readback buffer, which the CPU maps, is not.
+    let keys: Vec<PoolKey> = io.outputs.iter().flat_map(|slot| slot.pool_keys()).collect();
+    let wants: Vec<(PoolKey, Option<u64>)> = keys.iter().enumerate().map(|(n, &k)| (k, io.out_ids.get(n).copied())).collect();
+    let leases = ctx.pool.take(device, &wants);
+    let ids: Vec<u64> = leases.iter().map(|l| l.id).collect();
+    io.borrowed.extend(&ids);
+    if ids != io.out_ids {
+        let mut buffers = leases.iter().map(|l| l.buffer().clone());
+        for slot in &mut io.outputs {
+            let n = slot.pool_keys().len();
+            slot.set_words(buffers.by_ref().take(n).collect());
+        }
+        io.out_ids = ids;
     }
     let mut bound = false;
     for k in 0..outs.len() {
@@ -408,12 +511,14 @@ pub(crate) fn run(
             slot.encode(queue, conv, &mut cpass, &out.color, bypass);
         }
     }
-    let readback = io.readback.as_ref().expect("made above");
+    let readback = io.readback.clone().expect("made above");
     for slot in &io.outputs {
-        slot.copy(&mut enc, readback);
+        slot.copy(&mut enc, &readback);
     }
     queue.submit([enc.finish()]);
-    read_outputs(device, readback, &io.outputs, outs)
+    // Later submissions may reuse the pooled resources: the GPU runs them after this one.
+    io.release();
+    read_outputs(device, &readback, &io.outputs, outs)
 }
 
 /// Encodes the conversion of the first `given` inputs and, unless bypassed (no `info`),
@@ -475,7 +580,24 @@ pub(crate) fn run_gpu(
     let ins: Vec<Desc> = inputs.iter().map(desc).collect();
     let out_descs: Vec<Desc> = outs.iter().map(desc).collect();
     prepare(effects, topo, io, &ins, &out_descs, bypass, true)?;
+    // The pooled textures stay borrowed until the caller submitted `enc`.
+    let res = record_gpu(effects, topo, io, inputs, outs, info, enc);
+    if res.is_err() {
+        io.release();
+    }
+    res
+}
 
+fn record_gpu(
+    effects: &mut [Effect],
+    topo: &Topology,
+    io: &mut FrameIo,
+    inputs: &[GpuFrame],
+    outs: &[GpuFrame],
+    info: Option<&FrameInfo>,
+    enc: &mut wgpu::CommandEncoder,
+) -> Result<(), Error> {
+    let bypass = info.is_none();
     let ctx = effects[0].program.ctx.clone();
     let (device, queue, conv) = (&ctx.device, &ctx.queue, &ctx.conv);
     if io.gpu_outputs.len() != outs.len()
@@ -1072,7 +1194,9 @@ impl EffectGraph {
     /// [`EffectGraph::output_pad`]`(k)`. Without `info` the effects are bypassed as in
     /// [`EffectGraph::convert`]. Bind groups of the frame textures are made per call
     /// (the textures of a frame pool change from frame to frame); the pooled textures
-    /// are reused as for CPU frames.
+    /// are reused as for CPU frames. They are borrowed from the context pool until
+    /// [`EffectGraph::release_frame`] or the next call: call it right after submitting
+    /// `enc`, so other graphs on the device can use them.
     pub fn encode_gpu(
         &mut self,
         inputs: &[GpuFrame],
@@ -1081,6 +1205,13 @@ impl EffectGraph {
         enc: &mut wgpu::CommandEncoder,
     ) -> Result<(), Error> {
         run_gpu(&mut self.effects, &self.topo, &mut self.io, inputs, outs, info, enc)
+    }
+
+    /// Gives the pooled textures of the last [`EffectGraph::encode_gpu`] back to the
+    /// context pool. Only once its encoder was submitted (or dropped): later submissions
+    /// of other graphs reuse them.
+    pub fn release_frame(&mut self) {
+        self.io.release();
     }
 
     /// The device the graph runs on.

@@ -625,6 +625,7 @@ impl EffectGraph {
             }
         }
         let index = ctx.queue.submit(buffers);
+        self.release_frame();
         // A submission wgpu refused leaves the fences staged: take them back so no later
         // submission signals stale values, and stop using the device.
         let mut left = false;

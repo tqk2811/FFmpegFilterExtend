@@ -12,6 +12,7 @@
 use std::sync::OnceLock;
 
 use crate::frame::{ColorInfo, FrameMut, Layout, PixelFormat, PlaneKind};
+use crate::pool::PoolKey;
 use crate::Error;
 
 /// RGBA texture format that keeps the precision of `format`: `rgba16float` (about 11
@@ -368,28 +369,41 @@ pub(crate) struct InputSlot {
 }
 
 impl InputSlot {
-    /// `deep`: convert into `rgba16float` rather than `rgba8unorm`. `mips`: the texture
-    /// effects read has a mip chain (filled by the caller after `encode`).
-    pub fn new(device: &wgpu::Device, conv: &Converter, name: &str, key: InputKey, deep: bool, mips: bool) -> Self {
+    /// The textures of a slot, borrowed from the context pool: the upload planes, then
+    /// the converted frame unless direct. `deep`: convert into `rgba16float` rather than
+    /// `rgba8unorm`. `mips`: the texture effects read has a mip chain (filled by the
+    /// caller after `encode`).
+    pub fn pool_keys(key: InputKey, deep: bool, mips: bool) -> Vec<PoolKey> {
         let (w, h) = (key.width, key.height);
+        let tex = |width, height, format, usage, mips| PoolKey::Texture { width, height, format, usage, mips };
         let copy = wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST;
         if key.direct {
             let usage = if mips { copy | wgpu::TextureUsages::STORAGE_BINDING } else { copy };
-            let tex = texture_2d_mips(device, name, w, h, wgpu::TextureFormat::Rgba8Unorm, usage, mips);
-            return InputSlot { key, planes: vec![tex.clone()], texture: tex, uniform: None, bind_group: None, deep };
+            return vec![tex(w, h, wgpu::TextureFormat::Rgba8Unorm, usage, mips)];
         }
-        let planes: Vec<wgpu::Texture> = if key.gpu {
+        let mut keys: Vec<PoolKey> = if key.gpu {
             Vec::new()
         } else {
             (0..key.format.plane_count())
                 .map(|p| {
                     let (pw, ph, _) = key.format.plane_dims(p, w, h);
-                    texture_2d(device, &format!("{name} plane {p}"), pw, ph, plane_format(key.format, p), copy)
+                    tex(pw, ph, plane_format(key.format, p), copy, false)
                 })
                 .collect()
         };
         let usage = wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING;
-        let texture = texture_2d_mips(device, name, w, h, deep_format(deep), usage, mips);
+        keys.push(tex(w, h, deep_format(deep), usage, mips));
+        keys
+    }
+
+    /// A slot on `textures`, made for [`InputSlot::pool_keys`] of the same arguments.
+    pub fn new(device: &wgpu::Device, conv: &Converter, key: InputKey, deep: bool, mut textures: Vec<wgpu::Texture>) -> Self {
+        if key.direct {
+            let tex = textures.pop().expect("one texture");
+            return InputSlot { key, planes: vec![tex.clone()], texture: tex, uniform: None, bind_group: None, deep };
+        }
+        let texture = textures.pop().expect("the converted frame");
+        let planes = textures;
         let mut slot =
             InputSlot { key, planes, texture, uniform: Some(uniform_buffer(device, "gpufx convert in")), bind_group: None, deep };
         if !key.gpu {
@@ -529,8 +543,9 @@ impl GpuOutputSlot {
 }
 
 struct OutPlane {
-    /// Packed words the pass writes.
-    words: wgpu::Buffer,
+    /// Packed words the pass writes: a pooled buffer of `size` bytes, set per frame.
+    words: Option<wgpu::Buffer>,
+    size: u64,
     uniform: wgpu::Buffer,
     row_words: u32,
     rows: u32,
@@ -565,16 +580,38 @@ impl OutputSlot {
                     format.name()
                 )));
             }
-            let words = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("gpufx output plane"),
+            planes.push(OutPlane {
+                words: None,
                 size,
-                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
+                uniform: uniform_buffer(device, "gpufx convert out"),
+                row_words,
+                rows,
+                row_bytes,
+                offset,
             });
-            planes.push(OutPlane { words, uniform: uniform_buffer(device, "gpufx convert out"), row_words, rows, row_bytes, offset });
             offset += size;
         }
         Ok(OutputSlot { key: (format, w, h), planes, end: offset, bind_groups: [None, None] })
+    }
+
+    /// The word buffers of the planes, borrowed from the context pool.
+    pub fn pool_keys(&self) -> Vec<PoolKey> {
+        let usage = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC;
+        self.planes.iter().map(|p| PoolKey::Buffer { size: p.size, usage }).collect()
+    }
+
+    /// Makes the passes write `words` (one per [`OutputSlot::pool_keys`]); they have to
+    /// be bound again.
+    pub fn set_words(&mut self, words: Vec<wgpu::Buffer>) {
+        for (p, b) in self.planes.iter_mut().zip(words) {
+            p.words = Some(b);
+        }
+        self.bind_groups = [None, None];
+    }
+
+    /// Drops the bind groups, for a new source texture.
+    pub fn unbind(&mut self) {
+        self.bind_groups = [None, None];
     }
 
     /// End of the planes in the readback buffer.
@@ -599,7 +636,10 @@ impl OutputSlot {
                         entries: &[
                             wgpu::BindGroupEntry { binding: 0, resource: p.uniform.as_entire_binding() },
                             wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&view) },
-                            wgpu::BindGroupEntry { binding: 2, resource: p.words.as_entire_binding() },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: p.words.as_ref().expect("words set before binding").as_entire_binding(),
+                            },
                         ],
                     })
                 })
@@ -621,7 +661,7 @@ impl OutputSlot {
     /// Copies the encoded planes into the shared readback buffer; after the compute pass.
     pub fn copy(&self, enc: &mut wgpu::CommandEncoder, readback: &wgpu::Buffer) {
         for p in &self.planes {
-            enc.copy_buffer_to_buffer(&p.words, 0, readback, p.offset, p.words.size());
+            enc.copy_buffer_to_buffer(p.words.as_ref().expect("words set before use"), 0, readback, p.offset, p.size);
         }
     }
 

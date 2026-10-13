@@ -75,6 +75,8 @@ pub struct GpuContext {
     info: wgpu::AdapterInfo,
     pub(crate) conv: Converter,
     pub(crate) mips: MipGen,
+    /// Per-frame textures and buffers shared by every graph on this device (see `pool.rs`).
+    pub(crate) pool: crate::pool::Pool,
     shader_cache: Option<ShaderCache>,
     /// Queue family of a shared Vulkan device (see `vulkan.rs`), `None` for devices
     /// gpufx made itself.
@@ -151,6 +153,7 @@ impl GpuContext {
             info,
             conv,
             mips: MipGen::default(),
+            pool: Default::default(),
             shader_cache,
             vulkan_queue_family: None,
             vulkan_submit: std::sync::Mutex::new(false),
@@ -172,6 +175,12 @@ impl GpuContext {
     /// Counters of the on-disk shader cache, `None` when it is off or the backend has none.
     pub fn shader_cache_stats(&self) -> Option<ShaderCacheStats> {
         self.shader_cache.as_ref().map(|c| c.stats())
+    }
+
+    /// What the frame resource pool shared by the graphs of this device holds, for tests
+    /// and diagnostics.
+    pub fn pool_stats(&self) -> crate::PoolStats {
+        self.pool.stats()
     }
 
     /// e.g. `"NVIDIA GeForce RTX 4070 (Vulkan)"`.

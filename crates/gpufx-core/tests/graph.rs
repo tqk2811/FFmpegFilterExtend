@@ -23,6 +23,14 @@ fn gpu() -> Option<Arc<GpuContext>> {
     .clone()
 }
 
+/// A device of its own, for tests counting allocations: graphs of other tests share the
+/// frame textures of the context pool, and one borrowing a texture right when a graph
+/// wants it back makes that graph rebind.
+fn own_gpu() -> Option<Arc<GpuContext>> {
+    gpu()?;
+    GpuContext::new(Backend::Auto).ok()
+}
+
 fn effect(ctx: &Arc<GpuContext>, name: &str) -> Effect {
     Effect::new(ctx.clone(), Package::open(examples().join(name)).unwrap()).unwrap()
 }
@@ -66,7 +74,7 @@ const DIAMOND: &str = "[0]split[a][b]; [a]gaussian-blur.zip[ba]; [b]grayscale.zi
 
 #[test]
 fn a_diamond_equals_its_effects_run_one_by_one() {
-    let Some(ctx) = gpu() else { return };
+    let Some(ctx) = own_gpu() else { return };
     let src = gradient(W, H);
     let info = FrameInfo::new(0.5, 3);
     let blurred = run(&mut effect(&ctx, "gaussian-blur"), &[&src], &info);
@@ -102,7 +110,8 @@ fn a_diamond_equals_its_effects_run_one_by_one() {
     assert_eq!(mem.readback_bytes, frame);
     // Deep frames double the bytes, not the count.
     assert_eq!(g.memory_plan(&[(W, H)], true).unwrap(), (3, 6 * frame));
-    // Slots and pool, then the output bind groups: never again per frame.
+    // Slots on the pooled textures, then the output bind groups: never again per frame,
+    // as the context pool hands the graph back the textures it had.
     assert_eq!(g.allocations(), 2);
     run_graph(&mut g, &[&src], &info);
     assert_eq!(g.allocations(), 2);

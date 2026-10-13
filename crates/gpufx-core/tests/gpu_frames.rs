@@ -21,6 +21,14 @@ fn gpu() -> Option<Arc<GpuContext>> {
     .clone()
 }
 
+/// A device of its own, for tests counting allocations: graphs of other tests share the
+/// frame textures of the context pool, and one borrowing a texture right when a graph
+/// wants it back makes that graph rebind.
+fn own_gpu() -> Option<Arc<GpuContext>> {
+    gpu()?;
+    GpuContext::new(Backend::Auto).ok()
+}
+
 fn examples() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects")
 }
@@ -214,6 +222,8 @@ fn gpu_run(ctx: &GpuContext, g: &mut EffectGraph, inputs: &[GpuFrame], outs: &[G
     let mut enc = ctx.device().create_command_encoder(&Default::default());
     g.encode_gpu(inputs, outs, info, &mut enc).unwrap();
     ctx.queue().submit([enc.finish()]);
+    // Other graphs on the device may use the pooled textures from now on.
+    g.release_frame();
     outs.iter().map(|o| download(ctx, o)).collect()
 }
 
@@ -254,7 +264,7 @@ fn gpu_frames_match_cpu_frames() {
 
 #[test]
 fn a_graph_runs_on_gpu_frames_with_pooled_textures() {
-    let Some(ctx) = gpu() else { return };
+    let Some(ctx) = own_gpu() else { return };
     if !supported(&ctx, PixelFormat::Nv12) {
         return;
     }
@@ -271,8 +281,10 @@ fn a_graph_runs_on_gpu_frames_with_pooled_textures() {
         let ins = [upload(&ctx, PixelFormat::Nv12, &a, w, h), upload(&ctx, PixelFormat::Rgba, &b, w, h)];
         let out = target(&ctx, PixelFormat::Nv12, w, h);
         assert_eq!(gpu_run(&ctx, &mut g, &ins, &[out], Some(&info)), want);
-        // New frame textures every call (a pool cycles), nothing new allocated after the first.
-        assert_eq!(*allocations.get_or_insert(g.allocations()), g.allocations());
+        // New frame textures every call (a pool cycles), nothing new allocated after the
+        // first: the context pool hands the graph the same textures back.
+        assert_eq!(*allocations.get_or_insert((g.allocations(), ctx.pool_stats().created)), (g.allocations(), ctx.pool_stats().created));
+        assert_eq!(ctx.pool_stats().borrowed, 0, "given back by release_frame");
     }
     // Same pooled pass textures as for CPU frames, and no upload planes.
     assert_eq!(g.memory().pass_textures, cpu_textures);
