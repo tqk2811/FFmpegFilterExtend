@@ -14,4 +14,3 @@ path = "src/main.rs"
 [dependencies]
 gpufx-core.workspace = true
 image = { version = "0.25", default-features = false, features = ["png"] }
-zip = { version = "9", default-features = false, features = ["deflate"] }

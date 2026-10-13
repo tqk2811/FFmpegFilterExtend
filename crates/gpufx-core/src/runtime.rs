@@ -55,6 +55,45 @@ pub(crate) const GPU_FEATURES: wgpu::Features = wgpu::Features::PIPELINE_CACHE
     .union(wgpu::Features::TEXTURE_FORMAT_16BIT_NORM)
     .union(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES);
 
+/// The high-performance adapter of `backend`, else its software fallback.
+fn request_adapter(backend: Backend) -> Result<wgpu::Adapter, Error> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: backend.wgpu(),
+        // Honours WGPU_DX12_COMPILER (fxc, dxc) and the other backend variables.
+        backend_options: wgpu::BackendOptions::from_env_or_default(),
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let request = |force_fallback_adapter| {
+        pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            force_fallback_adapter,
+            compatible_surface: None,
+            ..Default::default()
+        }))
+    };
+    // Machines without a GPU (CI runners, servers) may still have a software adapter
+    // such as WARP on Windows; try it before giving up.
+    request(false).or_else(|first| {
+        request(true)
+            .map_err(|fallback| Error::Gpu(format!("no GPU adapter for backend {backend:?}: {first}; software fallback: {fallback}")))
+    })
+}
+
+/// A device on `adapter` with the features and limits gpufx uses (see [`device_limits`])
+/// plus `extra` when the adapter has them.
+fn open_device(adapter: &wgpu::Adapter, label: &str, extra: wgpu::Features) -> Result<(wgpu::Device, wgpu::Queue), Error> {
+    pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        label: Some(label),
+        required_limits: device_limits(&adapter.limits()),
+        // PIPELINE_CACHE: only Vulkan has it in wgpu 30; it costs nothing until a cache
+        // is created. The format features let GPU frames have 16-bit and r8/rg8
+        // storage planes (see GpuFrame).
+        required_features: adapter.features() & (crate::profile::features() | extra),
+        ..Default::default()
+    }))
+    .map_err(|e| Error::Gpu(e.to_string()))
+}
+
 /// Limits a device asks for, from what the adapter supports. Output planes are encoded into
 /// storage buffers: allow what the adapter allows, an 8K RGBA64 frame is above the 128 MiB default.
 /// `max_buffer_size` stays within `u32::MAX`: wgpu-core asserts it when it creates a device, and a
@@ -100,27 +139,21 @@ impl GpuContext {
     /// [`GpuContext::new`] with the shader cache in `cache_dir` (falls back to
     /// `GPUFX_SHADER_CACHE` when `None`).
     pub fn with_shader_cache(backend: Backend, cache_dir: Option<&std::path::Path>) -> Result<Arc<Self>, Error> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: backend.wgpu(),
-            // Honours WGPU_DX12_COMPILER (fxc, dxc) and the other backend variables.
-            backend_options: wgpu::BackendOptions::from_env_or_default(),
-            ..wgpu::InstanceDescriptor::new_without_display_handle()
-        });
-        let request = |force_fallback_adapter| {
-            pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                force_fallback_adapter,
-                compatible_surface: None,
-                ..Default::default()
-            }))
-        };
-        // Machines without a GPU (CI runners, servers) may still have a software adapter
-        // such as WARP on Windows; try it before giving up.
-        let adapter = request(false).or_else(|first| {
-            request(true)
-                .map_err(|fallback| Error::Gpu(format!("no GPU adapter for backend {backend:?}: {first}; software fallback: {fallback}")))
-        })?;
-        Self::open_adapter(&adapter, "gpufx", cache_dir)
+        Self::open_adapter(&request_adapter(backend)?, "gpufx", cache_dir)
+    }
+
+    /// A D3D12 device whose shader cache records the DXIL of package pipelines (see
+    /// [`crate::precompile`]).
+    #[cfg(windows)]
+    pub(crate) fn for_precompile() -> Result<Arc<Self>, Error> {
+        let adapter = request_adapter(Backend::Dx12)?;
+        if !adapter.features().contains(wgpu::Features::PASSTHROUGH_SHADERS) {
+            return Err(Error::Gpu(format!("{} has no passthrough shaders", adapter.get_info().name)));
+        }
+        let (device, queue) = open_device(&adapter, "gpufx precompile", wgpu::Features::PASSTHROUGH_SHADERS)?;
+        let info = adapter.get_info();
+        let cache = ShaderCache::recorder(&device, &info)?;
+        Ok(Self::assemble(device, queue, info, Some(Arc::new(cache))))
     }
 
     /// A device that runs nothing (wgpu's noop backend), to open effects before the device
@@ -146,22 +179,12 @@ impl GpuContext {
 
     /// A device on `adapter` with the features and limits gpufx uses (see [`device_limits`]).
     pub(crate) fn open_adapter(adapter: &wgpu::Adapter, label: &str, cache_dir: Option<&std::path::Path>) -> Result<Arc<Self>, Error> {
-        let required_limits = device_limits(&adapter.limits());
-        let mut features = crate::profile::features();
+        let mut extra = wgpu::Features::empty();
         if adapter.get_info().backend == wgpu::Backend::Dx12 && crate::shader_cache::configured(cache_dir) {
             // The DXIL shader cache (dxil.rs) loads its shaders as passthrough shaders.
-            features |= wgpu::Features::PASSTHROUGH_SHADERS;
+            extra |= wgpu::Features::PASSTHROUGH_SHADERS;
         }
-        let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
-            label: Some(label),
-            required_limits,
-            // PIPELINE_CACHE: only Vulkan has it in wgpu 30; it costs nothing until a cache
-            // is created. The format features let GPU frames have 16-bit and r8/rg8
-            // storage planes (see GpuFrame).
-            required_features: adapter.features() & features,
-            ..Default::default()
-        }))
-        .map_err(|e| Error::Gpu(e.to_string()))?;
+        let (device, queue) = open_device(adapter, label, extra)?;
         Ok(Self::from_device(device, queue, adapter.get_info(), cache_dir))
     }
 
@@ -172,6 +195,10 @@ impl GpuContext {
         cache_dir: Option<&std::path::Path>,
     ) -> Arc<Self> {
         let shader_cache = ShaderCache::new(cache_dir.map(|d| d.to_path_buf()), &device, &info).map(Arc::new);
+        Self::assemble(device, queue, info, shader_cache)
+    }
+
+    fn assemble(device: wgpu::Device, queue: wgpu::Queue, info: wgpu::AdapterInfo, shader_cache: Option<Arc<ShaderCache>>) -> Arc<Self> {
         let conv = Converter::new(&device, shader_cache.clone());
         Arc::new(GpuContext {
             device,
@@ -186,6 +213,12 @@ impl GpuContext {
             #[cfg(windows)]
             d3d12: None,
         })
+    }
+
+    /// The shader cache, for [`crate::precompile`].
+    #[cfg(windows)]
+    pub(crate) fn shader_cache(&self) -> Option<&ShaderCache> {
+        self.shader_cache.as_deref()
     }
 
     /// The wgpu device, to make textures for [`crate::GpuFrame`]s and command encoders
@@ -819,6 +852,7 @@ fn compile_pass(ctx: &GpuContext, pkg: &Package, params: &ParamBlock, index: usi
         &PipelineDesc { label: &format!("gpufx pass {index} ({})", def.shader), layout: &pipeline_layout, entries: &entries, entry },
         module,
         &[language, entry, format, &source],
+        Some(pkg),
     );
     Ok(Pass { pipeline, layout, inputs, output: def.output.clone() })
 }

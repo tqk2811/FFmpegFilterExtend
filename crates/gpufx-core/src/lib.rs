@@ -29,7 +29,7 @@ pub use manifest::{Manifest, StreamInfo};
 pub use package::Package;
 pub use pool::PoolStats;
 pub use runtime::{Backend, Effect, FrameInfo, GpuContext, Image, ImageMut, Program};
-pub use shader_cache::ShaderCacheStats;
+pub use shader_cache::{precompile, ShaderCacheStats};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {

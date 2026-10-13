@@ -111,3 +111,45 @@ fn read_dir(root: &Path) -> Result<HashMap<String, Vec<u8>>, Error> {
     }
     Ok(files)
 }
+
+impl Package {
+    /// Zips the package directory `dir` into `out`, after checking it opens. With
+    /// `precompile`, the D3D12 shaders of its passes are added under `compiled/dx12/` (see
+    /// [`crate::precompile`]); a `compiled/` folder already in `dir` is never copied.
+    /// Returns the number of shaders added.
+    pub fn pack(dir: &Path, out: &Path, precompile: bool) -> Result<usize, Error> {
+        let pkg = Package::open(dir)?;
+        let compiled = if precompile { crate::precompile(&pkg)? } else { Vec::new() };
+        let mut files = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+        while let Some(d) = stack.pop() {
+            for entry in std::fs::read_dir(&d)? {
+                let path = entry?.path();
+                if path.is_dir() {
+                    // Stale blobs of another version must not ship.
+                    if path != dir.join("compiled") {
+                        stack.push(path);
+                    }
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        files.sort();
+        let zip_err = |e: zip::result::ZipError| Error::Package(e.to_string());
+        let mut zip = zip::ZipWriter::new(std::fs::File::create(out)?);
+        let opts = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        for path in files {
+            let rel = normalize(&path.strip_prefix(dir).expect("walked from dir").to_string_lossy());
+            zip.start_file(rel, opts).map_err(zip_err)?;
+            std::io::Write::write_all(&mut zip, &std::fs::read(&path)?)?;
+        }
+        for (name, data) in &compiled {
+            // DXIL is already compressed.
+            zip.start_file(name.as_str(), opts.compression_method(zip::CompressionMethod::Stored)).map_err(zip_err)?;
+            std::io::Write::write_all(&mut zip, data)?;
+        }
+        zip.finish().map_err(zip_err)?;
+        Ok(compiled.len())
+    }
+}

@@ -110,6 +110,7 @@ fn pipeline(
         &PipelineDesc { label, layout: &pipeline_layout, entries, entry: "main" },
         module,
         &["convert", "main", &source],
+        None,
     );
     (pipeline, layout)
 }
