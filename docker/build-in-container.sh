@@ -60,13 +60,26 @@ if [ ! -f "$VK_HDR/include/vulkan/vulkan.h" ]; then
     curl -sSfL "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/$VK_TAG.tar.gz" | tar -C "$WORK" -xzf -
 fi
 
+# FFmpeg's exr decoder/encoder need zlib; configure drops them silently without it, so
+# --enable-zlib below makes a missing zlib a hard error. linux64 links the image's
+# zlib1g-dev; win64 has no mingw zlib package, so build a static one into the prefix.
+if [ "$TARGET" = win64 ]; then
+    ZLIB_VER=${ZLIB_VERSION:-1.3.1}
+    echo "==> zlib $ZLIB_VER (static, mingw)"
+    rm -rf "$WORK/zlib-$ZLIB_VER"
+    curl -sSfL "https://github.com/madler/zlib/releases/download/v$ZLIB_VER/zlib-$ZLIB_VER.tar.gz" | tar -C "$WORK" -xzf -
+    (cd "$WORK/zlib-$ZLIB_VER" \
+        && CHOST=x86_64-w64-mingw32 ./configure --static --prefix="$PREFIX" \
+        && make -j"$(nproc)" && make install)
+fi
+
 echo "==> configure FFmpeg ($TARGET)"
 cd "$WORK/ffmpeg"
 PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig" ./configure \
     --prefix="$WORK/ffmpeg-install" \
     --extra-version=gpufx \
     --disable-doc --disable-debug --disable-ffplay \
-    --enable-libgpufx \
+    --enable-libgpufx --enable-zlib \
     --enable-vulkan --extra-cflags="-I$VK_HDR/include" \
     --disable-filters --enable-filter="$FILTERS" \
     ${CONFIGURE_TARGET[@]+"${CONFIGURE_TARGET[@]}"}
