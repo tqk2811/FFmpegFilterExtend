@@ -795,14 +795,14 @@ static int config_vulkan(AVFilterContext *ctx)
     }
     dev   = (AVHWDeviceContext *)fc0->device_ref->data;
     hwctx = dev->hwctx;
-    /* wgpu records render passes and graphics stages: a compute-only family (listed
-     * first by FFmpeg on NVIDIA) loses the device. */
+    /* wgpu records render passes and graphics stages, so take FFmpeg's graphics family:
+     * the compute one is compute-only on NVIDIA and loses the device. qf[].flags are the
+     * roles FFmpeg gave each family, not its capabilities (libgpufx checks those). */
     for (int q = 0; q < hwctx->nb_qf && family < 0; q++)
-        if ((hwctx->qf[q].flags & (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT)) ==
-            (VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT))
+        if (hwctx->qf[q].flags & VK_QUEUE_GRAPHICS_BIT)
             family = hwctx->qf[q].idx;
     if (family < 0) {
-        av_log(ctx, AV_LOG_ERROR, "The Vulkan device has no graphics and compute queue.\n");
+        av_log(ctx, AV_LOG_ERROR, "The Vulkan device has no graphics queue.\n");
         return AVERROR(ENOSYS);
     }
     d.get_instance_proc_addr = (void *)hwctx->get_proc_addr;
