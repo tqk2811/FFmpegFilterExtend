@@ -70,8 +70,8 @@ filters therefore uploads each frame once and reads it back once. Fastest first:
 2. separate filters between `gpufx_upload` and `gpufx_download`, `out_format=rgba` on all but the last;
 3. separate filters behind one upload (by the first `gpufx` or `hwupload`), then `hwdownload`.
 
-`backend=gl` is refused by the filter, and `backend=metal` too except on macOS (the library and the `gpufx` CLI
-still take them). On macOS the filter works on VideoToolbox frames (nv12, p010le) through Metal, e.g.
+The filter's `backend` option is for testing only (leave it at `auto`, which follows the frames); it refuses
+`backend=gl`, and `backend=metal` too except on macOS (the library and the `gpufx` CLI still take them). On macOS the filter works on VideoToolbox frames (nv12, p010le) through Metal, e.g.
 `-init_hw_device videotoolbox=vt -filter_hw_device vt -vf "gpufx=effect=vignette.zip,hwdownload,format=nv12"`;
 this path has not run on a Mac yet (see below).
 

@@ -161,7 +161,7 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   (`AVFILTER_FLAG_HWDEVICE`), loại device quyết định API; chỉ có input CPU mà không có device thì filter báo lỗi
   kèm các option cần thêm. `-filter_hw_device` khác API với input GPU thì bị từ chối (nó quyết
   định format output); cùng API nhưng khác device thì bị bỏ qua: device của input GPU được dùng, input CPU
-  được upload lên đó, kèm cảnh báo. `backend=gl` bị từ chối, `backend=metal` cũng vậy trừ trên macOS (thư viện và CLI vẫn giữ).
+  được upload lên đó, kèm cảnh báo. Option `backend` chỉ để thử nghiệm (`auto` tự theo frame); `backend=gl` bị từ chối, `backend=metal` cũng vậy trừ trên macOS (thư viện và CLI vẫn giữ).
   Thêm một API là thêm một dòng vào `hw_apis[]` và các nhánh trong các switch theo API của
   `vf_gpufx.c`.
 - **out_format**: ép pixel format của mọi output (với frame Vulkan/D3D: sw_format của frames context đầu
@@ -664,7 +664,8 @@ nguyên), chạy `integrate.sh`, rồi configure FFmpeg với:
   các format khác.
 - `libgpufx` được link động: Linux dùng `rpath=$ORIGIN` để tìm `libgpufx.so` cạnh `ffmpeg`,
   Windows đặt `gpufx.dll` cạnh `ffmpeg.exe`. DLL chỉ phụ thuộc DLL hệ thống
-  (đã kiểm tra bằng `objdump`).
+  (đã kiểm tra bằng `objdump`). Bản win64 còn có `dxcompiler.dll` và các file license của nó trong `bin/`
+  (`scripts/fetch-dxc.sh`, như luồng prebuilt).
 - win64 cross-compile bằng mingw-w64 như BtbN/FFmpeg-Builds. Chưa có bản build macOS; job CI `ffmpeg-macos` build FFmpeg từ
   mã nguồn trên runner macOS chỉ để kiểm đường VideoToolbox.
 

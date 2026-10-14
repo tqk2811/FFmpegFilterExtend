@@ -67,7 +67,8 @@ ra format đó). Vì vậy một chuỗi `gpufx` chỉ upload mỗi frame một 
 2. các filter riêng kẹp giữa `gpufx_upload` và `gpufx_download`, `out_format=rgba` trên mọi filter trừ cái cuối;
 3. các filter riêng sau một lần upload (do `gpufx` đầu tiên hoặc `hwupload`), rồi `hwdownload`.
 
-Filter từ chối `backend=gl`, và cả `backend=metal` trừ trên macOS (thư viện và CLI `gpufx` vẫn nhận). Trên macOS
+Option `backend` của filter chỉ để thử nghiệm (để mặc định `auto`, tự theo frame); filter từ chối `backend=gl`, và cả
+`backend=metal` trừ trên macOS (thư viện và CLI `gpufx` vẫn nhận). Trên macOS
 filter chạy trên frame VideoToolbox (nv12, p010le) qua Metal, ví dụ
 `-init_hw_device videotoolbox=vt -filter_hw_device vt -vf "gpufx=effect=vignette.zip,hwdownload,format=nv12"`;
 đường này chưa chạy trên máy Mac nào (xem bên dưới).

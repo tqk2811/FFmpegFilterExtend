@@ -8,14 +8,14 @@ Bản build `577bd42` (gói release win64), đo ngày 2026-10-14.
   8 GiB VRAM (driver 617.42), Windows 11 Pro. Desktop rảnh trong lúc đo (không có gì khác dùng GPU), nên các lần
   chạy lệch nhau ít.
 - **Input**: hai clip H.264, 1920×1080, 23.976 fps, mỗi clip 90 s (2158 frame), decode bằng CPU, ghi ra
-  `-f null`. Trên Windows gpufx mặc định chọn Vulkan (`backend=auto`).
+  `-f null`. gpufx tự chọn API theo frame input hoặc `-filter_hw_device`.
 - **Đường frame**: `gpufx` chỉ trả ra frame GPU và tự upload input CPU lên device chỉ định bởi
   `-filter_hw_device`. Vì vậy mọi lệnh gpufx ở đây đều có `-init_hw_device` / `-filter_hw_device` và kết thúc bằng
   `hwdownload` (hoặc `gpufx_download`) để bước sau nhận frame CPU; upload và readback nằm trong thời gian đo. Ví dụ:
   `-init_hw_device vulkan=vk -filter_hw_device vk -i a.mp4 -i b.mp4 -filter_complex "[0][1]gpufx=effect=crossfade.zip,hwdownload,format=yuv420p"`.
   Các dòng chuỗi và truyền frame tạo device Vulkan bằng `vulkan=vk:0,disable_multiplane=1`. Dòng D3D dùng frame
-  D3D11, loại frame D3D mà FFmpeg dùng khắp nơi (`-init_hw_device d3d11va=dx:0`), gpufx xử lý bằng backend DX12
-  (`backend=dx12`); `hwdownload` khi đó cần `format=nv12`. Filter không còn `backend=gl`.
+  D3D11, loại frame D3D mà FFmpeg dùng khắp nơi (`-init_hw_device d3d11va=dx:0`); gpufx chạy shader trên D3D12 của
+  cùng adapter (wgpu không có backend D3D11) và tự chọn API; `hwdownload` khi đó cần `format=nv12`.
 - **So với**: FFmpeg 8.0.1 (bản gpl-shared) với filter CPU có sẵn. Chuyển cảnh chạy trong 60 s đầu (`xfade` không
   nhận `duration` quá 60 s); gpufx dùng `progress=clip(t/60,0,1)`.
 - Thời gian lấy lần nhanh nhất trong 3 lần. RAM là working set đỉnh, VRAM là đỉnh của counter Windows
@@ -31,7 +31,7 @@ Bản build `577bd42` (gói release win64), đo ngày 2026-10-14.
 | `xfade` circleopen (CPU) | 6.72 s | 540 MB | 0 |
 | `xfade_vulkan` fade (hwupload/hwdownload) | 5.04 s | 527 MB | 399 / 80 MB |
 | gpufx `crossfade.zip`, Vulkan | 5.10 s | 467 MB | 253 / 89 MB |
-| gpufx `crossfade.zip`, frame D3D11 (backend DX12) | 7.93 s | 497 MB | 192 / 105 MB |
+| gpufx `crossfade.zip`, frame D3D11 (shader chạy trên D3D12) | 7.93 s | 497 MB | 192 / 105 MB |
 | gpufx `wipe-transition.zip`, Vulkan | 5.07 s | 468 MB | 253 / 89 MB |
 | gpufx `circle-reveal.zip`, Vulkan | 5.08 s | 468 MB | 253 / 89 MB |
 

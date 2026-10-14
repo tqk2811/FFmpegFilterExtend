@@ -162,7 +162,7 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   `-filter_hw_device` (`AVFILTER_FLAG_HWDEVICE`), and its type picks the API; with software inputs only and
   no device the filter fails and names the options to add. A `-filter_hw_device` of another API than the
   GPU inputs is refused (it sets the output format); one of the same API but another device is ignored
-  (their device wins, software inputs are uploaded there, with a warning). `backend=gl` is refused, `backend=metal` too except on macOS (the library and the
+  (their device wins, software inputs are uploaded there, with a warning). The `backend` option is for testing only (`auto` follows the frames); `backend=gl` is refused, `backend=metal` too except on macOS (the library and the
   CLI keep them). Adding an API is one entry in `hw_apis[]` plus
   its cases in the per-API switches of `vf_gpufx.c`.
 - **out_format**: forces the pixel format of every output (on Vulkan/D3D frames: the sw_format of the
@@ -680,7 +680,8 @@ untouched), runs `integrate.sh`, then configures FFmpeg with:
   other formats.
 - `libgpufx` is linked dynamically: on Linux `rpath=$ORIGIN` finds `libgpufx.so` next to `ffmpeg`,
   and on Windows `gpufx.dll` sits next to `ffmpeg.exe`. The DLL depends only on system DLLs
-  (checked with `objdump`).
+  (checked with `objdump`). The win64 bundle also gets `dxcompiler.dll` and its license texts in `bin/`
+  (`scripts/fetch-dxc.sh`, as in the prebuilt flow).
 - win64 is cross-compiled with mingw-w64 like BtbN/FFmpeg-Builds. There is no macOS bundle; the CI job `ffmpeg-macos` builds FFmpeg from source on
   a macOS runner only to test the VideoToolbox path.
 

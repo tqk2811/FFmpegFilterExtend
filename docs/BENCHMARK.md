@@ -8,16 +8,16 @@ Build `577bd42` (win64 release package), measured on 2026-10-14.
   8 GiB VRAM (driver 617.42), Windows 11 Pro. The desktop was idle during the runs (nothing else using the GPU),
   so the spread between runs is narrow.
 - **Input**: two H.264 clips, 1920×1080, 23.976 fps, 90 s each (2158 frames), software decode, output to
-  `-f null`. gpufx picks Vulkan by default on Windows (`backend=auto`).
+  `-f null`. gpufx picks the API from the input frames or `-filter_hw_device`.
 - **Frame path**: `gpufx` outputs GPU frames only and uploads software input itself on the device given by
   `-filter_hw_device`. Every gpufx command here therefore has `-init_hw_device` / `-filter_hw_device` and ends with
   `hwdownload` (or `gpufx_download`) so the next step gets CPU frames; the upload and the readback are part of
   the times. Example:
   `-init_hw_device vulkan=vk -filter_hw_device vk -i a.mp4 -i b.mp4 -filter_complex "[0][1]gpufx=effect=crossfade.zip,hwdownload,format=yuv420p"`.
   The chain and transfer rows create the Vulkan device with `vulkan=vk:0,disable_multiplane=1`. The D3D row uses
-  D3D11 frames, the D3D frame type FFmpeg uses throughout (`-init_hw_device d3d11va=dx:0`), which gpufx
-  processes with its DX12 backend (`backend=dx12`); `hwdownload` then needs `format=nv12`. `backend=gl` no longer
-  exists in the filter.
+  D3D11 frames, the D3D frame type FFmpeg uses throughout (`-init_hw_device d3d11va=dx:0`); gpufx runs its
+  shaders on D3D12 of the same adapter (wgpu has no D3D11 backend) and chooses the API itself; `hwdownload` then
+  needs `format=nv12`.
 - **Comparison**: FFmpeg 8.0.1 (gpl-shared build) with its own CPU filters. The transition runs over
   the first 60 s (`xfade` refuses `duration` above 60 s); gpufx uses `progress=clip(t/60,0,1)`.
 - Time is the best of 3 runs. RAM is the peak working set and VRAM the peak of the Windows
@@ -33,7 +33,7 @@ Build `577bd42` (win64 release package), measured on 2026-10-14.
 | `xfade` circleopen (CPU) | 6.72 s | 540 MB | 0 |
 | `xfade_vulkan` fade (hwupload/hwdownload) | 5.04 s | 527 MB | 399 / 80 MB |
 | gpufx `crossfade.zip`, Vulkan | 5.10 s | 467 MB | 253 / 89 MB |
-| gpufx `crossfade.zip`, D3D11 frames (DX12 backend) | 7.93 s | 497 MB | 192 / 105 MB |
+| gpufx `crossfade.zip`, D3D11 frames (shaders on D3D12) | 7.93 s | 497 MB | 192 / 105 MB |
 | gpufx `wipe-transition.zip`, Vulkan | 5.07 s | 468 MB | 253 / 89 MB |
 | gpufx `circle-reveal.zip`, Vulkan | 5.08 s | 468 MB | 253 / 89 MB |
 
