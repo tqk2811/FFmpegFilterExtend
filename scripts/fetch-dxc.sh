@@ -7,14 +7,14 @@
 #   scripts/fetch-dxc.sh DIR
 #
 # Needs curl, sha256sum and unzip (or Python, as on the Windows runners). The package
-# is cached in build/downloads.
+# is cached in build/downloads (or $DXC_DOWNLOAD_DIR, for a read-only checkout).
 set -euo pipefail
 
 DIR=${1:?usage: fetch-dxc.sh DIR}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 VERSION=1.9.2609.5
 SHA256=73cfa082245918c2cc1ec6740250eb7377e83a757b3b3a3e16e0d71535bfbfc3
-PKG=$ROOT/build/downloads/microsoft.direct3d.dxc.$VERSION.nupkg
+PKG=${DXC_DOWNLOAD_DIR:-$ROOT/build/downloads}/microsoft.direct3d.dxc.$VERSION.nupkg
 
 if ! echo "$SHA256  $PKG" | sha256sum -c --status 2> /dev/null; then
     mkdir -p "$(dirname "$PKG")"

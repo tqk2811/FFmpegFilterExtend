@@ -95,6 +95,8 @@ cp "$WORK/ffmpeg-install/bin/ffmpeg$EXE" "$WORK/ffmpeg-install/bin/ffprobe$EXE" 
 cp "$CARGO_TARGET_DIR/$RUST_TARGET/release/gpufx$EXE" "$OUT/bin/gpufx-cli$EXE"
 if [ "$TARGET" = win64 ]; then
     cp "$PREFIX/bin/gpufx.dll" "$OUT/bin/"
+    # DXC next to ffmpeg.exe (plus its license texts): wgpu would fall back to the slow FXC without it.
+    DXC_DOWNLOAD_DIR="$WORK/downloads" "$SRC/scripts/fetch-dxc.sh" "$OUT/bin"
 else
     cp "$PREFIX/lib/libgpufx.so" "$OUT/bin/"
     # Find libgpufx.so next to the executables wherever the bundle is unpacked.
