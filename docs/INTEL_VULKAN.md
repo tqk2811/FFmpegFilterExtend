@@ -94,7 +94,7 @@ also reads and writes.
 ## Status upstream
 
 FFmpeg: reported as [FFmpeg issue #25063](https://code.ffmpeg.org/FFmpeg/FFmpeg/issues/25063) (host image copy enabled on a driver that gets
-it wrong). Intel (bugs A and B): report drafted with a reproducer, not yet filed. When a fixed driver or FFmpeg is out, the refusal in `gpufx` and the
+it wrong). Intel (bugs A and B): reported as [IGCIT issue #1587](https://github.com/IGCIT/Intel-GPU-Community-Issue-Tracker-IGCIT/issues/1587). When a fixed driver or FFmpeg is out, the refusal in `gpufx` and the
 test workaround can go (backlog item, in Vietnamese: [Backlog-vi.md](Backlog-vi.md)).
 
 ## How to re-check

@@ -91,7 +91,7 @@ và ghi được.
 ## Tình trạng phía upstream
 
 FFmpeg: đã báo ở [FFmpeg issue #25063](https://code.ffmpeg.org/FFmpeg/FFmpeg/issues/25063) (bật host image copy trên driver làm sai). Intel (lỗi A
-và B): bản báo lỗi đã soạn kèm cách tái hiện, chưa gửi. Khi driver hoặc FFmpeg đã sửa thì có thể bỏ lệnh từ chối trong `gpufx` và phần né trong test
+và B): đã báo ở [IGCIT issue #1587](https://github.com/IGCIT/Intel-GPU-Community-Issue-Tracker-IGCIT/issues/1587). Khi driver hoặc FFmpeg đã sửa thì có thể bỏ lệnh từ chối trong `gpufx` và phần né trong test
 (mục backlog trong [Backlog-vi.md](Backlog-vi.md)).
 
 ## Cách kiểm lại
