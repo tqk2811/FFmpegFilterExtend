@@ -67,6 +67,10 @@ ra format đó). Vì vậy một chuỗi `gpufx` chỉ upload mỗi frame một 
 2. các filter riêng kẹp giữa `gpufx_upload` và `gpufx_download`, `out_format=rgba` trên mọi filter trừ cái cuối;
 3. các filter riêng sau một lần upload (do `gpufx` đầu tiên hoặc `hwupload`), rồi `hwdownload`.
 
+GPU Intel trên Windows với FFmpeg 9: `hwupload` (và `hwdownload` frame của `hwupload`) báo lỗi cấp phát hoặc
+làm hỏng ảnh do host image copy của driver; dùng `gpufx_upload` / `gpufx_download`, hoặc mở device với
+`disable_multiplane=1,linear_images=1`. `gpufx` từ chối các frame đó. Xem [docs/INTEL_VULKAN-vi.md](docs/INTEL_VULKAN-vi.md).
+
 Option `backend` của filter chỉ để thử nghiệm (để mặc định `auto`, tự theo frame); filter từ chối `backend=gl`, và cả
 `backend=metal` trừ trên macOS (thư viện và CLI `gpufx` vẫn nhận). Trên macOS
 filter chạy trên frame VideoToolbox (nv12, p010le) qua Metal, ví dụ

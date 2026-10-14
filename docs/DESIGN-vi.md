@@ -406,7 +406,9 @@ ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i 
 Thay thẳng cho `hwupload` / `hwdownload` trên device Vulkan (`ffmpeg/vf_gpufx_transfer.c`, C thuần dùng
 helper Vulkan nội bộ của FFmpeg `libavutil/vulkan.h`, không cần libgpufx). Lý do: trên NVIDIA, FFmpeg 9.0
 copy qua staging buffer (tắt host image copy và import bộ nhớ host), và `hwdownload` chờ trên CPU từng lần
-copy (`ff_vk_exec_wait`), nên CPU và GPU chạy lần lượt.
+copy (`ff_vk_exec_wait`), nên CPU và GPU chạy lần lượt. Trên driver Intel Windows, host image copy của
+FFmpeg 9 bị lỗi; các frames context do gpufx tạo bỏ cờ usage host-transfer, và `gpufx` từ chối frame của
+`hwupload` trên driver đó ([INTEL_VULKAN-vi.md](INTEL_VULKAN-vi.md)).
 
 - **gpufx_upload** (`depth`, mặc định 3): frames context tạo trên `-filter_hw_device` như `hwupload` (format
   vào: sw format của device mà plane khớp 1:1 với plane Vulkan). Vòng `depth` staging buffer map sẵn,

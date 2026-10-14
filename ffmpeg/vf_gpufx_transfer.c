@@ -42,6 +42,7 @@
 #include "filters.h"
 #include "formats.h"
 #include "video.h"
+#include "vf_gpufx_vk.h"
 
 typedef struct TransferContext {
     const AVClass *class;
@@ -322,7 +323,7 @@ static int upload_config_output(AVFilterLink *outlink)
      * flight, plus whatever downstream keeps. */
     if (ctx->extra_hw_frames >= 0)
         fc->initial_pool_size = s->depth + 2 + ctx->extra_hw_frames;
-    if ((ret = av_hwframe_ctx_init(s->frames_ref)) < 0)
+    if ((ret = gpufx_hwframe_ctx_init(s->frames_ref)) < 0)
         return ret;
     if ((ret = transfer_setup(ctx, s->frames_ref, inlink->w, inlink->h, s->depth, 1)) < 0)
         return ret;

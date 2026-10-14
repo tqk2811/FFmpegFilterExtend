@@ -15,6 +15,7 @@ cd "$SRC"
 
 cp "$HERE/vf_gpufx.c" libavfilter/vf_gpufx.c
 cp "$HERE/vf_gpufx_transfer.c" libavfilter/vf_gpufx_transfer.c
+cp "$HERE/vf_gpufx_vk.h" libavfilter/vf_gpufx_vk.h
 
 # Anchor every edit on the matching libplacebo line, which exists in all recent FFmpeg.
 if ! grep -q libgpufx configure; then

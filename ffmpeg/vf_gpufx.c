@@ -72,6 +72,7 @@
 #include "formats.h"
 #include "framesync.h"
 #include "video.h"
+#include "vf_gpufx_vk.h"
 
 static const char *const var_names[] = { "t", "n", "w", "h", "a", "sar", "dar", NULL };
 enum { VAR_T, VAR_N, VAR_W, VAR_H, VAR_A, VAR_SAR, VAR_DAR, VAR_NB };
@@ -652,7 +653,7 @@ static AVBufferRef *blank_frames_ctx(AVBufferRef *frames)
         b->MiscFlags = a->MiscFlags;
     }
 #endif
-    if (av_hwframe_ctx_init(ref) < 0)
+    if (gpufx_hwframe_ctx_init(ref) < 0)
         av_buffer_unref(&ref);
     return ref;
 }
@@ -753,6 +754,13 @@ static int config_vulkan(AVFilterContext *ctx)
         }
         fc0 = fc0 ? fc0 : fc;
         s->hw_in_fmt[i] = fc->sw_format;
+        /* Before the checks below: their hints (disable_multiplane=1) do not help here. */
+        if (gpufx_vk_host_copy_broken(fc)) {
+            av_log(ctx, AV_LOG_ERROR, "Input '%s' has Vulkan frames of %s that FFmpeg fills with "
+                   "host image copies (hwupload?). " GPUFX_VK_HOST_COPY_HINT "\n",
+                   ctx->input_pads[i].name, av_get_pix_fmt_name(fc->sw_format));
+            return AVERROR(ENOSYS);
+        }
         /* One image per plane: a multiplane image (Vulkan decoders) is not read. */
         if (av_pix_fmt_count_planes(fc->sw_format) > 1 &&
             ((AVVulkanFramesContext *)fc->hwctx)->format[1] == VK_FORMAT_UNDEFINED) {
@@ -848,7 +856,7 @@ static int config_vulkan_output(AVFilterLink *outlink, unsigned k)
         vk            = fc->hwctx;
         vk->flags     = AV_VK_FRAME_FLAG_DISABLE_MULTIPLANE;
         /* Storage usage (libgpufx writes the planes) comes by default where the format has it. */
-        if (av_hwframe_ctx_init(ref) < 0 || !(vk->usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
+        if (gpufx_hwframe_ctx_init(ref) < 0 || !(vk->usage & VK_IMAGE_USAGE_STORAGE_BIT)) {
             av_log(ctx, AV_LOG_VERBOSE, "No storage Vulkan frames of %s for output '%s'.\n",
                    name, ctx->output_pads[k].name);
             av_buffer_unref(&ref);
@@ -1173,7 +1181,7 @@ static int config_d3d_output(AVFilterLink *outlink, unsigned k)
             }
 #endif
             /* Some devices accept the context but fail to create its textures: try one. */
-            if (av_hwframe_ctx_init(ref) >= 0) {
+            if (gpufx_hwframe_ctx_init(ref) >= 0) {
                 AVFrame *probe = av_frame_alloc();
                 int got;
 
@@ -1459,7 +1467,7 @@ static AVBufferRef *upload_frames_ctx(AVFilterContext *ctx, AVBufferRef *device,
         h->MiscFlags = D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_NTHANDLE;
     }
 #endif
-    if (av_hwframe_ctx_init(ref) < 0) {
+    if (gpufx_hwframe_ctx_init(ref) < 0) {
         av_buffer_unref(&ref);
         return NULL;
     }

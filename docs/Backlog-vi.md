@@ -1,5 +1,11 @@
 # Việc còn treo
 
+### [Thấp] Báo lỗi host_image_copy cho FFmpeg/Intel; gỡ phần né khi đã sửa
+- **Vấn đề**: FFmpeg 9 bật `VK_EXT_host_image_copy`; driver Intel Windows (101.7082) cấp phát hỏng ảnh optimal một plane (`VK_ERROR_OUT_OF_HOST_MEMORY`) và copy sai chroma của ảnh multi-planar. Bản báo lỗi cho FFmpeg và Intel đã soạn kèm cách tái hiện nhưng chưa gửi. gpufx đang né: bỏ cờ `VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT` khỏi frames context của mình (dựa vào cách `hwcontext_vulkan.c` của FFmpeg 9.0 đọc `usage`: kiểm lại mỗi khi nâng FFmpeg; frame của filter Vulkan khác như `scale_vulkan` cũng bị từ chối dù có thể đúng) và từ chối frame `hwupload` trên driver đó; `test-bundle.sh` đổi sang `gpufx_upload` khi gặp driver này.
+- **Vị trí**: [ffmpeg/vf_gpufx_vk.h](../ffmpeg/vf_gpufx_vk.h) (`gpufx_hwframe_ctx_init`, `gpufx_vk_host_copy_broken`), [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (kiểm input Vulkan trong `config_vulkan`), [scripts/test-bundle.sh](../scripts/test-bundle.sh) (`INTEL_HIC`), [docs/INTEL_VULKAN-vi.md](INTEL_VULKAN-vi.md).
+- **Vì sao**: gửi báo lỗi để FFmpeg/Intel sửa; khi driver hoặc FFmpeg đã sửa thì bỏ lệnh từ chối (đang chặn cả người dùng driver mới) và nhánh `INTEL_HIC` trong test.
+- **Ngày ghi**: 2026-10-14
+
 ### Build Docker đầy đủ chưa chạy lại trên FFmpeg 9.0
 - **Vấn đề**: submodule `external/FFmpeg` đã chuyển từ master (9.1-dev) về `n9.0-2-g03d9533176`. `build.sh` và job CI `ffmpeg-docker` (chỉ chạy khi bấm tay `workflow_dispatch`) chưa được chạy lại trên commit này.
 - **Vị trí**: [build.sh](../build.sh), [docker/build-in-container.sh](../docker/build-in-container.sh), [.github/workflows/ci.yml](../.github/workflows/ci.yml).
