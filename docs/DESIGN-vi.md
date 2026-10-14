@@ -157,9 +157,11 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   GPU của API đó hoặc frame CPU; frame CPU được filter tự upload (`av_hwframe_transfer_data` vào frames context
   riêng của từng input): giữ nguyên format khi device nhận format đó, không thì thành nv12/p010le (YUV 4:2:0)
   hoặc RGBA do swscale chuyển; frame có ma trận màu mà GPU không chuyển được thì lên dạng RGBA. Device là device
-  của các input GPU (kiểm khớp với `-filter_hw_device` khi có cả hai), không thì là `-filter_hw_device`
+  của các input GPU, không thì là `-filter_hw_device`
   (`AVFILTER_FLAG_HWDEVICE`), loại device quyết định API; chỉ có input CPU mà không có device thì filter báo lỗi
-  kèm các option cần thêm. `backend=gl` bị từ chối, `backend=metal` cũng vậy trừ trên macOS (thư viện và CLI vẫn giữ).
+  kèm các option cần thêm. `-filter_hw_device` khác API với input GPU thì bị từ chối (nó quyết
+  định format output); cùng API nhưng khác device thì bị bỏ qua: device của input GPU được dùng, input CPU
+  được upload lên đó, kèm cảnh báo. `backend=gl` bị từ chối, `backend=metal` cũng vậy trừ trên macOS (thư viện và CLI vẫn giữ).
   Thêm một API là thêm một dòng vào `hw_apis[]` và các nhánh trong các switch theo API của
   `vf_gpufx.c`.
 - **out_format**: ép pixel format của mọi output (với frame Vulkan/D3D: sw_format của frames context đầu
@@ -496,7 +498,7 @@ ffmpeg -init_hw_device d3d11va=dx -filter_hw_device dx -i a.mp4 \
 - Test: `test-bundle.sh` chạy vignette nv12/p010le, hai filter liên tiếp, đồ thị có hai input là cùng một
   frame split, timeline, input thứ hai đến muộn và từ chối input trộn, cho cả hai API, thử adapter 0-3, bỏ qua
   khi không có device hoặc wgpu không share được. Job CI `ffmpeg-windows` chạy chúng trên WARP; chưa chạy trên
-  phần cứng thật. Với `REQUIRE_D3D=1` (đặt ở cả hai job CI win64), skip làm test hỏng, và build không có frame
+  phần cứng thật. Với `REQUIRE_D3D=1` (đặt ở cả hai job CI win64), skip làm test hỏng (D3D12 được miễn khi FFmpeg không có hwdevice d3d12va, vì frame D3D của FFmpeg là D3D11), và build không có frame
   D3D12/D3D11 (thiếu d3d12va/d3d11va, tải header lỗi hoặc sai sha256) làm build hỏng; test in một dòng các API đã
   chạy và đã bỏ qua.
 - Frame đen của input chưa bắt đầu (mọi API GPU, kể cả Vulkan) lấy từ một frames context nhỏ riêng của filter,

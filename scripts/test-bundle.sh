@@ -6,7 +6,8 @@
 # since the bundle has no video source filters; pass clips-dir to reuse existing ones.
 # Clips and logs default to build/test-<bundle name>, outside the bundle.
 # TEST_CLIPS_ONLY=1 only writes the clips (for a runner that has no reference ffmpeg).
-# REQUIRE_D3D=1 fails when the D3D12 or D3D11 frame tests are skipped.
+# REQUIRE_D3D=1 fails when the D3D11 frame tests are skipped, or the D3D12 ones are skipped
+# although the FFmpeg has a d3d12va hwdevice (FFmpeg's D3D frames are D3D11).
 # REQUIRE_VT=1 fails when the VideoToolbox frame tests (macOS) are skipped, unless FFmpeg
 # cannot create a videotoolbox device or there is no Metal adapter.
 set -eu
@@ -515,11 +516,14 @@ dx_md5() {
 }
 # REQUIRE_D3D=1 (the Windows CI job): a skipped API is a failure, unless FFmpeg itself
 # cannot create the device on any adapter (hosted runners: WARP only, d3d12va -22,
-# d3d11va DXGI_ERROR_UNSUPPORTED), since gpufx is never reached then.
+# d3d11va DXGI_ERROR_UNSUPPORTED), since gpufx is never reached then. FFmpeg's D3D frames
+# are D3D11, so D3D11 must always be tested; D3D12 only when the FFmpeg has a d3d12va hwdevice.
 dx_ran= dx_skipped=
 dx_skip() {
     echo "  skip  $1"
-    if [ "${2:-}" = nodevice ]; then
+    if [ "${2:-}" = nohwdevice ]; then
+        dx_skipped="$dx_skipped $API(no hwdevice)"
+    elif [ "${2:-}" = nodevice ]; then
         dx_skipped="$dx_skipped $API(no device)"
         if [ -n "${GITHUB_ACTIONS:-}" ]; then echo "::warning::D3D12/D3D11 frames not tested: $1"; fi
     else
@@ -531,7 +535,10 @@ dx_hwdevs=$("$FF" -hide_banner -init_hw_device list 2>&1)
 for api in d3d12va d3d11va; do
     API=$(echo "$api" | sed 's/va$//' | tr a-z A-Z)
     if ! grep -qw hwupload "$CLIPS/filters.txt"; then dx_skip "$API: this bundle has no hwupload"; continue; fi
-    if ! echo "$dx_hwdevs" | grep -qx "$api"; then dx_skip "$API: this ffmpeg has no $api hwdevice"; continue; fi
+    if ! echo "$dx_hwdevs" | grep -qx "$api"; then
+        if [ "$api" = d3d12va ]; then dx_skip "$API: this ffmpeg has no $api hwdevice" nohwdevice; else dx_skip "$API: this ffmpeg has no $api hwdevice"; fi
+        continue
+    fi
     DXDEV= why= dx_dev=
     for n in 0 1 2 3; do
         if ! "$FF" -hide_banner -nostdin -v error -init_hw_device "$api=dx:$n" -filter_hw_device dx -i "$A" -frames:v 1 -an \
@@ -626,6 +633,35 @@ for api in d3d12va d3d11va; do
             -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | awk -F, '{print $NF}')" \
         "$(gpu_ff -i "$A" -i "$B" -frames:v 3 -an -filter_complex "[0]format=nv12,hwupload[a];[1]format=nv12,hwupload[b];[a][b]gpufx=effect=$FX/crossfade.zip:params='progress=0.4',hwdownload,format=nv12" \
             -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | awk -F, '{print $NF}')"
+    # -filter_hw_device against the device of decoded D3D11 frames (MPEG-2 clip made by
+    # this ffmpeg, decoded with -hwaccel d3d11va on a second device instance).
+    if [ "$API" = D3D11 ]; then
+        DEC="-init_hw_device ${DXDEV%%=*}=dd:${DXDEV##*:} -hwaccel d3d11va -hwaccel_device dd -hwaccel_output_format d3d11"
+        # shellcheck disable=SC2086
+        if ! "$FF" -v error -y -i "$A" -an -frames:v 5 -c:v mpeg2video "$CLIPS/m2.mpg" > "$CLIPS/last.log" 2>&1 ||
+           ! "$FF" -hide_banner -nostdin -v error $DEC -i "$CLIPS/m2.mpg" -frames:v 1 -vf hwdownload,format=nv12 \
+               -f null - > "$CLIPS/last.log" 2>&1; then
+            echo "  skip  D3D11: device mismatch tests (no mpeg2video d3d11va decoding: $(head -n1 "$CLIPS/last.log"))"
+        else
+            M2=$CLIPS/m2.mpg
+            if command -v cygpath >/dev/null; then M2=$(cygpath -m "$M2"); fi
+            # shellcheck disable=SC2086
+            ok "$API: GPU input of another device than -filter_hw_device (no upload: its device wins)" \
+                $DEC -i "$M2" -frames:v 3 -vf "gpufx=effect=$FX/invert.zip" $NULL
+            # shellcheck disable=SC2086
+            ok "$API: GPU and software inputs, GPU input of another device (its device wins)" \
+                $DEC -i "$M2" -i "$B" -frames:v 3 -filter_complex "[0][1]gpufx=effect=$FX/crossfade.zip" $NULL
+            if [ -n "$VK" ]; then
+                DEV=$GPU
+                # shellcheck disable=SC2086
+                rejects "$API: GPU input with a Vulkan -filter_hw_device" \
+                    "has D3D11 frames but -filter_hw_device is a vulkan device" \
+                    $DEC -i "$M2" -frames:v 3 -vf "gpufx=effect=$FX/invert.zip" $NULL
+            else
+                echo "  skip  $API: GPU input with a Vulkan -filter_hw_device (no Vulkan device)"
+            fi
+        fi
+    fi
     DEV=$GPU
 done
 echo "  D3D frames tested:${dx_ran:- none}; skipped:${dx_skipped:- none}"

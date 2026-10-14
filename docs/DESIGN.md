@@ -158,9 +158,11 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   may be GPU frames of that API or software frames, which the filter uploads itself (`av_hwframe_transfer_data`
   into its own frames context per input): as they are when the device takes the format, else as nv12/p010le
   (4:2:0 YUV) or RGBA converted by swscale; frames whose matrix the GPU does not convert go up as RGBA. The
-  device is the one of the GPU inputs (checked against `-filter_hw_device` when both are set), else
+  device is the one of the GPU inputs, else
   `-filter_hw_device` (`AVFILTER_FLAG_HWDEVICE`), and its type picks the API; with software inputs only and
-  no device the filter fails and names the options to add. `backend=gl` is refused, `backend=metal` too except on macOS (the library and the
+  no device the filter fails and names the options to add. A `-filter_hw_device` of another API than the
+  GPU inputs is refused (it sets the output format); one of the same API but another device is ignored
+  (their device wins, software inputs are uploaded there, with a warning). `backend=gl` is refused, `backend=metal` too except on macOS (the library and the
   CLI keep them). Adding an API is one entry in `hw_apis[]` plus
   its cases in the per-API switches of `vf_gpufx.c`.
 - **out_format**: forces the pixel format of every output (on Vulkan/D3D frames: the sw_format of the
@@ -510,7 +512,7 @@ ffmpeg -init_hw_device d3d11va=dx -filter_hw_device dx -i a.mp4 \
 - Tests: `test-bundle.sh` runs nv12/p010le vignette, two filters in a row, a graph whose two inputs are one
   split frame, the timeline, a late second input and a mixed-input rejection for both APIs, on adapters 0-3,
   and skips when there is no device or wgpu cannot share it. The CI job `ffmpeg-windows` runs them on WARP;
-  they have not been run on hardware. With `REQUIRE_D3D=1` (set in both win64 CI jobs) a skip fails the test
+  they have not been run on hardware. With `REQUIRE_D3D=1` (set in both win64 CI jobs) a skip fails the test (D3D12 is exempt when the FFmpeg has no d3d12va hwdevice, since FFmpeg's D3D frames are D3D11)
   and a build without D3D12/D3D11 frames (no d3d12va/d3d11va, header fetch or sha256 failure) fails the build;
   the test prints a line of the APIs tested and skipped.
 - The blank frame of an input that has not started (all GPU APIs, Vulkan included) comes from a small frames

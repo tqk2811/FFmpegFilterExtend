@@ -136,12 +136,6 @@
 - **Vì sao**: cần chạy thử trên GPU AMD/Intel và với decoder D3D.
 - **Ngày ghi**: 2026-10-12
 
-### Test "yuva420p in, rgba Vulkan frames out" lỗi chập chờn trên CI linux64
-- **Vấn đề**: test này trong `scripts/test-bundle.sh` lỗi trên job CI linux64 hai lần (run 38324146152, cả hai lần chạy, không có log lỗi), rồi qua ở lần chạy kế tiếp (a4296b2). Không tái hiện được trên máy local (80/80 lần qua). Log Vulkan theo từng test giờ in ra nguyên nhân nếu lỗi lặp lại.
-- **Vị trí**: [scripts/test-bundle.sh](../scripts/test-bundle.sh), job linux64 trong [.github/workflows/ci.yml](../.github/workflows/ci.yml).
-- **Vì sao**: nghi do lavapipe hành xử khác tuỳ máy chủ (host) của runner; cần đọc log Vulkan khi lỗi lặp lại.
-- **Ngày ghi**: 2026-10-13
-
 ### Frame Vulkan: `vk_store` đặt access SHADER_READ|WRITE gây cảnh báo validation
 - **Vấn đề**: sau gpufx, `hwdownload` dùng `vkf->access` làm srcAccess trên queue transfer, validation báo `VUID-VkImageMemoryBarrier2-srcAccessMask-03909/07454`. Không gây mất device; việc đồng bộ đã đi qua timeline semaphore nên có thể đặt `VK_ACCESS_2_NONE`.
 - **Vị trí**: [ffmpeg/vf_gpufx.c:916](../ffmpeg/vf_gpufx.c#L916).
@@ -222,11 +216,4 @@
 - Vấn đề: input là frame CPU bị chuyển đổi rồi upload lại ở mỗi event của framesync, kể cả khi input phụ chậm hơn chỉ lặp lại đúng frame cũ (vd ảnh tĩnh). Upload chạy đồng bộ, nên mỗi event tốn một lần chép cho mỗi input.
 - Vị trí: `ffmpeg/vf_gpufx.c`, `upload_input` (~1436) và lời gọi trong vòng event (~1618).
 - Vì sao nên làm: cache theo danh tính frame (buffer + pts) sẽ bỏ được các lần chép thừa.
-- Ngày ghi: 2026-10-14 (review đợt chỉ xuất frame GPU).
-
-### [Thấp] Filter `gpufx`: input GPU khác API với `-filter_hw_device` báo lỗi khó hiểu
-
-- Vấn đề: `query_formats` chọn output theo `-filter_hw_device`, còn `config_inputs` chọn API theo input. Khi device là Vulkan mà input là D3D11, lỗi hiện ra là "Output ... has vulkan frames but gpufx runs on d3d11", thay vì nói thẳng là device và input lệch API. Hai nơi cùng tự quyết API.
-- Vị trí: `ffmpeg/vf_gpufx.c`, `query_formats` (~1741-1750) và `config_inputs` (~1796-1830).
-- Vì sao nên làm: quyết API ở một chỗ thì lỗi sẽ rõ ràng hơn.
 - Ngày ghi: 2026-10-14 (review đợt chỉ xuất frame GPU).

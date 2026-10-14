@@ -1885,11 +1885,29 @@ static int config_inputs(AVFilterContext *ctx)
         if (!device && l->hw_frames_ctx)
             device = ((AVHWFramesContext *)l->hw_frames_ctx->data)->device_ref;
     }
-    if (device && ctx->hw_device_ctx && device_hw_format(((AVHWDeviceContext *)ctx->hw_device_ctx->data)->type) == s->hw_fmt &&
-        ctx->hw_device_ctx->data != device->data) {
-        av_log(ctx, AV_LOG_ERROR, "The %s frames of the inputs come from another device than "
-               "-filter_hw_device; gpufx runs on one device.\n", api_name(s->hw_fmt));
-        return AVERROR(EINVAL);
+    /*
+     * -filter_hw_device must agree with the GPU inputs: its API sets the output format (see
+     * query_formats()), so another API cannot run. Another device of the same API is ignored:
+     * gpufx runs on the device of the GPU inputs and uploads the software inputs there.
+     */
+    if (device && ctx->hw_device_ctx) {
+        AVHWDeviceContext *fd = (AVHWDeviceContext *)ctx->hw_device_ctx->data;
+        enum AVPixelFormat ff = device_hw_format(fd->type);
+        unsigned g = 0;
+
+        while (!(av_pix_fmt_desc_get(ctx->inputs[g]->format)->flags & AV_PIX_FMT_FLAG_HWACCEL))
+            g++;
+        if (ff != AV_PIX_FMT_NONE && hw_ok(ff) && ff != s->hw_fmt) {
+            av_log(ctx, AV_LOG_ERROR, "Input '%s' has %s frames but -filter_hw_device is a %s device; "
+                   "gpufx runs on one device. Set -filter_hw_device to the device the input is decoded "
+                   "on (its -hwaccel_device / -init_hw_device), or hwdownload the input.\n",
+                   ctx->input_pads[g].name, api_name(s->hw_fmt), av_hwdevice_get_type_name(fd->type));
+            return AVERROR(EINVAL);
+        }
+        if (ff == s->hw_fmt && fd != (AVHWDeviceContext *)device->data && nb_hw < s->nb_inputs)
+            av_log(ctx, AV_LOG_WARNING, "Input '%s' has %s frames of another device than "
+                   "-filter_hw_device; gpufx runs on the device of the input and uploads the software "
+                   "inputs there.\n", ctx->input_pads[g].name, api_name(s->hw_fmt));
     }
     if (nb_hw < s->nb_inputs && !device) {
         enum AVPixelFormat f = ctx->hw_device_ctx ?
