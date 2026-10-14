@@ -90,8 +90,8 @@ và ghi được.
 
 ## Tình trạng phía upstream
 
-Bản báo lỗi cho FFmpeg (bật host image copy trên driver làm sai) và cho Intel (lỗi A và B) đã soạn kèm cách tái
-hiện, chưa gửi. Khi driver hoặc FFmpeg đã sửa thì có thể bỏ lệnh từ chối trong `gpufx` và phần né trong test
+FFmpeg: đã báo ở [FFmpeg issue #25063](https://code.ffmpeg.org/FFmpeg/FFmpeg/issues/25063) (bật host image copy trên driver làm sai). Intel (lỗi A
+và B): bản báo lỗi đã soạn kèm cách tái hiện, chưa gửi. Khi driver hoặc FFmpeg đã sửa thì có thể bỏ lệnh từ chối trong `gpufx` và phần né trong test
 (mục backlog trong [Backlog-vi.md](Backlog-vi.md)).
 
 ## Cách kiểm lại
