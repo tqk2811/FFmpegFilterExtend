@@ -429,9 +429,17 @@ YUVA_VK=$(vk_ff -i "$A" -frames:v 3 -an -vf "format=yuva420p,hwupload,gpufx=effe
 if [ -z "$YUVA_VK" ] && grep -q "yuva420p that cannot be sampled" "$(vk_log)"; then
     echo "  skip  yuva420p in, rgba Vulkan frames out (FFmpeg made yuva420p frames without sampled usage)"
 else
-    # Software yuva420p frames go up as they are (or as rgba); both sides force rgba output.
-    same "yuva420p in, rgba Vulkan frames out" "$YUVA_VK" "$(gpu_ff -i "$A" -frames:v 3 -an -vf "format=yuva420p,gpufx=effect=$FX/invert.zip:out_format=rgba,hwdownload,format=rgba" \
-            -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | awk -F, '{print $NF}')"
+    # Software yuva420p frames go up as they are, or as rgba converted by swscale when the
+    # device's yuva420p frames lack sampled usage (same lavapipe flakiness): swscale rounds
+    # YUV to RGB unlike the GPU, so then only the Vulkan side is checked.
+    YUVA_SW=$(gpu_ff -v verbose -i "$A" -frames:v 3 -an -vf "format=yuva420p,gpufx=effect=$FX/invert.zip:out_format=rgba,hwdownload,format=rgba" \
+            -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | awk -F, '{print $NF}')
+    if grep -q "yuva420p uploaded as .* rgba frames" "$CLIPS/last.log"; then
+        if [ -n "$YUVA_VK" ]; then pass "yuva420p in, rgba Vulkan frames out (software side went up as rgba, not compared)"
+        else fail "yuva420p in, rgba Vulkan frames out (no output)"; show_vk_log; fi
+    else
+        same "yuva420p in, rgba Vulkan frames out" "$YUVA_VK" "$YUVA_SW"
+    fi
 fi
 # Vulkan and software inputs together: gpufx uploads the software one on the same device.
 VKN=mixed
