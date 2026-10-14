@@ -8,9 +8,12 @@
 # TEST_CLIPS_ONLY=1 only writes the clips (for a runner that has no reference ffmpeg).
 # REQUIRE_D3D=1 fails when the D3D11 frame tests are skipped, or the D3D12 ones are skipped
 # although the FFmpeg has a d3d12va hwdevice (FFmpeg's D3D frames are D3D11).
+# VK_ADAPTER=N picks the Vulkan device index (default 0); DX_ADAPTER=N tries only that D3D
+# adapter index (default: adapters 0-3, first that works).
 # REQUIRE_VT=1 fails when the VideoToolbox frame tests (macOS) are skipped, unless FFmpeg
 # cannot create a videotoolbox device or there is no Metal adapter.
 set -eu
+VK_ADAPTER=${VK_ADAPTER:-0}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 DIST=$(cd "${1:?usage: test-bundle.sh <bundle dir> [clips dir]}" && pwd)
 CLIPS=${2:-$ROOT/build/test-$(basename "$DIST")}
@@ -61,7 +64,7 @@ fail() { printf '  FAIL  %s\n' "$1"; fails=$((fails + 1)); }
 # gpufx outputs GPU frames only: the tests run on FFmpeg's Vulkan device ($GPU), gpufx
 # uploads software inputs itself, and hwdownload brings results back for the encoders.
 # One image per plane (disable_multiplane=1) is what gpufx reads from hwupload.
-VKDEV="vulkan=vk:0,disable_multiplane=1"
+VKDEV="vulkan=vk:$VK_ADAPTER,disable_multiplane=1"
 GPU="-init_hw_device $VKDEV -filter_hw_device vk"
 DEV=$GPU  # the device of the helpers below; the D3D tests set their own
 # ok NAME ARGS...: must succeed
@@ -448,7 +451,7 @@ same "out_format=rgba chain on software frames equals one chained gpufx" \
 # gpufx_upload / gpufx_download: pipelined hwupload / hwdownload, bit-exact both ways,
 # on multiplane and one-image-per-plane frames, and mixed with hwupload / hwdownload.
 if grep -qw gpufx_upload "$CLIPS/filters.txt"; then
-    for dev in "$VKDEV" vulkan=vk:0; do
+    for dev in "$VKDEV" vulkan=vk:$VK_ADAPTER; do
         for f in nv12 yuv420p rgba; do
             for c in "gpufx_upload,gpufx_download" "hwupload,gpufx_download=latency=0" "gpufx_upload=depth=1,hwdownload"; do
                 VKN=transfer-$f
@@ -484,7 +487,7 @@ else
 fi
 # Without disable_multiplane an nv12 frame may be one multiplane image: refused clearly
 # (or, where the driver has no multiplane nv12, processed).
-if "$FF" -hide_banner -nostdin -v error -init_hw_device vulkan=vk:0 -filter_hw_device vk -i "$A" -frames:v 2 -an \
+if "$FF" -hide_banner -nostdin -v error -init_hw_device vulkan=vk:$VK_ADAPTER -filter_hw_device vk -i "$A" -frames:v 2 -an \
     -vf "format=nv12,hwupload,gpufx=effect=$FX/invert.zip,hwdownload,format=nv12" -f null - > "$CLIPS/last.log" 2>&1 ||
     grep -q "multiplane images are not supported" "$CLIPS/last.log"; then
     pass "multiplane nv12 is processed or refused clearly"
@@ -493,7 +496,7 @@ else
 fi
 # gpufx uploads software frames as one image per plane whatever the device was opened with.
 VKN=own-upload
-if "$FF" -hide_banner -nostdin -v error -init_hw_device vulkan=vk:0 -filter_hw_device vk -i "$A" -frames:v 2 -an \
+if "$FF" -hide_banner -nostdin -v error -init_hw_device vulkan=vk:$VK_ADAPTER -filter_hw_device vk -i "$A" -frames:v 2 -an \
     -vf "format=nv12,gpufx=effect=$FX/invert.zip,hwdownload,format=nv12" -f null - > "$(vk_log)" 2>&1; then
     pass "software nv12 on a multiplane device"
 else
@@ -540,7 +543,7 @@ for api in d3d12va d3d11va; do
         continue
     fi
     DXDEV= why= dx_dev=
-    for n in 0 1 2 3; do
+    for n in ${DX_ADAPTER:-0 1 2 3}; do
         if ! "$FF" -hide_banner -nostdin -v error -init_hw_device "$api=dx:$n" -filter_hw_device dx -i "$A" -frames:v 1 -an \
             -vf "format=nv12,hwupload,hwdownload,format=nv12" -f null - > "$CLIPS/last.log" 2>&1; then
             # Only a failed device creation means "no device here"; anything else is a bug.
