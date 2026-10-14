@@ -26,7 +26,7 @@ Video effects powered by **GPU shaders** for FFmpeg, loaded from external **`.zi
 - **D3D12 and D3D11 frames** (Windows): `AV_PIX_FMT_D3D12` frames (`-init_hw_device d3d12va`) are processed in
   place on FFmpeg's own `ID3D12Device`, synchronised with their fences; `AV_PIX_FMT_D3D11` frames run on the D3D12
   device of the same adapter through shared NT handles (outputs without a copy, other inputs with one GPU copy).
-  nv12 and p010le. Not yet run on GPU hardware (CI runs them on WARP).
+  nv12 and p010le. Tested on NVIDIA RTX 4060 Laptop and Intel UHD Graphics (Windows 11); CI only builds them.
 - Optional on-disk shader cache: `GPUFX_SHADER_CACHE=<dir>` (Vulkan pipeline cache; D3D12 DXIL when
   `dxcompiler.dll` is on the DLL search path). `gpufx pack --precompile` puts D3D12 shaders in a package, used only
   with `GPUFX_TRUST_PRECOMPILED=1` (see [design](docs/DESIGN.md)).
@@ -81,6 +81,17 @@ this path has not run on a Mac yet (see below).
 
 Docs: [design](docs/DESIGN.md) · [package format and how to write shaders](docs/EFFECT_FORMAT.md) · [benchmark](docs/BENCHMARK.md)
 
+## Hardware and OS requirements
+
+- **Windows**: Windows 10 64-bit or later. D3D12: feature level 11_0, resource binding tier 2 (NVIDIA Kepler+,
+  AMD GCN+, Intel Skylake+). D3D11 frames: Windows 10 1703+ (D3D11.4 shared fences).
+- **Linux**: Vulkan 1.1+ with a graphics + compute queue and timeline semaphores (FFmpeg 9 asks for 1.3);
+  NVIDIA proprietary, Mesa RADV/ANV, lavapipe (CPU). The linux64 bundle needs glibc 2.35+ (Ubuntu 22.04).
+- **macOS**: Metal; VideoToolbox frames need Apple silicon (nv12/p010le). Untested on a Mac.
+- Intel GPU on Windows with FFmpeg 9 Vulkan frames: see [Intel Vulkan](docs/INTEL_VULKAN.md).
+
+Details, sources and known issues: [docs/REQUIREMENTS.md](docs/REQUIREMENTS.md).
+
 ## Build
 
 You need Rust (stable) and a GPU driver (on Linux without a GPU you can use `mesa-vulkan-drivers`/lavapipe).
@@ -117,7 +128,6 @@ skipped checks: add `-- --nocapture` to see them.
   tests are skipped with a warning). There is no macOS bundle to download.
 - **Linux on a real GPU**: Linux only runs on lavapipe (software Vulkan), in CI and in a VM. Vulkan frames
   shared with FFmpeg have been run on real GPUs only on Windows.
-- **D3D12/D3D11 frames in FFmpeg**: only on WARP (CI); not yet on GPU hardware.
 - **OpenGL**: wgpu supports it, but no test or CI job runs on it.
 
 ### Fast build on a prebuilt FFmpeg (recommended)

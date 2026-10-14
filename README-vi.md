@@ -23,7 +23,7 @@ Hiệu ứng video chạy bằng **shader trên GPU** cho FFmpeg, nạp từ **g
 - **Frame D3D12 và D3D11** (Windows): frame `AV_PIX_FMT_D3D12` (`-init_hw_device d3d12va`) được xử lý tại chỗ trên
   chính `ID3D12Device` của FFmpeg, đồng bộ bằng fence của frame; frame `AV_PIX_FMT_D3D11` chạy trên device D3D12 cùng
   adapter qua shared NT handle (output không copy, input khác tốn một lần copy GPU). nv12 và p010le.
-  Chưa chạy trên GPU thật (CI chạy trên WARP).
+  Đã chạy trên NVIDIA RTX 4060 Laptop và Intel UHD Graphics (Windows 11); CI chỉ build.
 - Cache shader trên đĩa (tuỳ chọn): `GPUFX_SHADER_CACHE=<thư mục>` (pipeline cache của Vulkan; DXIL của D3D12 khi
   tìm thấy `dxcompiler.dll` trên đường tìm DLL). `gpufx pack --precompile` gói sẵn shader D3D12 vào gói, chỉ dùng khi
   `GPUFX_TRUST_PRECOMPILED=1` (xem [thiết kế](docs/DESIGN-vi.md)).
@@ -79,6 +79,17 @@ filter chạy trên frame VideoToolbox (nv12, p010le) qua Metal, ví dụ
 
 Tài liệu: [thiết kế](docs/DESIGN-vi.md) · [định dạng gói và cách viết shader](docs/EFFECT_FORMAT-vi.md) · [đo tốc độ](docs/BENCHMARK-vi.md) · [English](README.md)
 
+## Yêu cầu phần cứng và hệ điều hành
+
+- **Windows**: Windows 10 64-bit trở lên. D3D12: feature level 11_0, resource binding tier 2 (NVIDIA Kepler+,
+  AMD GCN+, Intel Skylake+). Frame D3D11: Windows 10 1703+ (shared fence D3D11.4).
+- **Linux**: Vulkan 1.1+ có queue graphics + compute và timeline semaphore (FFmpeg 9 xin 1.3);
+  NVIDIA proprietary, Mesa RADV/ANV, lavapipe (CPU). Bundle linux64 cần glibc 2.35+ (Ubuntu 22.04).
+- **macOS**: Metal; frame VideoToolbox cần Apple silicon (nv12/p010le). Chưa chạy trên Mac.
+- GPU Intel trên Windows với frame Vulkan của FFmpeg 9: xem [Intel Vulkan](docs/INTEL_VULKAN-vi.md).
+
+Chi tiết, nguồn và lỗi đã biết: [docs/REQUIREMENTS-vi.md](docs/REQUIREMENTS-vi.md).
+
 ## Build
 
 Cần Rust (stable) và một driver GPU (Linux không có GPU có thể dùng `mesa-vulkan-drivers`/lavapipe).
@@ -115,7 +126,6 @@ phần chưa kiểm: thêm `-- --nocapture` để thấy các dòng đó.
   test bị bỏ qua kèm cảnh báo). Chưa có bản build macOS để tải.
 - **Linux trên GPU thật**: Linux mới chạy trên lavapipe (Vulkan phần mềm), trong CI và máy ảo. Frame Vulkan
   dùng chung với FFmpeg mới chạy trên GPU thật ở Windows.
-- **Frame D3D12/D3D11 trong FFmpeg**: mới chạy trên WARP (CI), chưa chạy trên GPU thật.
 - **OpenGL**: wgpu có hỗ trợ nhưng chưa có test hay job CI nào chạy trên nó.
 
 ### Build nhanh trên bản FFmpeg build sẵn (khuyên dùng)
