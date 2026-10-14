@@ -13,8 +13,8 @@ Bản build `577bd42` (gói release win64), đo ngày 2026-10-14.
   `-filter_hw_device`. Vì vậy mọi lệnh gpufx ở đây đều có `-init_hw_device` / `-filter_hw_device` và kết thúc bằng
   `hwdownload` (hoặc `gpufx_download`) để bước sau nhận frame CPU; upload và readback nằm trong thời gian đo. Ví dụ:
   `-init_hw_device vulkan=vk -filter_hw_device vk -i a.mp4 -i b.mp4 -filter_complex "[0][1]gpufx=effect=crossfade.zip,hwdownload,format=yuv420p"`.
-  Các dòng chuỗi và truyền frame tạo device Vulkan bằng `vulkan=vk:0,disable_multiplane=1`. FFmpeg trong gói không
-  có `d3d12va`, nên dòng D3D dùng frame D3D11 (`-init_hw_device d3d11va=dx:0`), gpufx xử lý bằng backend DX12
+  Các dòng chuỗi và truyền frame tạo device Vulkan bằng `vulkan=vk:0,disable_multiplane=1`. Dòng D3D dùng frame
+  D3D11, loại frame D3D mà FFmpeg dùng khắp nơi (`-init_hw_device d3d11va=dx:0`), gpufx xử lý bằng backend DX12
   (`backend=dx12`); `hwdownload` khi đó cần `format=nv12`. Filter không còn `backend=gl`.
 - **So với**: FFmpeg 8.0.1 (bản gpl-shared) với filter CPU có sẵn. Chuyển cảnh chạy trong 60 s đầu (`xfade` không
   nhận `duration` quá 60 s); gpufx dùng `progress=clip(t/60,0,1)`.

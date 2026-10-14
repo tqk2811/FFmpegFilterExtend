@@ -14,8 +14,8 @@ Build `577bd42` (win64 release package), measured on 2026-10-14.
   `hwdownload` (or `gpufx_download`) so the next step gets CPU frames; the upload and the readback are part of
   the times. Example:
   `-init_hw_device vulkan=vk -filter_hw_device vk -i a.mp4 -i b.mp4 -filter_complex "[0][1]gpufx=effect=crossfade.zip,hwdownload,format=yuv420p"`.
-  The chain and transfer rows create the Vulkan device with `vulkan=vk:0,disable_multiplane=1`. The FFmpeg of the
-  bundle has no `d3d12va`, so the D3D row uses D3D11 frames (`-init_hw_device d3d11va=dx:0`), which gpufx
+  The chain and transfer rows create the Vulkan device with `vulkan=vk:0,disable_multiplane=1`. The D3D row uses
+  D3D11 frames, the D3D frame type FFmpeg uses throughout (`-init_hw_device d3d11va=dx:0`), which gpufx
   processes with its DX12 backend (`backend=dx12`); `hwdownload` then needs `format=nv12`. `backend=gl` no longer
   exists in the filter.
 - **Comparison**: FFmpeg 8.0.1 (gpl-shared build) with its own CPU filters. The transition runs over
