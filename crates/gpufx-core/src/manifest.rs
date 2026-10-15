@@ -416,7 +416,10 @@ impl Manifest {
             declare(&p.name, "param", &mut param_names)?;
             if p.name == "enable" || p.name == "bypass" {
                 // `<node>.enable` and `<node>.bypass` switch an effect of a chain or graph (the filter's `params`).
-                return bad(format!("param name `{}` is reserved: `<effect>.enable` and `<effect>.bypass` switch an effect of a chain or graph", p.name));
+                return bad(format!(
+                    "param name `{}` is reserved: `<effect>.enable` and `<effect>.bypass` switch an effect of a chain or graph",
+                    p.name
+                ));
             }
             param_names.push(&p.name);
             if p.kind == ParamType::Expr {

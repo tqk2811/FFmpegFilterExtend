@@ -16,8 +16,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use gpufx_core::{
-    Backend, BypassPad, ChromaLocation, ColorInfo, Effect, EffectChain, EffectGraph, Frame, FrameInfo, FrameMut, GpuContext, Image, ImageMut, Matrix,
-    Package, PixelFormat, Program, Range, StreamInfo,
+    Backend, BypassPad, ChromaLocation, ColorInfo, Effect, EffectChain, EffectGraph, Frame, FrameInfo, FrameMut, GpuContext, Image,
+    ImageMut, Matrix, Package, PixelFormat, Program, Range, StreamInfo,
 };
 
 /// Bumped when the C ABI changes incompatibly. Must match `GPUFX_API_VERSION` in gpufx.h.
