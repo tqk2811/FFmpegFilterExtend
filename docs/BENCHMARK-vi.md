@@ -140,3 +140,86 @@ Nhận xét:
   YUV → RGBA → YUV của mỗi lần copy làm giảm chroma (PSNR 37 dB so với output đổi nhãn).
 - Bỏ `gpufx_download` không nhanh hơn: các lần copy của nó vốn đã chạy chồng lên phần còn lại.
 - Frame D3D11 chậm hơn Vulkan khoảng 2 lần ở đây (`hwupload`/`hwdownload` chờ từng lần copy, xem ở trên).
+
+## Filter nặng hơn: effect đơn, chuyển cảnh và chuỗi xếp chồng
+
+Build `de39c81` (bundle win64), đo ngày 2026-10-15, cùng máy như trên (Intel Core i9-14900HX, 24 core /
+32 thread, RTX 4060 Laptop). Các dòng CPU chạy FFmpeg 8.0.1 tham chiếu (bundle FFmpeg 9.0 không có `xfade`,
+`gblur`, `unsharp`, `eq`, `bilateral`...), `-threads` mặc định. Các dòng GPU: bundle, device Vulkan
+`vulkan=vk:0,disable_multiplane=1`, `gpufx_upload` → `gpufx` → `gpufx_download,format=yuv420p`. `-f null`, trung vị
+của 3 lần chạy, wall time đo quanh tiến trình; fps = số frame / wall time.
+
+- **Input**: clip A và B của mục trên (1920×1080, 30 fps, 300 frame), mỗi clip đọc 3 lần bằng `-stream_loop 2`
+  (900 frame, 30 s). Hai nguồn: file yuv420p thô đã decode sẵn (`-f rawvideo`, không tốn decode) và clip H.264
+  (decode bằng phần mềm).
+- **Các cặp** (cùng tham số ở hai phía khi filter có tham số đó; phép tính không giống hệt):
+
+| Ca | CPU (FFmpeg 8.0.1) | gpufx |
+|---|---|---|
+| Gaussian blur, lớn | `gblur=sigma=24` | `gaussian-blur` `radius=48` (σ = 24, 97 tap mỗi pass) |
+| Gaussian blur, nhỏ | `gblur=sigma=3` | `gaussian-blur` `radius=6` |
+| Sharpen | `unsharp=3:3:0.8:3:3:0.8` | `sharpen` `amount=0.8` |
+| Màu | `eq=contrast=1.2:saturation=1.3:gamma=1.1,hue=h=20` | `color-adjust` cùng giá trị |
+| Vignette | `vignette` | `vignette` `strength=0.6` |
+| Bilateral | `bilateral=sigmaS=4:sigmaR=0.1` | bilateral 17×17 vét cạn viết riêng cho bài đo (không phát hành) |
+| Chuyển cảnh suốt 30 s | `xfade=transition=dissolve\|pixelize\|circleopen\|zoomin:duration=30:offset=0` | `dissolve`, `pixelize-transition`, `circle-reveal`, `zoom-transition`, `progress=t/30` |
+
+| Ca | CPU thô | gpufx thô | ×, thô | CPU H.264 | gpufx H.264 | ×, H.264 | CPU utime (thô) |
+|---|---|---|---|---|---|---|---|
+| Không filter: chỉ đọc / `gpufx_upload,gpufx_download` | 0.89 s | 1.42 s | – | 0.92 s | 1.45 s | – | 0.0 s |
+| `gblur` σ 24 / `gaussian-blur` 48 | 2.00 s | 2.73 s | 0.73 | 2.42 s | 2.79 s | 0.87 | 4.6 s |
+| `gblur` σ 3 / `gaussian-blur` 6 | 2.94 s | 1.58 s | 1.86 | 3.10 s | 1.68 s | 1.85 | 11.5 s |
+| `unsharp` / `sharpen` | 1.36 s | 1.46 s | 0.93 | 1.59 s | 1.57 s | 1.01 | 9.4 s |
+| `eq,hue` / `color-adjust` | 0.92 s | 1.46 s | 0.63 | 1.21 s | 1.54 s | 0.79 | 0.7 s |
+| `vignette` / `vignette` | 3.49 s | 1.51 s | 2.31 | 3.59 s | 1.59 s | 2.26 | 3.1 s |
+| `bilateral` / bilateral 17×17 | 2.74 s | 4.04 s | 0.68 | 2.85 s | 4.08 s | 0.70 | 22.5 s |
+| `xfade` dissolve / `dissolve` | 5.88 s | 1.83 s | **3.21** | 6.24 s | 2.39 s | 2.61 | 54.2 s |
+| `xfade` pixelize / `pixelize-transition` | 4.15 s | 1.78 s | 2.33 | 4.67 s | 2.28 s | 2.05 | 30.8 s |
+| `xfade` circleopen / `circle-reveal` | 5.19 s | 1.78 s | 2.92 | 5.37 s | 2.22 s | 2.42 | 51.3 s |
+| `xfade` zoomin / `zoom-transition` | 3.71 s | 1.81 s | 2.05 | 3.96 s | 2.26 s | 1.75 | 21.4 s |
+
+× = wall CPU / wall gpufx. Tiến trình gpufx dùng dưới 1 s CPU time với input thô (khoảng 7 s với H.264, phần đó là
+decoder); RAM khoảng 0.42 GB với gpufx so với 0.1–0.37 GB ở CPU.
+
+**Nối sáu clip với năm chuyển cảnh** (cùng thiết lập như mục trên, chỉ đổi chuyển cảnh; chain = 5 `gpufx` với
+`enable`/`bypass=auto`, graph = một `gpufx` với `<node>.enable`/`.bypass`):
+
+| Chuyển cảnh | CPU `xfade` | gpufx chain | gpufx graph | CPU utime / gpufx utime | maxrss CPU / gpufx |
+|---|---|---|---|---|---|
+| dissolve | 3.82 s (432 fps) | 3.32 s (497 fps) | **2.72 s** (607 fps) | 37.1 s / 14.9 s | 1578 / 825 MB |
+| pixelize | 3.42 s (482 fps) | **2.56 s** (645 fps) | 2.58 s (640 fps) | 33.1 s / 13.1 s | 1595 / 824 MB |
+
+**Chuỗi xếp chồng**: trên mỗi input Gaussian blur (σ 3) + sharpen + màu, rồi chuyển cảnh hình tròn suốt 30 s,
+rồi vignette. CPU: `[0]gblur=sigma=3,unsharp=3:3:0.8:3:3:0.8,eq=...,hue=h=20[a]; [1]...[b];
+[a][b]xfade=transition=circleopen:duration=30:offset=0,vignette`. gpufx: một `gpufx` với graph 8 node
+`[0]gaussian-blur[a0]; [a0]sharpen[a1]; [a1]color-adjust[a2]; [1]...[b2]; [a2][b2]circle-reveal[t]; [t]vignette[out]`.
+4K: hai clip scale lên 3840×2160 rồi encode lại H.264 (CRF 14), mỗi clip 900 frame.
+
+| Nguồn | CPU | gpufx graph | × | CPU utime / gpufx utime | maxrss CPU / gpufx |
+|---|---|---|---|---|---|
+| 1080p thô | 22.90 s (39 fps) | 2.48 s (362 fps) | **9.2** | 93.4 s / 0.8 s | 527 / 471 MB |
+| 1080p H.264 | 23.27 s (39 fps) | 2.63 s (342 fps) | 8.8 | 102.5 s / 12.7 s | 829 / 673 MB |
+| 4K H.264 (chỉ decode: 2.64 s) | 87.16 s (10 fps) | 8.85 s (102 fps) | **9.8** | 395.5 s / 41.9 s | 3044 / 1761 MB |
+
+**Độ đúng** (frame 150, CPU so với gpufx; chuyển cảnh dùng `duration=10` nên progress 0.5): các effect không
+tính cùng một phép, nên đây chỉ là kiểm thô kèm xem hai frame cạnh nhau. PSNR: bilateral 41.3 dB, blur nhỏ
+39.6 dB, sharpen 36.0 dB, blur lớn 34.1 dB, vignette 30.5 dB (đường giảm sáng khác), màu 20.3 dB (mô hình hue
+khác); các chuyển cảnh khác nhau theo thiết kế (`xfade` circleopen là dải chuyển mềm rộng, `circle-reveal` là
+vòng tròn sắc nét; `xfade` zoomin ở thời điểm khác) và các chuyển cảnh ngẫu nhiên dùng mẫu khác. File yuv thô
+không có tag màu: khi đó `gpufx` đọc chúng với matrix/range khác (vòng upload/download chỉ còn 25 dB), nên lúc
+kiểm đã gắn tag bằng `setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709` (vòng
+upload/download 41.9 dB, bằng clip H.264). Các lần đo thời gian dùng file chưa gắn tag; khối lượng việc mỗi
+frame là như nhau.
+
+Các con số cho thấy:
+
+- Một filter rẻ không bù được chi phí đưa frame lên GPU: riêng upload + download đã mất 1.42 s cho 900 frame
+  (635 fps), lâu hơn `eq,hue`, `unsharp` hay `gblur` σ 24 trên 32 thread. `gblur` là filter IIR, chi phí không tăng
+  theo σ, còn `gaussian-blur` 48 chạy 97 tap mỗi pass; bilateral 17×17 (289 tap) chậm hơn `bilateral` O(1) của
+  FFmpeg cũng vì vậy. GPU thắng khi filter CPU chậm trên từng pixel: `vignette` 2.3 lần, `gblur` σ 3 1.9 lần.
+- Chuyển cảnh chạy suốt clip nhanh hơn 2–3.2 lần với gpufx và gần như không tốn CPU (`xfade` tốn 21–54 s CPU time
+  cho 900 frame).
+- Khi nối sáu clip, chuyển cảnh chỉ phủ 155 trên 1650 frame nên chỉ nhanh hơn 1.15–1.4 lần (nghẽn ở decode),
+  giống với fade.
+- Xếp chồng filter là chỗ GPU có lợi: graph 8 effect nhanh hơn 9–10 lần ở 1080p và 4K. Frame chỉ lên và xuống
+  GPU một lần, mọi bước chạy trên GPU, CPU chỉ decode. Ở 4K đường CPU chỉ chạy 10 fps.

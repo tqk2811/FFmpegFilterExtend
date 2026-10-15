@@ -233,3 +233,7 @@
 ### [Thấp] `passthrough=off`: mỗi gpufx tắt copy qua RGBA làm chroma giảm dần
 
 Vấn đề: với `passthrough=off` (hoặc khi không gắn nhãn được), gpufx bị tắt copy frame trên GPU qua một vòng YUV→RGBA→YUV. Chuỗi 5 gpufx tắt liên tiếp làm chroma giảm còn khoảng 37 dB so với bản gắn nhãn, và chậm hơn 2,2 lần (bài đo nối 6 clip trong `docs/BENCHMARK-vi.md`). Vị trí: `passthrough_frame` / nhánh copy trong `ffmpeg/vf_gpufx.c`. Nên làm: khi input và output cùng `sw_format` thì copy thẳng từng plane (không đổi màu). Ghi ngày 2026-10-15.
+
+### [Thấp] Frame YUV không có tag màu: gpufx đoán matrix/range khác FFmpeg
+
+Vấn đề: đưa file yuv thô không gắn `colorspace`/`range` qua `gpufx_upload` → `gpufx_download` chỉ đạt khoảng 25 dB so với nguồn; gắn `setparams=range=tv:colorspace=bt709` thì lên khoảng 42 dB (bài đo "Filter nặng hơn" trong `docs/BENCHMARK-vi.md`). Vị trí: chỗ chọn matrix/range khi frame có `AVCOL_SPC_UNSPECIFIED`/`AVCOL_RANGE_UNSPECIFIED` trong `ffmpeg/vf_gpufx.c` và phần chuyển YUV của gpufx-core. Nên làm: khi thiếu tag thì mặc định giống swscale (BT.601 cho SD, BT.709 cho HD, limited range), và thêm test. Ghi ngày 2026-10-15.

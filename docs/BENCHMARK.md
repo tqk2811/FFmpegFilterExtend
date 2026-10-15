@@ -146,3 +146,87 @@ What the numbers say:
   YUV → RGBA → YUV round trip of every copy lowers the chroma (PSNR 37 dB against the relabelled output).
 - Dropping `gpufx_download` gains nothing: its copies already overlap the rest.
 - D3D11 frames are about 2× slower than Vulkan here (`hwupload`/`hwdownload` wait for every copy, see above).
+
+## Heavier filters: single effects, transitions and a stacked chain
+
+Build `de39c81` (win64 bundle), measured on 2026-10-15, same machine as above (Intel Core i9-14900HX, 24 cores /
+32 threads, RTX 4060 Laptop). The CPU rows run the reference FFmpeg 8.0.1 (the bundle, FFmpeg 9.0, has no `xfade`,
+`gblur`, `unsharp`, `eq`, `bilateral`...), with default `-threads`. GPU rows: the bundle, Vulkan device
+`vulkan=vk:0,disable_multiplane=1`, `gpufx_upload` → `gpufx` → `gpufx_download,format=yuv420p`. `-f null`, median of
+3 runs, wall time measured around the process; fps = frames / wall time.
+
+- **Input**: clips A and B of the section above (1920×1080, 30 fps, 300 frames), each read 3 times with
+  `-stream_loop 2` (900 frames, 30 s). Two sources: raw yuv420p files decoded beforehand (`-f rawvideo`, no
+  decode cost) and the H.264 clips (software decode).
+- **Pairs** (same parameters on both sides where the filter has them; the math is not identical):
+
+| Case | CPU (FFmpeg 8.0.1) | gpufx |
+|---|---|---|
+| Gaussian blur, large | `gblur=sigma=24` | `gaussian-blur` `radius=48` (σ = 24, 97 taps per pass) |
+| Gaussian blur, small | `gblur=sigma=3` | `gaussian-blur` `radius=6` |
+| Sharpen | `unsharp=3:3:0.8:3:3:0.8` | `sharpen` `amount=0.8` |
+| Color | `eq=contrast=1.2:saturation=1.3:gamma=1.1,hue=h=20` | `color-adjust` same values |
+| Vignette | `vignette` | `vignette` `strength=0.6` |
+| Bilateral | `bilateral=sigmaS=4:sigmaR=0.1` | brute force 17×17 bilateral written for this test only (not shipped) |
+| Transitions over the whole 30 s | `xfade=transition=dissolve\|pixelize\|circleopen\|zoomin:duration=30:offset=0` | `dissolve`, `pixelize-transition`, `circle-reveal`, `zoom-transition`, `progress=t/30` |
+
+| Case | CPU raw | gpufx raw | ×, raw | CPU H.264 | gpufx H.264 | ×, H.264 | CPU utime (raw) |
+|---|---|---|---|---|---|---|---|
+| No filter: read only / `gpufx_upload,gpufx_download` | 0.89 s | 1.42 s | – | 0.92 s | 1.45 s | – | 0.0 s |
+| `gblur` σ 24 / `gaussian-blur` 48 | 2.00 s | 2.73 s | 0.73 | 2.42 s | 2.79 s | 0.87 | 4.6 s |
+| `gblur` σ 3 / `gaussian-blur` 6 | 2.94 s | 1.58 s | 1.86 | 3.10 s | 1.68 s | 1.85 | 11.5 s |
+| `unsharp` / `sharpen` | 1.36 s | 1.46 s | 0.93 | 1.59 s | 1.57 s | 1.01 | 9.4 s |
+| `eq,hue` / `color-adjust` | 0.92 s | 1.46 s | 0.63 | 1.21 s | 1.54 s | 0.79 | 0.7 s |
+| `vignette` / `vignette` | 3.49 s | 1.51 s | 2.31 | 3.59 s | 1.59 s | 2.26 | 3.1 s |
+| `bilateral` / 17×17 bilateral | 2.74 s | 4.04 s | 0.68 | 2.85 s | 4.08 s | 0.70 | 22.5 s |
+| `xfade` dissolve / `dissolve` | 5.88 s | 1.83 s | **3.21** | 6.24 s | 2.39 s | 2.61 | 54.2 s |
+| `xfade` pixelize / `pixelize-transition` | 4.15 s | 1.78 s | 2.33 | 4.67 s | 2.28 s | 2.05 | 30.8 s |
+| `xfade` circleopen / `circle-reveal` | 5.19 s | 1.78 s | 2.92 | 5.37 s | 2.22 s | 2.42 | 51.3 s |
+| `xfade` zoomin / `zoom-transition` | 3.71 s | 1.81 s | 2.05 | 3.96 s | 2.26 s | 1.75 | 21.4 s |
+
+× = CPU wall / gpufx wall. The gpufx processes use under 1 s of CPU time on raw input (about 7 s with H.264,
+which is the decoder); RAM is about 0.42 GB for gpufx against 0.1–0.37 GB on the CPU.
+
+**Joining six clips with five transitions** (same setup as the section above, only the transition changed;
+chain = 5 `gpufx` with `enable`/`bypass=auto`, graph = one `gpufx` with `<node>.enable`/`.bypass`):
+
+| Transition | CPU `xfade` | gpufx chain | gpufx graph | CPU utime / gpufx utime | maxrss CPU / gpufx |
+|---|---|---|---|---|---|
+| dissolve | 3.82 s (432 fps) | 3.32 s (497 fps) | **2.72 s** (607 fps) | 37.1 s / 14.9 s | 1578 / 825 MB |
+| pixelize | 3.42 s (482 fps) | **2.56 s** (645 fps) | 2.58 s (640 fps) | 33.1 s / 13.1 s | 1595 / 824 MB |
+
+**Stacked chain**: on each of two inputs Gaussian blur (σ 3) + sharpen + color, then a circle transition over
+the whole 30 s, then a vignette. CPU: `[0]gblur=sigma=3,unsharp=3:3:0.8:3:3:0.8,eq=...,hue=h=20[a]; [1]...[b];
+[a][b]xfade=transition=circleopen:duration=30:offset=0,vignette`. gpufx: one `gpufx` with an 8-node graph
+`[0]gaussian-blur[a0]; [a0]sharpen[a1]; [a1]color-adjust[a2]; [1]...[b2]; [a2][b2]circle-reveal[t]; [t]vignette[out]`.
+4K: both clips scaled to 3840×2160 and encoded again with H.264 (CRF 14), 900 frames each.
+
+| Source | CPU | gpufx graph | × | CPU utime / gpufx utime | maxrss CPU / gpufx |
+|---|---|---|---|---|---|
+| 1080p raw | 22.90 s (39 fps) | 2.48 s (362 fps) | **9.2** | 93.4 s / 0.8 s | 527 / 471 MB |
+| 1080p H.264 | 23.27 s (39 fps) | 2.63 s (342 fps) | 8.8 | 102.5 s / 12.7 s | 829 / 673 MB |
+| 4K H.264 (decode only: 2.64 s) | 87.16 s (10 fps) | 8.85 s (102 fps) | **9.8** | 395.5 s / 41.9 s | 3044 / 1761 MB |
+
+**Correctness** (frame 150, CPU against gpufx; transitions with `duration=10`, so progress 0.5): the effects do
+not compute the same thing, so this is a rough check plus a look at the frames side by side. PSNR: bilateral
+41.3 dB, small blur 39.6 dB, sharpen 36.0 dB, large blur 34.1 dB, vignette 30.5 dB (other falloff curve),
+color 20.3 dB (other hue model); the transitions differ by design (`xfade` circleopen is a wide soft gradient,
+`circle-reveal` a sharp circle; `xfade` zoomin shows a different moment) and the random ones use other
+patterns. The raw yuv files carry no color tags: `gpufx` then reads them with another matrix/range (an
+upload/download round trip falls to 25 dB), so for the check they were tagged with
+`setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709` (round trip 41.9 dB, the same as the
+H.264 clips). The timing runs used the untagged files; the work done per frame is the same.
+
+What the numbers say:
+
+- One cheap filter does not pay for the trip to the GPU: upload + download alone take 1.42 s for 900 frames
+  (635 fps), more than `eq,hue`, `unsharp` or `gblur` σ 24 on 32 threads. `gblur` is an IIR filter whose cost
+  does not grow with σ, while `gaussian-blur` 48 runs 97 taps per pass; the 17×17 bilateral (289 taps) is
+  slower than FFmpeg's O(1) `bilateral` for the same reason. GPU wins where the CPU filter is slow per pixel:
+  `vignette` 2.3×, `gblur` σ 3 1.9×.
+- Full-length transitions are 2–3.2× faster on gpufx and use almost no CPU (`xfade` takes 21–54 s of CPU time
+  for 900 frames).
+- In the six-clip join the transitions cover only 155 of 1650 frames, so the gain stays at 1.15–1.4× (decode
+  bound), as with fade.
+- Stacking filters is where the GPU pays: the 8-effect graph is 9–10× faster at 1080p and 4K. The frames go up
+  and down once, all steps run on the GPU, and the CPU only decodes. At 4K the CPU path runs at 10 fps.
