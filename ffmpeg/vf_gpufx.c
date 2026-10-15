@@ -88,11 +88,23 @@ typedef struct ParamExpr {
     AVExpr *expr;
 } ParamExpr;
 
-/* "<node>.enable=<expr>" in params: an effect of a chain or graph switched per frame. */
+/* bypass option and <node>.bypass: which input a disabled filter or effect passes. */
+enum BypassMode {
+    BYPASS_FIRST, /* input 0 (for the filter: the input each output has the size of) */
+    BYPASS_AUTO,  /* input 0 until enabled once, then the last input (a transition after its end) */
+};
+
+/* "<node>.enable=<expr>" and "<node>.bypass=0|auto" in params: an effect of a chain or graph switched per frame. */
 typedef struct NodeExpr {
-    char *node;   /* the prefix before ".enable", "" for a bare "enable" */
-    AVExpr *expr;
+    char *node;   /* the prefix before ".enable", "" for a bare "enable" (first spelling) */
+    int *idx;     /* indices of the effects the node names: entries with equal lists are one */
+    int nidx;
+    char *enable_name, *bypass_name; /* spellings that gave expr and bypass, NULL if not given */
+    AVExpr *expr; /* NULL: only .bypass given, the effect stays on */
     int state;    /* last value given to libgpufx, -1 before the first frame */
+    int bypass;   /* BYPASS_* */
+    int seen_on;  /* the expression was true once: auto passes the last input */
+    int bypass_state; /* last input given to libgpufx (0 or GPUFX_BYPASS_LAST), 0 at first */
 } NodeExpr;
 
 typedef struct GpufxContext {
@@ -125,6 +137,9 @@ typedef struct GpufxContext {
     int warned_hdr;
     enum AVPixelFormat out_format; /* forced output format, AV_PIX_FMT_NONE: chosen as before */
     int passthrough;               /* PASSTHROUGH_* */
+    int bypass;                    /* BYPASS_*: the input passed when disabled by enable= */
+    int seen_enabled;              /* an event was not disabled by enable= (bypass=auto) */
+    int *pass_src;                 /* per output: input pad passed by the current disabled event */
     int logged_passthrough;        /* 1: relabel logged, 2: GPU copy logged */
     /* GPU frames: every output and GPU input is hw_fmt (Vulkan, D3D12, D3D11 or VideoToolbox). */
     enum AVPixelFormat hw_fmt;
@@ -202,6 +217,9 @@ static void drop_expr(GpufxContext *s, const char *name)
 static void free_node_expr(NodeExpr *e)
 {
     av_freep(&e->node);
+    av_freep(&e->idx);
+    av_freep(&e->enable_name);
+    av_freep(&e->bypass_name);
     av_expr_free(e->expr);
     e->expr = NULL;
 }
@@ -210,51 +228,109 @@ static void free_node_expr(NodeExpr *e)
  * "<node>.enable=<expr>": switches the effects node names (package label, index or graph
  * output label, as in "<node>.<param>"; a bare "enable" for a single effect) on while the
  * expression is not 0, evaluated for every frame like parameter expressions. Not the
- * filter's own timeline option enable=, which is outside params. Entries are kept per
- * spelling of the node: "invert.enable" and "0.enable" naming the same effect are two
- * entries, and the one evaluated last for a frame wins.
+ * filter's own timeline option enable=, which is outside params. Names that give the
+ * same effects ("invert.enable" and "0.enable") are one entry: enable and bypass may come
+ * from different spellings, but each only once (else "node given twice"). Names giving
+ * overlapping but unequal lists (a graph label of two effects and an index of one) stay
+ * separate entries.
+ * "<node>.bypass=0|auto": the input those effects pass while off. 0 (default) passes
+ * their first input; auto passes it until the enable expression was true once, then
+ * their last input: a transition (input 0 fading into the last one) switched off after
+ * its end goes on showing where it ended.
  */
-static int add_node_expr(AVFilterContext *ctx, const char *name, const char *value)
+static int add_node_expr(AVFilterContext *ctx, const char *name, const char *value, const char *key)
 {
     GpufxContext *s = ctx->priv;
-    size_t len = strlen(name) - strlen("enable");
+    size_t len = strlen(name) - strlen(key);
     char *node = av_strndup(name, len ? len - 1 : 0);
     AVExpr *expr = NULL;
-    NodeExpr *tmp;
-    int ret;
+    NodeExpr *e = NULL, *tmp;
+    int *idx = NULL;
+    int ret, nidx, bypass = BYPASS_FIRST;
+    const int is_bypass = !strcmp(key, "bypass");
 
     if (!node)
         return AVERROR(ENOMEM);
     if (name[0] == '.') {
-        av_log(ctx, AV_LOG_ERROR, "Invalid '%s': missing effect name before .enable.\n", name);
-        av_free(node);
-        return AVERROR(EINVAL);
+        av_log(ctx, AV_LOG_ERROR, "Invalid '%s': missing effect name before .%s.\n", name, key);
+        ret = AVERROR(EINVAL);
+        goto fail;
     }
-    if (gpufx_effect_find_node(s->fx, node) < 0) {
+    /* The effects the name gives: entries naming the same ones are merged into one. */
+    if ((nidx = gpufx_effect_node_effects(s->fx, node, NULL, 0)) < 0) {
         av_log(ctx, AV_LOG_ERROR, "Effect '%s': %s\n", gpufx_effect_name(s->fx), gpufx_last_error());
-        av_free(node);
-        return AVERROR(EINVAL);
+        ret = AVERROR(EINVAL);
+        goto fail;
     }
-    if ((ret = av_expr_parse(&expr, value, var_names, NULL, NULL, NULL, NULL, 0, ctx)) < 0) {
+    if (!(idx = av_malloc_array(nidx ? nidx : 1, sizeof(*idx)))) {
+        ret = AVERROR(ENOMEM);
+        goto fail;
+    }
+    if (gpufx_effect_node_effects(s->fx, node, idx, nidx) != nidx) {
+        av_log(ctx, AV_LOG_ERROR, "Effect '%s': %s\n", gpufx_effect_name(s->fx), gpufx_last_error());
+        ret = AVERROR(EINVAL);
+        goto fail;
+    }
+    if (is_bypass) {
+        if (!strcmp(value, "auto")) {
+            bypass = BYPASS_AUTO;
+        } else if (strcmp(value, "0")) {
+            av_log(ctx, AV_LOG_ERROR, "Invalid '%s=%s': bypass is 0 or auto.\n", name, value);
+            ret = AVERROR(EINVAL);
+            goto fail;
+        }
+    } else if ((ret = av_expr_parse(&expr, value, var_names, NULL, NULL, NULL, NULL, 0, ctx)) < 0) {
         av_log(ctx, AV_LOG_ERROR, "Invalid expression for '%s': '%s'.\n", name, value);
-        av_free(node);
-        return ret;
+        goto fail;
     }
     for (int i = 0; i < s->nb_node_exprs; i++) {
-        if (!strcmp(s->node_exprs[i].node, node)) {
-            free_node_expr(&s->node_exprs[i]);
-            s->node_exprs[i] = s->node_exprs[--s->nb_node_exprs];
+        NodeExpr *o = &s->node_exprs[i];
+        if (o->nidx == nidx && !memcmp(o->idx, idx, nidx * sizeof(*idx))) {
+            e = o;
             break;
         }
     }
-    if (!(tmp = av_realloc_array(s->node_exprs, s->nb_node_exprs + 1, sizeof(*s->node_exprs)))) {
-        av_expr_free(expr);
-        av_free(node);
-        return AVERROR(ENOMEM);
+    if (!e) {
+        if (!(tmp = av_realloc_array(s->node_exprs, s->nb_node_exprs + 1, sizeof(*s->node_exprs)))) {
+            ret = AVERROR(ENOMEM);
+            goto fail;
+        }
+        s->node_exprs = tmp;
+        e = &s->node_exprs[s->nb_node_exprs];
+        *e = (NodeExpr){ .node = node, .idx = idx, .nidx = nidx, .state = -1 };
+        s->nb_node_exprs++;
+        node = NULL;
+        idx = NULL;
     }
-    s->node_exprs = tmp;
-    s->node_exprs[s->nb_node_exprs++] = (NodeExpr){ node, expr, -1 };
+    {
+        char **given = is_bypass ? &e->bypass_name : &e->enable_name;
+        /* Two spellings of one effect each setting enable (or bypass) are ambiguous. */
+        if (*given && strcmp(*given, name)) {
+            av_log(ctx, AV_LOG_ERROR, "Invalid '%s': node '%.*s' given twice (also as '%s').\n",
+                   name, (int)len, name, *given);
+            ret = AVERROR(EINVAL);
+            goto fail;
+        }
+        if (!*given && !(*given = av_strdup(name))) {
+            ret = AVERROR(ENOMEM);
+            goto fail;
+        }
+    }
+    if (is_bypass) {
+        e->bypass = bypass;
+    } else {
+        av_expr_free(e->expr);
+        e->expr = expr;
+        expr = NULL;
+    }
+    av_free(node);
+    av_free(idx);
     return 0;
+fail:
+    av_expr_free(expr);
+    av_free(node);
+    av_free(idx);
+    return ret;
 }
 
 /*
@@ -289,10 +365,11 @@ static int apply_params(AVFilterContext *ctx, const char *str)
             break;
         }
         *value++ = 0;
-        /* No package has a parameter named enable: the name is reserved for this. */
+        /* No package has a parameter named enable or bypass: the names are reserved for this. */
         dot = strrchr(item, '.');
-        if (!strcmp(item, "enable") || (dot && !strcmp(dot + 1, "enable"))) {
-            if ((ret = add_node_expr(ctx, item, value)) < 0)
+        if (!strcmp(item, "enable") || (dot && !strcmp(dot + 1, "enable")) ||
+            !strcmp(item, "bypass") || (dot && !strcmp(dot + 1, "bypass"))) {
+            if ((ret = add_node_expr(ctx, item, value, dot ? dot + 1 : item)) < 0)
                 break;
             continue;
         }
@@ -484,7 +561,8 @@ static av_cold int init(AVFilterContext *ctx)
     s->in       = av_calloc(s->nb_inputs, sizeof(*s->in));
     s->out      = av_calloc(s->nb_outputs, sizeof(*s->out));
     s->source   = av_calloc(s->nb_outputs, sizeof(*s->source));
-    if (!s->conv || !s->in_sws || !s->blank || !s->in || !s->out || !s->source)
+    s->pass_src = av_calloc(s->nb_outputs, sizeof(*s->pass_src));
+    if (!s->conv || !s->in_sws || !s->blank || !s->in || !s->out || !s->source || !s->pass_src)
         return AVERROR(ENOMEM);
     for (unsigned k = 0; k < s->nb_outputs; k++) {
         s->source[k] = gpufx_effect_output_source(s->fx, k);
@@ -522,6 +600,7 @@ static av_cold void uninit(AVFilterContext *ctx)
     av_freep(&s->in);
     av_freep(&s->out);
     av_freep(&s->source);
+    av_freep(&s->pass_src);
     av_freep(&s->hw_in_fmt);
     for (unsigned i = 0; s->up_in && i < s->nb_inputs; i++)
         av_frame_free(&s->up_in[i]);
@@ -1961,7 +2040,7 @@ static const char *passthrough_ok(AVFilterContext *ctx)
     for (unsigned k = 0; k < s->nb_outputs; k++) {
         AVFilterLink *ol = ctx->outputs[k];
         AVBufferRef *out_frames = ff_filter_link(ol)->hw_frames_ctx;
-        const int src = s->source[k];
+        const int src = s->pass_src[k];
         const AVFrame *in = s->in[src];
         const char *dst = ol->dst ? ol->dst->filter->name : "";
         const char *why;
@@ -2011,7 +2090,7 @@ static int passthrough_frame(FFFrameSync *fs, const AVFrame *in0)
         s->logged_passthrough = 1;
     }
     for (unsigned k = 0; k < s->nb_outputs; k++) {
-        const AVFrame *in = s->in[s->source[k]];
+        const AVFrame *in = s->in[s->pass_src[k]];
         AVBufferRef *out_frames = ff_filter_link(ctx->outputs[k])->hw_frames_ctx;
         AVFrame *out;
 
@@ -2031,6 +2110,38 @@ static int passthrough_frame(FFFrameSync *fs, const AVFrame *in0)
         set_output_props(out, in0, ctx->inputs[0], ctx->outputs[k], fs->pts, fs->time_base);
         out->colorspace  = ctx->outputs[k]->colorspace;
         out->color_range = ctx->outputs[k]->color_range;
+    }
+    return 0;
+}
+
+/*
+ * Picks the input pad each output passes in a disabled event: by the bypass option when
+ * the filter is disabled by enable=, else (every effect off) through the inputs the effects
+ * pass. A pad of another size than its output is an error, not a silent other choice.
+ */
+static int pick_bypass(AVFilterContext *ctx, int filter_disabled)
+{
+    GpufxContext *s = ctx->priv;
+    int pad = GPUFX_BYPASS_NODES;
+
+    if (filter_disabled)
+        pad = s->bypass == BYPASS_AUTO && s->seen_enabled ? (int)s->nb_inputs - 1 : GPUFX_BYPASS_FIRST;
+    if (gpufx_effect_set_bypass(s->fx, pad) < 0)
+        return gpufx_error(ctx, "bypass");
+    for (unsigned k = 0; k < s->nb_outputs; k++) {
+        AVFilterLink *ol = ctx->outputs[k], *il;
+        const int src = gpufx_effect_bypass_pad(s->fx, k);
+
+        if (src < 0 || src >= (int)s->nb_inputs)
+            return gpufx_error(ctx, "bypass");
+        il = ctx->inputs[src];
+        if (il->w != ol->w || il->h != ol->h) {
+            av_log(ctx, AV_LOG_ERROR, "Disabled: output '%s' would pass input '%s', which is %dx%d "
+                   "while the output is %dx%d. Choose another bypass.\n", ctx->output_pads[k].name,
+                   ctx->input_pads[src].name, il->w, il->h, ol->w, ol->h);
+            return AVERROR(EINVAL);
+        }
+        s->pass_src[k] = src;
     }
     return 0;
 }
@@ -2103,9 +2214,19 @@ static int process_frame(FFFrameSync *fs)
     if (!disabled && s->nb_node_exprs) {
         for (int i = 0; i < s->nb_node_exprs; i++) {
             NodeExpr *e = &s->node_exprs[i];
-            const int on = av_expr_eval(e->expr, vars, NULL) != 0;
+            const int on = !e->expr || av_expr_eval(e->expr, vars, NULL) != 0;
+            int input;
 
-            if (on != e->state) {
+            e->seen_on |= e->expr && on;
+            input = e->bypass == BYPASS_AUTO && e->seen_on ? GPUFX_BYPASS_LAST : 0;
+            if (input != e->bypass_state) {
+                if (gpufx_effect_set_node_bypass(s->fx, e->node, input) < 0) {
+                    ret = gpufx_error(ctx, "bypass");
+                    goto fail;
+                }
+                e->bypass_state = input;
+            }
+            if (e->expr && on != e->state) {
                 if (gpufx_effect_set_node_enabled(s->fx, e->node, on) < 0) {
                     ret = gpufx_error(ctx, "enable");
                     goto fail;
@@ -2118,8 +2239,14 @@ static int process_frame(FFFrameSync *fs)
         s->frame_count += disabled;
     }
 
+    s->seen_enabled |= !ctx->is_disabled;
+
     if (disabled) {
-        const char *why = passthrough_ok(ctx);
+        const char *why;
+
+        if ((ret = pick_bypass(ctx, ctx->is_disabled)) < 0)
+            goto fail;
+        why = passthrough_ok(ctx);
 
         if (!why) {
             if ((ret = passthrough_frame(fs, in0)) < 0)
@@ -2504,6 +2631,9 @@ static const AVOption gpufx_options[] = {
     { "passthrough", "when disabled by enable=, hand the input textures on without a GPU copy: auto, off", OFFSET(passthrough), AV_OPT_TYPE_INT, { .i64 = PASSTHROUGH_AUTO }, PASSTHROUGH_OFF, PASSTHROUGH_AUTO, FLAGS, .unit = "passthrough" },
         { "off",  "always copy or convert on the GPU",                                          0, AV_OPT_TYPE_CONST, { .i64 = PASSTHROUGH_OFF },  0, 0, FLAGS, .unit = "passthrough" },
         { "auto", "relabel the input frames as output frames when unchanged and the next filter is gpufx, gpufx_download or hwdownload", 0, AV_OPT_TYPE_CONST, { .i64 = PASSTHROUGH_AUTO }, 0, 0, FLAGS, .unit = "passthrough" },
+    { "bypass", "input passed when disabled by enable=: 0, auto (input 0 until enabled once, then the last input)", OFFSET(bypass), AV_OPT_TYPE_INT, { .i64 = BYPASS_FIRST }, BYPASS_FIRST, BYPASS_AUTO, FLAGS, .unit = "bypass" },
+        { "0",    "the input each output has the size of (input 0)",                          0, AV_OPT_TYPE_CONST, { .i64 = BYPASS_FIRST }, 0, 0, FLAGS, .unit = "bypass" },
+        { "auto", "input 0 before the first enabled frame, the last input after it",          0, AV_OPT_TYPE_CONST, { .i64 = BYPASS_AUTO },  0, 0, FLAGS, .unit = "bypass" },
     { NULL }
 };
 

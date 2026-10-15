@@ -184,6 +184,13 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   Nhiều output thì tất cả hoặc không cái nào. Filter kế tiếp khác (encoder, `null`...) và `off` thì
   copy trên GPU như cũ. Frames context của output giữ frames context của mọi texture nó đã gắn
   nhãn, nên texture sống lâu hơn mọi frame và mọi gpufx phía sau còn giữ wrapper của chúng.
+- **bypass** (`0`, `auto`; mặc định `0`): input nào được đưa ra khi timeline `enable=` tắt filter
+  (relabel hoặc copy như trên). `0`: input pad nguồn của mỗi output (input 0 với một effect).
+  `auto`: pad đó cho tới khi filter đã bật ít nhất một frame, sau đó là input pad cuối; dành cho
+  transition (input 0 chuyển dần sang input cuối) cần tiếp tục hiện clip nó kết thúc ở đó:
+  `[a][b]gpufx=effect=xfade.zip:enable='between(t,2,3)':bypass=auto`. Sau cửa sổ bật đầu tiên nó
+  giữ input cuối, kể cả trước các cửa sổ sau. Pad được chọn phải cùng kích thước với output, nếu
+  không frame đó báo lỗi (`EINVAL`), không bao giờ lặng lẽ lấy input khác.
 - **params**: `tên=giá trị` cách nhau bởi `|`. Giá trị là literal (`0.5`, `1,0,0`, `#ff8800`)
   hoặc **biểu thức FFmpeg** theo `t`, `n`, `w`, `h`, `a` (`w/h`), `sar`, `dar` (`a*sar`),
   tính lại mỗi frame. Đây là cách làm keyframe/transition không cần tool ngoài.
@@ -198,10 +205,24 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   cấp phát gì. Tắt một effect chỉ tiết kiệm phần shader, không tiết kiệm hết: bước copy vẫn là một
   compute pass và effect vẫn giữ texture output. Khi mọi effect đều tắt, frame được xử lý như
   filter bị disable (relabel nếu `passthrough` cho phép, nếu không thì bypass trên GPU), và `n`
-  vẫn đếm tiếp. Node được khớp đúng như cách viết: `invert.enable` và `0.enable` cùng chỉ một
-  effect là hai mục riêng, mục được tính sau cùng cho frame đó thắng; `.enable` trần (không có tên
-  effect) là lỗi. Qua `sendcmd`, `params 0.enable=1` bật lại effect: một mục `.enable` không xoá
+  vẫn đếm tiếp. Các tên cho cùng danh sách effect (`invert.enable` và `0.enable`) là một mục, nên
+  `.enable` và `.bypass` có thể đến từ hai cách viết khác nhau, nhưng mỗi thứ chỉ được cho một lần
+  (nếu không: "node given twice"); tên cho danh sách chồng nhau nhưng không bằng nhau (nhãn graph của
+  hai effect và chỉ số của một effect) vẫn là các mục riêng; `.enable` trần (không có tên effect) là
+  lỗi. Qua `sendcmd`, `params 0.enable=1` bật lại effect: một mục `.enable` không xoá
   được, chỉ thay được, bằng cách gọi lại đúng cách viết node đó.
+- **`<node>.bypass=0|auto`** trong `params` (node gọi như với `.enable`; `bypass` trần khi chỉ có một
+  effect): input mà effect bị tắt copy ra. `0` (mặc định) là input đầu; `auto` là input đầu cho tới
+  khi biểu thức `.enable` của nó đã đúng một lần, sau đó là input cuối (effect một input thì giữ
+  input đó). Input nào cũng có thể được copy, nên plan giữ mọi input của một effect sống tới pass
+  cuối của effect đó. Input khác kích thước output của effect thì frame đó báo lỗi. Khi mọi effect
+  đều tắt, output là input pad mà các input được chọn dẫn tới. Package không được khai báo param
+  tên `bypass`. `bypass` trần trong `params` là bypass node của effect duy nhất, khác với option
+  `bypass=` của filter (input mà filter bị tắt bởi `enable=` cho qua). `auto` dựa trên lịch sử các
+  frame đã xử lý: cửa sổ `enable` ngắn hơn một khoảng frame, hoặc luồng mà frame đầu đã nằm sau cửa
+  sổ (trim, seek), thì không bao giờ được đặt và ở lại input 0; không reset khi seek; sau cửa sổ đầu
+  tiên luôn là input cuối. FFI (API 11, thêm `gpufx_effect_node_effects`): `gpufx_effect_set_node_bypass`, `gpufx_effect_set_bypass`,
+  `gpufx_effect_bypass_pad`.
 - **sendcmd / zmq**: lệnh `params` đổi giá trị lúc chạy, ví dụ
   `sendcmd=c='2.0 gpufx@fx params strength=0.2'`.
 - **timeline** (`enable='between(t,1,3)'`) được hỗ trợ.
@@ -324,7 +345,8 @@ Dấu nháy đơn che `;` và `[]` khỏi filter graph bên ngoài. Quy tắc:
   được đọc, số nhãn so với số input của nút, nhãn output là số. Kiểm lúc configure: quy tắc kích
   thước và format trong manifest của mọi nút (một cạnh mang kích thước của hiệu ứng ghi nó và format
   negotiate giữa hai hiệu ứng), và input pad được các hiệu ứng không có format chung đọc.
-- Với `enable=`, đồ thị bị tắt gửi input pad nguồn của mỗi output, chuyển sang format của output.
+- Với `enable=`, đồ thị bị tắt gửi input pad nguồn của mỗi output (hoặc pad do `bypass` chọn),
+  chuyển sang format của output.
 - Đường dẫn trong đồ thị không được chứa `[`, `]`, `;` hoặc `|`.
 
 C API (v5, chỉ thêm): `gpufx_effect_open_graph`, `gpufx_effect_output_count`, `gpufx_effect_output_name`,

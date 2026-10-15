@@ -628,3 +628,49 @@ fn effects_switched_off_write_their_copy_in_place() {
         }
     }
 }
+
+#[test]
+fn bypass_picks_the_input_passed_on_gpu_frames() {
+    use PixelFormat::*;
+    let Some(ctx) = own_gpu() else { return };
+    let info = FrameInfo::new(0.5, 3);
+    let (w, h) = (37, 22);
+    let a = pattern(Rgba, w, h, 1);
+    let b = pattern(Rgba, w, h, 2);
+    let ins = || [upload(&ctx, Rgba, &a, w, h), upload(&ctx, Rgba, &b, w, h)];
+
+    // A transition switched off after its end passes its second input, in place too.
+    for direct in [false, true] {
+        let mut g = graph(&ctx, "[0][1]crossfade.zip[out]");
+        if direct {
+            g.allow_direct_gpu();
+        }
+        g.set_node_enabled(0, false).unwrap();
+        assert_eq!(gpu_run(&ctx, &mut g, &ins(), &[target(&ctx, Rgba, w, h)], Some(&info))[0], a, "direct {direct}");
+        g.set_node_bypass(0, 1).unwrap();
+        assert_eq!(gpu_run(&ctx, &mut g, &ins(), &[target(&ctx, Rgba, w, h)], Some(&info))[0], b, "direct {direct}");
+    }
+
+    // The graph bypassed (the filter disabled): the pad picked, or the one the effects lead to.
+    let mut g = graph(&ctx, "[0][1]crossfade.zip[out]");
+    assert_eq!(gpu_run(&ctx, &mut g, &ins(), &[target(&ctx, Rgba, w, h)], None)[0], a);
+    g.set_bypass_pad(gpufx_core::BypassPad::Pad(1)).unwrap();
+    assert_eq!(gpu_run(&ctx, &mut g, &ins(), &[target(&ctx, Rgba, w, h)], None)[0], b, "the output rebinds to pad 1");
+    g.set_bypass_pad(gpufx_core::BypassPad::Nodes).unwrap();
+    assert_eq!(gpu_run(&ctx, &mut g, &ins(), &[target(&ctx, Rgba, w, h)], None)[0], a);
+    g.set_node_bypass(0, 1).unwrap();
+    assert_eq!(gpu_run(&ctx, &mut g, &ins(), &[target(&ctx, Rgba, w, h)], None)[0], b);
+
+    // An input of another size than the output: an error, not another input.
+    let small = pattern(Rgba, 16, 8, 3);
+    let ins = [upload(&ctx, Rgba, &a, w, h), upload(&ctx, Rgba, &small, 16, 8)];
+    let mut g = graph(&ctx, "[0][1]overlay.zip[out]");
+    g.set_node_enabled(0, false).unwrap();
+    g.set_node_bypass(0, 1).unwrap();
+    let mut enc = ctx.device().create_command_encoder(&Default::default());
+    let err = g.encode_gpu(&ins, &[target(&ctx, Rgba, w, h)], Some(&info), &mut enc).unwrap_err().to_string();
+    assert!(err.contains("passes its input 1") && err.contains("16x8"), "{err}");
+    g.set_bypass_pad(gpufx_core::BypassPad::Pad(1)).unwrap();
+    let err = g.encode_gpu(&ins, &[target(&ctx, Rgba, w, h)], None, &mut enc).unwrap_err().to_string();
+    assert!(err.contains("bypass passes input 1") && err.contains("16x8"), "{err}");
+}

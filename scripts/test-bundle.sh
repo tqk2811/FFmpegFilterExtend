@@ -181,6 +181,32 @@ pt_tests() {
         "$(pt_md5 "$f" "$u,$NC:params='0.enable=0|1.enable=0'")" "$PT_SRC" relabelled
     [ "$4" = 1 ] && want=$PT_ONCE || want=
     pt_check "$l: one effect of a chain switched off" "$(pt_md5 "$f" "$u,$NC:params='1.enable=0'")" "$want" true
+    # bypass: which input a disabled two-input gpufx passes (input 1: the clip inverted).
+    # A crossfade at progress=1 is its second input; exact on 8-bit RGBA only.
+    [ "$4" = 1 ] || return 0
+    BX="split[x][y];[y]$I[yi];[x][yi]gpufx=effect=$FX/crossfade.zip"
+    pt_check "$l: bypass=auto after the enabled frames relabels the last input" \
+        "$(pt_md5 "$f" "$u,$BX:params='progress=1':enable='eq(n\,1)':bypass=auto")" \
+        "$(echo "$PT_SRC" | head -n 1; echo "$PT_ONCE" | tail -n +2)" relabelled
+    pt_check "$l: bypass=0 passes input 0" \
+        "$(pt_md5 "$f" "$u,$BX:params='progress=1':enable='eq(n\,1)':bypass=0")" \
+        "$(echo "$PT_SRC" | head -n 1; echo "$PT_ONCE" | sed -n 2p; echo "$PT_SRC" | sed -n 3p)" relabelled
+    # <node>.bypass=auto: the effect alone (every effect off: relabelled), and inside a chain
+    # (copied into the input of the next effect).
+    pt_check "$l: <node>.bypass=auto of a single effect" \
+        "$(pt_md5 "$f" "$u,$BX:params='progress=1|enable=eq(n\,1)|bypass=auto'")" \
+        "$(echo "$PT_SRC" | head -n 1; echo "$PT_ONCE" | tail -n +2)" relabelled
+    pt_check "$l: <node>.bypass=auto inside a chain" \
+        "$(pt_md5 "$f" "$u,split[x][y];[y]$I[yi];[x][yi]gpufx=effect='$FX/crossfade.zip|$FX/invert.zip':params='progress=1|crossfade.enable=eq(n\,1)|crossfade.bypass=auto'")" \
+        "$(echo "$PT_ONCE" | head -n 1; echo "$PT_SRC" | tail -n +2)" true
+    # Two names of one effect (label and index) are one entry: enable from one, bypass from the other.
+    PT_CH="split[x][y];[y]$I[yi];[x][yi]gpufx=effect='$FX/crossfade.zip|$FX/invert.zip'"
+    pt_check "$l: <node>.enable and <node>.bypass by label and index are one effect" \
+        "$(pt_md5 "$f" "$u,$PT_CH:params='progress=1|crossfade.enable=eq(n\,1)|0.bypass=auto'")" \
+        "$(echo "$PT_ONCE" | head -n 1; echo "$PT_SRC" | tail -n +2)" true
+    pt_check "$l: <node>.bypass then <node>.enable by index and label are one effect" \
+        "$(pt_md5 "$f" "$u,$PT_CH:params='progress=1|0.bypass=auto|crossfade.enable=eq(n\,1)'")" \
+        "$(echo "$PT_ONCE" | head -n 1; echo "$PT_SRC" | tail -n +2)" true
 }
 # Main frame count, without gpufx (the late input tests compare against it).
 MAIN_N=$("$FF" -hide_banner -nostdin -v error -i "$A" -an -vf "format=rgba" -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | wc -l | tr -d ' ')
@@ -427,6 +453,14 @@ if [ -n "$SRC_MD5" ] && [ "$NE_SC" = "$(echo "$SRC_MD5" | sed -n 1p; echo "$ONCE
 else fail "<node>.enable toggled by sendcmd changes the frames"; echo "    got: $NE_SC"; cat "$CLIPS/last.log"; fi
 # shellcheck disable=SC2086
 rejects "bare .enable" "missing effect name before .enable" -i "$A" -an -vf "gpufx=effect=$FX/invert.zip:params='.enable=0'" $NULL
+# shellcheck disable=SC2086
+rejects "<node>.bypass other than 0 or auto" "bypass is 0 or auto" -i "$A" -an -vf "gpufx=effect=$FX/invert.zip:params='bypass=1'" $NULL
+# shellcheck disable=SC2086
+rejects "two names of one effect both setting enable" "given twice" -i "$A" -an -vf "gpufx=effect=$FX/invert.zip:params='enable=1|invert.enable=1'" $NULL
+# The input bypass passes has another size than the output: an error, not input 0.
+# shellcheck disable=SC2086
+rejects "bypass=auto onto an input of another size" "Choose another bypass" -i "$A" -an -filter_complex \
+    "[0:v]split[x][y];[y]scale=32:16[s];[x][s]gpufx=effect=$FX/overlay.zip:enable='eq(n\,0)':bypass=auto" $NULL
 
 echo "frame rate:"
 # The first input sets the output frame rate: a 25 fps clip mixed with a 60 fps clip must

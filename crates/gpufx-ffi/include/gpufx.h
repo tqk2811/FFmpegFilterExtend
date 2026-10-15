@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define GPUFX_API_VERSION 10
+#define GPUFX_API_VERSION 11
 
 typedef struct GpufxEffect GpufxEffect;
 
@@ -263,6 +263,31 @@ int gpufx_effect_set_param_values(GpufxEffect *fx, const char *name,
 int gpufx_effect_find_node(const GpufxEffect *fx, const char *node);
 int gpufx_effect_set_node_enabled(GpufxEffect *fx, const char *node, int enabled);
 int gpufx_effect_all_nodes_disabled(const GpufxEffect *fx);
+
+/*
+ * Which input passes when switched off (since API 11).
+ * gpufx_effect_set_node_bypass picks the input the effects node names copy while off:
+ * an input index of each (0 by default), or GPUFX_BYPASS_LAST for the last input of
+ * each. It fails when an effect has no such input. An input of another size than the
+ * effect's output makes processing fail while the effect is off.
+ * gpufx_effect_set_bypass picks the input pad every output passes when the whole effect
+ * is bypassed (info NULL): a pad index, GPUFX_BYPASS_FIRST (default: the pad each output
+ * has the size of) or GPUFX_BYPASS_NODES (the pad reached through the inputs the effects
+ * pass when off, for every effect off). gpufx_effect_bypass_pad returns the pad output
+ * passes by that choice, or -1.
+ */
+#define GPUFX_BYPASS_FIRST  (-1)
+#define GPUFX_BYPASS_NODES  (-2)
+#define GPUFX_BYPASS_LAST   (-3)
+int gpufx_effect_set_node_bypass(GpufxEffect *fx, const char *node, int input);
+/*
+ * Writes the indices of the effects node names to out (at most capacity of them, out may
+ * be NULL) and returns how many there are, or -1 when node names none. Two names that
+ * give equal lists name the same effects.
+ */
+int gpufx_effect_node_effects(const GpufxEffect *fx, const char *node, int *out, int capacity);
+int gpufx_effect_set_bypass(GpufxEffect *fx, int pad);
+int gpufx_effect_bypass_pad(const GpufxEffect *fx, int output);
 
 /*
  * Runs the effect. inputs holds one image per input, in order. out must have the size of

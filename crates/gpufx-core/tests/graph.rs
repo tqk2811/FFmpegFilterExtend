@@ -341,3 +341,94 @@ fn a_multi_pass_effect_switched_off_copies_an_input_only_its_first_pass_reads() 
     switch(&mut g, "gaussian-blur", false);
     assert_eq!(run_graph(&mut g, &[&src], &info)[0], inv);
 }
+
+/// A two-pass effect of two inputs whose second input only the first pass reads (the
+/// sum of both, halved), as a package directory removed when dropped.
+struct TwoInputPackage(PathBuf);
+
+impl TwoInputPackage {
+    fn new() -> Self {
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("gpufx-two-inputs-{}-{n}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = r#"{"api":1,"id":"t.mix","name":"Mix","inputs":[{"name":"a"},{"name":"b","same_size":true}],
+            "passes":[{"shader":"mix.wgsl","inputs":["a","b"],"output":"tmp"},{"shader":"copy.wgsl","inputs":["tmp"],"output":"out"}]}"#;
+        std::fs::write(dir.join("manifest.json"), manifest).unwrap();
+        let mix = "@compute @workgroup_size(8, 8) fn main(@builtin(global_invocation_id) id: vec3u) {
+    if (!gpufx_in_bounds(id)) { return; }
+    gpufx_write(id, (textureLoad(a, vec2i(id.xy), 0) + textureLoad(b, vec2i(id.xy), 0)) * 0.5);
+}";
+        let copy = "@compute @workgroup_size(8, 8) fn main(@builtin(global_invocation_id) id: vec3u) {
+    if (!gpufx_in_bounds(id)) { return; }
+    gpufx_write(id, textureLoad(tmp, vec2i(id.xy), 0));
+}";
+        std::fs::write(dir.join("mix.wgsl"), mix).unwrap();
+        std::fs::write(dir.join("copy.wgsl"), copy).unwrap();
+        TwoInputPackage(dir)
+    }
+
+    /// A graph of examples and `mix.zip`.
+    fn graph(&self, ctx: &Arc<GpuContext>, text: &str) -> EffectGraph {
+        EffectGraph::parse(text, |path| {
+            let name = path.trim_end_matches(".zip");
+            let dir = if name == "mix" { self.0.clone() } else { examples().join(name) };
+            Ok((name.to_string(), Effect::new(ctx.clone(), Package::open(dir)?)?))
+        })
+        .unwrap()
+    }
+}
+
+impl Drop for TwoInputPackage {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
+}
+
+#[test]
+fn an_effect_switched_off_passes_the_input_bypass_picks() {
+    let Some(ctx) = own_gpu() else { return };
+    let src = gradient(W, H);
+    let info = FrameInfo::new(0.5, 3);
+    let inv = run(&mut effect(&ctx, "invert"), &[&src], &info);
+    let gray = run(&mut effect(&ctx, "grayscale"), &[&src], &info);
+    let vig = |input: &[u8]| run(&mut effect(&ctx, "vignette"), &[input], &info);
+
+    // The second input of the two-pass mix is read by its first pass only: switched off
+    // and passing it, the mix copies it after its last pass, so it must still be alive
+    // then (its pooled texture not handed to the mix output).
+    let mix = TwoInputPackage::new();
+    for (text, tail) in [
+        ("[0]split[a][b]; [a]invert.zip[i]; [b]grayscale.zip[g]; [i][g]mix.zip[out]", false),
+        ("[0]split[a][b]; [a]invert.zip[i]; [b]grayscale.zip[g]; [i][g]mix.zip|vignette.zip[out]", true),
+    ] {
+        let mut g = mix.graph(&ctx, text);
+        let k = g.find_node("mix").unwrap()[0];
+        let then = |x: &[u8]| if tail { vig(x) } else { x.to_vec() };
+        g.set_node_enabled(k, false).unwrap();
+        assert_eq!(run_graph(&mut g, &[&src], &info)[0], then(&inv), "`{text}`: bypass 0 is the first input");
+        g.set_node_bypass(k, 1).unwrap();
+        assert_eq!(g.node_bypass(k), 1);
+        assert_eq!(run_graph(&mut g, &[&src], &info)[0], then(&gray), "`{text}`: bypass 1 is the second input");
+        g.set_node_bypass(k, 0).unwrap();
+        assert_eq!(run_graph(&mut g, &[&src], &info)[0], then(&inv), "`{text}`: back to the first input");
+        let got = g.set_node_bypass(k, 2).unwrap_err().to_string();
+        assert!(got.contains("bypass 2") && got.contains("2 inputs"), "{got}");
+        assert!(g.set_node_bypass(9, 0).is_err());
+    }
+
+    // Two input pads: the outputs of the graph bypassed follow the choice.
+    let mut g = graph(&ctx, "[0][1]crossfade.zip[out]").unwrap();
+    assert_eq!(g.bypass_pad(0), 0);
+    g.set_node_bypass(0, 1).unwrap();
+    assert_eq!(g.bypass_pad(0), 0, "BypassPad::First ignores the effects");
+    g.set_bypass_pad(gpufx_core::BypassPad::Nodes).unwrap();
+    assert_eq!(g.bypass_pad(0), 1);
+    g.set_bypass_pad(gpufx_core::BypassPad::Pad(0)).unwrap();
+    assert_eq!(g.bypass_pad(0), 0);
+    assert!(g.set_bypass_pad(gpufx_core::BypassPad::Pad(2)).unwrap_err().to_string().contains("2 inputs"));
+    // Switched off with progress anywhere: the second clip.
+    g.set_node_enabled(0, false).unwrap();
+    assert_eq!(run_graph(&mut g, &[&src, &inv], &info)[0], inv);
+}

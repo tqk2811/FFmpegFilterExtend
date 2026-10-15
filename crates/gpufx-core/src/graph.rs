@@ -22,6 +22,19 @@ pub enum Source {
     Node(usize),
 }
 
+/// The input pad the outputs of a bypassed graph pass (see [`EffectGraph::set_bypass_pad`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BypassPad {
+    /// The pad each output has the size of (following first inputs), as without effects.
+    #[default]
+    First,
+    /// The pad reached through the input each effect passes when switched off
+    /// ([`EffectGraph::set_node_bypass`]): what the effects give with every one off.
+    Nodes,
+    /// This pad, for every output.
+    Pad(usize),
+}
+
 /// The wiring of a graph: every effect input and graph output names its source.
 pub(crate) struct Topology {
     pub nb_inputs: usize,
@@ -48,6 +61,15 @@ impl Topology {
         match src {
             Source::Input(i) => i,
             Source::Node(j) => self.pad_of(self.node_inputs[j][0]),
+        }
+    }
+
+    /// The input pad output `src` passes when bypassed: an effect hands on input
+    /// `bypass[k]` (0 when not given), down to a pad.
+    pub fn bypass_pad(&self, src: Source, bypass: &[usize]) -> usize {
+        match src {
+            Source::Input(i) => i,
+            Source::Node(j) => self.bypass_pad(self.node_inputs[j][bypass.get(j).copied().unwrap_or(0)], bypass),
         }
     }
 
@@ -122,6 +144,13 @@ pub(crate) struct FrameIo {
     /// made for recent textures (frames read or written in place change every frame).
     copy_groups: Vec<Option<wgpu::BindGroup>>,
     copies: Vec<crate::lru::Lru<(wgpu::Texture, wgpu::Texture), wgpu::BindGroup>>,
+    /// The input each effect switched off copies (`<effect>.bypass`), by index; empty
+    /// when every one copies its first input.
+    bypass: Vec<usize>,
+    /// The input pad every output passes when the whole graph is bypassed.
+    bypass_pad: BypassPad,
+    /// The pad each output slot is bound to in bypass, to rebind when it changes.
+    bypass_bound: Vec<usize>,
 }
 
 /// The planned textures of a graph for one set of inputs.
@@ -140,27 +169,53 @@ impl FrameIo {
         self.enabled.get(k).copied().unwrap_or(true)
     }
 
+    /// The input effect `k` copies when switched off.
+    fn bypass(&self, k: usize) -> usize {
+        self.bypass.get(k).copied().unwrap_or(0)
+    }
+
+    /// The input pad output `k` passes when the whole graph is bypassed.
+    fn out_pad(&self, topo: &Topology, k: usize) -> usize {
+        match self.bypass_pad {
+            BypassPad::First => topo.pad_of(topo.outputs[k]),
+            BypassPad::Nodes => topo.bypass_pad(topo.outputs[k], &self.bypass),
+            BypassPad::Pad(p) => p,
+        }
+    }
+
     /// Picks the copy of every effect switched off, once the effects are bound for the
-    /// frame: from its first input to its output texture. Effects that are on get none.
-    fn bind_copies(&mut self, effects: &[Effect], topo: &Topology) {
+    /// frame: from its chosen input (`bypass`) to its output texture. Effects that are on
+    /// get none. Fails when that input has another size than the output.
+    fn bind_copies(&mut self, effects: &[Effect], topo: &Topology) -> Result<(), Error> {
         let ctx = &effects[0].program.ctx;
         self.copy_groups.clear();
         self.copy_groups.resize(effects.len(), None);
         if self.enabled.iter().all(|&on| on) {
-            return;
+            return Ok(());
         }
         self.copies.resize_with(effects.len(), Default::default);
         for k in 0..effects.len() {
             if self.enabled(k) {
                 continue;
             }
-            let src = source_texture(effects, &self.inputs, topo.node_inputs[k][0]);
+            let i = self.bypass(k);
+            let src = source_texture(effects, &self.inputs, topo.node_inputs[k][i]);
             let dst = effects[k].output().clone();
+            if (src.width(), src.height()) != (dst.width(), dst.height()) {
+                return Err(Error::Frame(format!(
+                    "effect {k} is switched off and passes its input {i}, which is {}x{} while its output is {}x{}",
+                    src.width(),
+                    src.height(),
+                    dst.width(),
+                    dst.height()
+                )));
+            }
             let made = self.copies[k].get_or_make((src, dst), |(src, dst)| Ok::<_, Error>(ctx.mips.copy_group(&ctx.device, src, dst)));
             let (group, made) = made.expect("infallible");
             self.copy_groups[k] = Some(group.clone());
             self.frame_binds += made as usize;
         }
+        Ok(())
     }
 
     /// Gives back what the last frame borrowed: its submission was made (or nothing was).
@@ -264,11 +319,14 @@ fn plan(
     for &k in &topo.order {
         let m = &effects[k].program.package.manifest;
         let passes = effects[k].passes(deep)?;
-        if let Source::Node(j) = topo.node_inputs[k][0] {
-            // Read by the copy of the effect when it is switched off, even if no pass reads it.
-            // The copy writes the output of the last pass: keep the input alive until then so
-            // the pool cannot give its texture to that output.
-            bump(&mut last, (j, finals[j]), g + passes.len() - 1);
+        for &src in &topo.node_inputs[k] {
+            if let Source::Node(j) = src {
+                // Any input may be read by the copy of the effect when it is switched off
+                // (`bypass`), even if no pass reads it. The copy writes the output of the last
+                // pass: keep the input alive until then so the pool cannot give its texture
+                // to that output.
+                bump(&mut last, (j, finals[j]), g + passes.len() - 1);
+            }
         }
         for pass in passes {
             for name in &pass.inputs {
@@ -351,6 +409,20 @@ fn source_texture(effects: &[Effect], inputs: &[InputSlot], src: Source) -> wgpu
         Source::Input(i) => inputs[i].texture.clone(),
         Source::Node(j) => effects[j].output().clone(),
     }
+}
+
+/// Checks that an output can pass input pad `pad` when bypassed: an existing pad of its size.
+fn check_bypass_pad(ins: &[Desc], out: &Desc, pad: usize) -> Result<(), Error> {
+    let Some(i) = ins.get(pad) else {
+        return Err(Error::Frame(format!("bypass passes input {pad}, but the effect has {} inputs", ins.len())));
+    };
+    if (i.width, i.height) != (out.width, out.height) {
+        return Err(Error::Frame(format!(
+            "bypass passes input {pad}, which is {}x{} while the output is {}x{}",
+            i.width, i.height, out.width, out.height
+        )));
+    }
+    Ok(())
 }
 
 /// What the engine needs to know of a frame, in CPU or GPU memory.
@@ -613,17 +685,25 @@ pub(crate) fn run(
         io.out_ids = ids;
     }
     let mut bound = false;
-    for k in 0..outs.len() {
-        if !io.outputs[k].is_bound(bypass) {
-            let src = if bypass { Source::Input(topo.pad_of(topo.outputs[k])) } else { topo.outputs[k] };
+    io.bypass_bound.resize(outs.len(), usize::MAX);
+    for (k, out_desc) in out_descs.iter().enumerate() {
+        let pad = io.out_pad(topo, k);
+        if bypass {
+            check_bypass_pad(&ins, out_desc, pad)?;
+        }
+        if !io.outputs[k].is_bound(bypass) || (bypass && io.bypass_bound[k] != pad) {
+            let src = if bypass { Source::Input(pad) } else { topo.outputs[k] };
             let tex = source_texture(effects, &io.inputs, src);
             io.outputs[k].bind(device, conv, &tex, bypass);
+            if bypass {
+                io.bypass_bound[k] = pad;
+            }
             bound = true;
         }
     }
     io.allocations += bound as usize;
     if !bypass {
-        io.bind_copies(effects, topo);
+        io.bind_copies(effects, topo)?;
     }
 
     for (slot, f) in io.inputs.iter().zip(inputs) {
@@ -796,7 +876,7 @@ fn record_gpu(
                 io.frame_binds += effects[k].rebind(&sources.iter().collect::<Vec<_>>(), writes)? as usize;
             }
         }
-        io.bind_copies(effects, topo);
+        io.bind_copies(effects, topo)?;
     }
     for (k, out) in outs.iter().enumerate() {
         if !bypass && direct_out.contains(&Some(k)) {
@@ -804,7 +884,15 @@ fn record_gpu(
             io.gpu_outputs[k].unbind();
             continue;
         }
-        let src = if bypass { Source::Input(topo.pad_of(topo.outputs[k])) } else { topo.outputs[k] };
+        let src = if bypass {
+            let pad = io.out_pad(topo, k);
+            let desc = |width, height| Desc { format: out.format, width, height, premultiplied: false };
+            let ins: Vec<Desc> = inputs.iter().map(|f| desc(f.width, f.height)).collect();
+            check_bypass_pad(&ins, &desc(out.width, out.height), pad)?;
+            Source::Input(pad)
+        } else {
+            topo.outputs[k]
+        };
         let tex = source_texture(effects, &io.inputs, src);
         io.frame_binds += io.gpu_outputs[k].bind(device, queue, conv, &tex, &out.planes, &out.color)? as usize;
     }
@@ -1364,8 +1452,9 @@ impl EffectGraph {
         self.node_effects(node, "enable")
     }
 
-    /// Switches effect `k` on or off. An effect switched off passes its first input
-    /// through (it has that input's size, as every effect): nothing is planned or bound
+    /// Switches effect `k` on or off. An effect switched off passes an input (its first
+    /// unless [`EffectGraph::set_node_bypass`] picks another)
+    /// through, which must have its size: nothing is planned or bound
     /// again, so this is cheap enough to do on every frame.
     pub fn set_node_enabled(&mut self, k: usize, on: bool) -> Result<(), Error> {
         if k >= self.effects.len() {
@@ -1376,6 +1465,51 @@ impl EffectGraph {
         }
         self.io.enabled[k] = on;
         Ok(())
+    }
+
+    /// Picks the input effect `k` passes through when switched off (0, its first, by
+    /// default). Any input may be chosen; when it has another size than the effect's
+    /// output, processing fails while the effect is off.
+    pub fn set_node_bypass(&mut self, k: usize, input: usize) -> Result<(), Error> {
+        let Some(inputs) = self.topo.node_inputs.get(k) else {
+            return Err(Error::Param(format!("the {} has no effect {k}", self.what)));
+        };
+        if input >= inputs.len() {
+            return Err(Error::Param(format!(
+                "bypass {input} of effect {k} ({}): it has {} input{}",
+                self.labels[k],
+                inputs.len(),
+                if inputs.len() == 1 { "" } else { "s" }
+            )));
+        }
+        if self.io.bypass.len() != self.effects.len() {
+            self.io.bypass = vec![0; self.effects.len()];
+        }
+        self.io.bypass[k] = input;
+        Ok(())
+    }
+
+    /// The input effect `k` passes through when switched off.
+    pub fn node_bypass(&self, k: usize) -> usize {
+        self.io.bypass(k)
+    }
+
+    /// Picks the input pad every output passes when the whole graph is bypassed (a
+    /// frame processed without frame info: the filter disabled, or every effect off).
+    pub fn set_bypass_pad(&mut self, pad: BypassPad) -> Result<(), Error> {
+        if let BypassPad::Pad(p) = pad {
+            if p >= self.topo.nb_inputs {
+                return Err(Error::Param(format!("bypass {p}: the {} has {} inputs", self.what, self.topo.nb_inputs)));
+            }
+        }
+        self.io.bypass_pad = pad;
+        Ok(())
+    }
+
+    /// The input pad output `k` passes when the whole graph is bypassed, by the choice of
+    /// [`EffectGraph::set_bypass_pad`].
+    pub fn bypass_pad(&self, k: usize) -> usize {
+        self.io.out_pad(&self.topo, k)
     }
 
     /// Whether effect `k` runs (see [`EffectGraph::set_node_enabled`]).
@@ -1522,6 +1656,8 @@ impl EffectGraph {
             a.params = b.params.clone();
         }
         self.io.enabled = other.io.enabled.clone();
+        self.io.bypass = other.io.bypass.clone();
+        self.io.bypass_pad = other.io.bypass_pad;
         Ok(())
     }
 

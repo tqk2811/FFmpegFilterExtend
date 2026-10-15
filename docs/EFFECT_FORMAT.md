@@ -128,7 +128,7 @@ Each element of `passes`:
 
 The output has the same size as the first input. Input/texture/param names must be valid identifiers,
 must not collide with each other, must not start with `gpufx`, and must not use `globals`, `params`, `out_tex`, `smp`.
-A param must not be named `enable`: `<effect>.enable` switches an effect of a chain or graph.
+A param must not be named `enable` or `bypass`: `<effect>.enable` and `<effect>.bypass` switch an effect of a chain or graph.
 
 ## Writing WGSL shaders
 

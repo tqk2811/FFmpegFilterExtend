@@ -16,12 +16,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
 use gpufx_core::{
-    Backend, ChromaLocation, ColorInfo, Effect, EffectChain, EffectGraph, Frame, FrameInfo, FrameMut, GpuContext, Image, ImageMut, Matrix,
+    Backend, BypassPad, ChromaLocation, ColorInfo, Effect, EffectChain, EffectGraph, Frame, FrameInfo, FrameMut, GpuContext, Image, ImageMut, Matrix,
     Package, PixelFormat, Program, Range, StreamInfo,
 };
 
 /// Bumped when the C ABI changes incompatibly. Must match `GPUFX_API_VERSION` in gpufx.h.
-const API_VERSION: u32 = 10;
+const API_VERSION: u32 = 11;
 
 thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
@@ -618,6 +618,73 @@ pub unsafe extern "C" fn gpufx_effect_set_node_enabled(fx: *mut GpufxEffect, nod
             fx.graph.set_node_enabled(k, enabled != 0).map_err(|e| e.to_string())?;
         }
         Ok(0)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_set_node_bypass(fx: *mut GpufxEffect, node: *const c_char, input: c_int) -> c_int {
+    guard(-1, || {
+        let fx = fx.as_mut().ok_or("effect is NULL")?;
+        let effects = fx.graph.find_node(str_arg(node, "node")?).map_err(|e| e.to_string())?;
+        // Validate every effect first: an error leaves none of them changed.
+        let mut picked = Vec::with_capacity(effects.len());
+        for &k in &effects {
+            let input = match input {
+                GPUFX_BYPASS_LAST => fx.graph.effect_inputs(k).len().max(1) - 1,
+                i if i >= 0 => i as usize,
+                i => return Err(format!("bypass input {i}: not an input index nor GPUFX_BYPASS_LAST")),
+            };
+            if input >= fx.graph.effect_inputs(k).len().max(1) {
+                return Err(format!("effect {k} has no input {input}"));
+            }
+            picked.push((k, input));
+        }
+        for (k, input) in picked {
+            fx.graph.set_node_bypass(k, input).map_err(|e| e.to_string())?;
+        }
+        Ok(0)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_node_effects(fx: *const GpufxEffect, node: *const c_char, out: *mut c_int, capacity: c_int) -> c_int {
+    guard(-1, || {
+        let fx = fx.as_ref().ok_or("effect is NULL")?;
+        let effects = fx.graph.find_node(str_arg(node, "node")?).map_err(|e| e.to_string())?;
+        if !out.is_null() {
+            for (i, &k) in effects.iter().take(usize::try_from(capacity).unwrap_or(0)).enumerate() {
+                *out.add(i) = k as c_int;
+            }
+        }
+        Ok(effects.len() as c_int)
+    })
+}
+
+const GPUFX_BYPASS_FIRST: c_int = -1;
+const GPUFX_BYPASS_NODES: c_int = -2;
+const GPUFX_BYPASS_LAST: c_int = -3;
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_set_bypass(fx: *mut GpufxEffect, pad: c_int) -> c_int {
+    guard(-1, || {
+        let fx = fx.as_mut().ok_or("effect is NULL")?;
+        let pad = match pad {
+            GPUFX_BYPASS_FIRST => BypassPad::First,
+            GPUFX_BYPASS_NODES => BypassPad::Nodes,
+            p if p >= 0 => BypassPad::Pad(p as usize),
+            p => return Err(format!("bypass pad {p}: not an input index, GPUFX_BYPASS_FIRST nor GPUFX_BYPASS_NODES")),
+        };
+        fx.graph.set_bypass_pad(pad).map_err(|e| e.to_string())?;
+        Ok(0)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_bypass_pad(fx: *const GpufxEffect, output: c_int) -> c_int {
+    guard(-1, || {
+        let fx = fx.as_ref().ok_or("effect is NULL")?;
+        let k = usize::try_from(output).ok().filter(|&k| k < fx.graph.output_count()).ok_or_else(|| format!("no output {output}"))?;
+        Ok(fx.graph.bypass_pad(k) as c_int)
     })
 }
 

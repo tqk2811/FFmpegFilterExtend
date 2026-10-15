@@ -186,6 +186,13 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   filters (encoders, `null`, ...) and `off` get the GPU copy as before. The output frames context
   holds the frames context of every texture it relabelled, so the textures outlive every frame and
   every gpufx downstream that keeps wrappers of them.
+- **bypass** (`0`, `auto`; default `0`): which input a filter disabled by timeline `enable=` passes
+  (relabelled or copied as above). `0`: each output's source input pad (input 0 for one effect).
+  `auto`: that pad until the filter has been enabled for one frame, then the last input pad; made
+  for transitions (input 0 fading into the last input) that should go on showing the clip they
+  ended on: `[a][b]gpufx=effect=xfade.zip:enable='between(t,2,3)':bypass=auto`. After the first
+  window it keeps the last input, also before later windows. The chosen pad must have the size of
+  the output, else the event fails with an error (`EINVAL`), never another input.
 - **params**: `name=value` separated by `|`. A value is a literal (`0.5`, `1,0,0`, `#ff8800`)
   or an **FFmpeg expression** in `t`, `n`, `w`, `h`, `a` (`w/h`), `sar`, `dar` (`a*sar`),
   re-evaluated for every frame. This is how you do keyframes/transitions without external tools.
@@ -200,11 +207,26 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   rest of the graph stay as they are and toggling allocates nothing. Switching an effect off saves
   its shader work but not all of it: the copy is still one compute pass, and the effect keeps its
   output texture. With every effect off, the event is handled as a disabled filter (relabel when
-  `passthrough` allows, else the GPU bypass), and `n` still counts. A node is matched as spelled:
-  `invert.enable` and `0.enable` naming the same effect are two separate entries, and the one
-  evaluated last for a frame wins; a bare `.enable` (no effect name) is an error. Via `sendcmd`,
+  `passthrough` allows, else the GPU bypass), and `n` still counts. Names that give the same
+  effects (`invert.enable` and `0.enable`) are one entry, so `.enable` and `.bypass` may come from
+  different spellings, but each may be given once only (else "node given twice"); names giving
+  overlapping but unequal lists (a graph label of two effects and an index of one) stay separate
+  entries; a bare `.enable` (no effect name) is an error. Via `sendcmd`,
   `params 0.enable=1` switches an effect back on: an `.enable` entry cannot be removed, only
   replaced, by naming the same spelling of the node again.
+- **`<node>.bypass=0|auto`** in `params` (nodes named as for `.enable`; a bare `bypass` for a single
+  effect): the input an effect switched off copies. `0` (default) its first input; `auto` its first
+  input until its `.enable` expression has been true once, then its last input (an effect of one
+  input keeps it). Any input may be copied, so the plan keeps every input of an effect alive until
+  the effect's last pass. An input of another size than the effect's output makes the frame fail.
+  With every effect off, the outputs are the input pads the chosen inputs lead to. No package may
+  declare a parameter named `bypass`. A bare `bypass` inside `params` is the node bypass of the single
+  effect, not the filter option `bypass=` (which sets the input a filter disabled by `enable=` passes).
+  `auto` rests on the history of the frames processed: an `enable` window shorter than one frame
+  interval, or a stream whose first frame is already past the window (trim, seek), never sets it and
+  stays on input 0; it is not reset on a seek; after the first window it is always the last input.
+  FFI (API 11, also `gpufx_effect_node_effects`): `gpufx_effect_set_node_bypass`,
+  `gpufx_effect_set_bypass`, `gpufx_effect_bypass_pad`.
 - **sendcmd / zmq**: the `params` command changes values at run time, for example
   `sendcmd=c='2.0 gpufx@fx params strength=0.2'`.
 - **timeline** (`enable='between(t,1,3)'`) is supported.
@@ -329,7 +351,8 @@ The single quotes protect `;` and `[]` from the outer filter graph. Rules:
   unread input pads, label counts against a node's inputs, numeric output labels. Checked at configuration:
   the manifest size and format rules of every node (an edge carries its producer's size and the format
   negotiated between the two effects), and input pads read by effects with no common format.
-- With `enable=`, a disabled graph sends each output's source input pad converted to the output format.
+- With `enable=`, a disabled graph sends each output's source input pad (or the pad `bypass` picks)
+  converted to the output format.
 - Paths in a graph must not contain `[`, `]`, `;` or `|`.
 
 C API (v5, additive): `gpufx_effect_open_graph`, `gpufx_effect_output_count`, `gpufx_effect_output_name`,
