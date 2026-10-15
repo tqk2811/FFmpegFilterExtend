@@ -136,8 +136,8 @@ tạo graph thay vì chạy sai.
 ## 5. Filter FFmpeg `gpufx`
 
 ```
-gpufx=effect=<zip|thư mục>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)'][:backend=auto|vulkan|dx12][:shortest=0|1][:out_format=<pix_fmt>]
-gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backend=...][:shortest=0|1][:out_format=<pix_fmt>]
+gpufx=effect=<zip|thư mục>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)'][:backend=auto|vulkan|dx12][:shortest=0|1][:out_format=<pix_fmt>][:passthrough=auto|off]
+gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backend=...][:shortest=0|1][:out_format=<pix_fmt>][:passthrough=auto|off]
 ```
 
 - **effect**: đường dẫn gói. Số input của filter lấy từ manifest.
@@ -171,6 +171,19 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   được trả ra format đó, không thì format output đầu tiên GPU ghi được (xem "Frame Vulkan"). Dùng: `out_format=rgba` giữa các `gpufx` rời để filter ở giữa bỏ qua chuyển
   đổi YUV ↔ RGBA (filter cuối quay về bằng `out_format=nv12`).
   Giới hạn: một format cho mọi output của filter; với frame D3D chỉ nv12, p010le, rgba, rgba64le; với frame VideoToolbox chỉ nv12, p010le.
+- **passthrough** (`auto`, `off`; mặc định `auto`): filter làm gì khi timeline `enable=` tắt nó.
+  `auto` đưa cho mỗi output texture của input nguồn, gắn nhãn lại thành frame của output (buffer
+  của input cùng frames context của output link, không copy trên GPU) khi copy trên GPU sẽ giữ
+  nguyên pixel và filter kế tiếp là `gpufx`, `gpufx_download` hoặc `hwdownload` (các filter chỉ đọc
+  frame qua frames context và texture của nó). Điều kiện: frame GPU không do gpufx upload; cùng kích
+  thước, sw_format, device, colorspace, range và alpha mode với output link; `out_format` không đặt
+  hoặc trùng; texture mà frames context của output mô tả đúng: Vulkan cùng tiling, format từng
+  plane, cờ frame (trừ cờ multiplane), cờ tạo image và số layer, usage có đủ thứ bên đọc cần (sampled, transfer
+  source, host transfer nếu context của output có); D3D12 cùng DXGI format, không texture array;
+  D3D11 luôn được (hwdownload copy đúng texture và index của frame); VideoToolbox không bao giờ.
+  Nhiều output thì tất cả hoặc không cái nào. Filter kế tiếp khác (encoder, `null`...) và `off` thì
+  copy trên GPU như cũ. Frames context của output giữ frames context của mọi texture nó đã gắn
+  nhãn, nên texture sống lâu hơn mọi frame và mọi gpufx phía sau còn giữ wrapper của chúng.
 - **params**: `tên=giá trị` cách nhau bởi `|`. Giá trị là literal (`0.5`, `1,0,0`, `#ff8800`)
   hoặc **biểu thức FFmpeg** theo `t`, `n`, `w`, `h`, `a` (`w/h`), `sar`, `dar` (`a*sar`),
   tính lại mỗi frame. Đây là cách làm keyframe/transition không cần tool ngoài.

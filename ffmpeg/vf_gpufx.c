@@ -77,6 +77,12 @@
 static const char *const var_names[] = { "t", "n", "w", "h", "a", "sar", "dar", NULL };
 enum { VAR_T, VAR_N, VAR_W, VAR_H, VAR_A, VAR_SAR, VAR_DAR, VAR_NB };
 
+/* passthrough option: what a gpufx disabled by timeline enable= hands downstream. */
+enum {
+    PASSTHROUGH_OFF,  /* always the GPU bypass into the output's own frames */
+    PASSTHROUGH_AUTO, /* the input's texture relabelled as an output frame when nothing would change (see passthrough_ok) */
+};
+
 typedef struct ParamExpr {
     char *name;
     AVExpr *expr;
@@ -109,6 +115,8 @@ typedef struct GpufxContext {
     int warned_interlaced;
     int warned_hdr;
     enum AVPixelFormat out_format; /* forced output format, AV_PIX_FMT_NONE: chosen as before */
+    int passthrough;               /* PASSTHROUGH_* */
+    int logged_passthrough;        /* 1: relabel logged, 2: GPU copy logged */
     /* GPU frames: every output and GPU input is hw_fmt (Vulkan, D3D12, D3D11 or VideoToolbox). */
     enum AVPixelFormat hw_fmt;
     AVBufferRef *hw_device; /* the device libgpufx runs on, held while it does */
@@ -820,6 +828,9 @@ static int config_vulkan(AVFilterContext *ctx)
 }
 
 /*
+ * The output frames context is made here by gpufx alone: relabel_hold() relies on nobody
+ * else setting its free / user_opaque.
+ *
  * The frames context of a Vulkan output: one image per plane (libgpufx writes each plane
  * as its own storage image), in the source input's sw_format when the effect may output
  * it, else the first format of the output that gpufx converts on the GPU.
@@ -1146,6 +1157,8 @@ static int config_d3d_output(AVFilterLink *outlink, unsigned k)
     const enum AVPixelFormat want = s->out_format != AV_PIX_FMT_NONE ? s->out_format : s->hw_in_fmt[s->source[k]];
     const uint32_t count = gpufx_effect_output_pad_format_count(s->fx, k);
 
+    /* gpufx makes the output frames context alone: relabel_hold() relies on nobody else
+     * setting its free / user_opaque. */
     for (int j = -1; j < (int)count; j++) {
         enum AVPixelFormat fmt = j < 0 ? want : av_get_pix_fmt(gpufx_effect_output_pad_format(s->fx, k, j));
         const char *name = av_get_pix_fmt_name(fmt);
@@ -1646,15 +1659,60 @@ static int process_hw(AVFilterContext *ctx, const GpufxFrameInfo *info)
  */
 static int check_frame(AVFilterContext *ctx, unsigned i, const AVFrame *in)
 {
-    const AVFilterLink *link = ctx->inputs[i];
+    GpufxContext *s = ctx->priv;
+    AVFilterLink *link = ctx->inputs[i];
+    AVBufferRef *link_frames = ff_filter_link(link)->hw_frames_ctx;
+    AVHWFramesContext *fc, *lfc;
 
-    if (in->width == link->w && in->height == link->h && in->format == link->format)
+    if (in->width != link->w || in->height != link->h || in->format != link->format) {
+        av_log(ctx, AV_LOG_ERROR, "Input '%s' changed from %dx%d %s to %dx%d %s mid-stream, "
+               "which gpufx does not support.\n", ctx->input_pads[i].name,
+               link->w, link->h, av_get_pix_fmt_name(link->format),
+               in->width, in->height, av_get_pix_fmt_name(in->format));
+        return AVERROR(EINVAL);
+    }
+    if (s->up_frames[i])
+        return 0; /* software frames, uploaded by the filter */
+    if (!in->hw_frames_ctx || !link_frames) {
+        av_log(ctx, AV_LOG_ERROR, "Input '%s': a GPU frame without a frames context.\n",
+               ctx->input_pads[i].name);
+        return AVERROR(EINVAL);
+    }
+    if (in->hw_frames_ctx->data == link_frames->data)
         return 0;
-    av_log(ctx, AV_LOG_ERROR, "Input '%s' changed from %dx%d %s to %dx%d %s mid-stream, "
-           "which gpufx does not support.\n", ctx->input_pads[i].name,
-           link->w, link->h, av_get_pix_fmt_name(link->format),
-           in->width, in->height, av_get_pix_fmt_name(in->format));
-    return AVERROR(EINVAL);
+    /*
+     * A frame of another frames context than the link's: a disabled gpufx upstream hands
+     * on its own input frames (passthrough). The per-frame code reads frame->hw_frames_ctx;
+     * check here what config_inputs() checked on the link's.
+     */
+    fc  = (AVHWFramesContext *)in->hw_frames_ctx->data;
+    lfc = (AVHWFramesContext *)link_frames->data;
+    if (fc->sw_format != s->hw_in_fmt[i] || fc->device_ref->data != lfc->device_ref->data) {
+        av_log(ctx, AV_LOG_ERROR, "Input '%s': a frame of another frames context (%s on %s device) "
+               "than the link's (%s); gpufx needs the same sw_format and device.\n",
+               ctx->input_pads[i].name, av_get_pix_fmt_name(fc->sw_format),
+               fc->device_ref->data == lfc->device_ref->data ? "the same" : "another",
+               av_get_pix_fmt_name(s->hw_in_fmt[i]));
+        return AVERROR(EINVAL);
+    }
+#if CONFIG_VULKAN
+    if (fc->format == AV_PIX_FMT_VULKAN) {
+        const AVVulkanFramesContext *vk = fc->hwctx;
+        int ret;
+
+        if ((av_pix_fmt_count_planes(fc->sw_format) > 1 && vk->format[1] == VK_FORMAT_UNDEFINED) ||
+            !(vk->usage & VK_IMAGE_USAGE_SAMPLED_BIT) || gpufx_vk_host_copy_broken(fc)) {
+            av_log(ctx, AV_LOG_ERROR, "Input '%s': a frame of another Vulkan frames context whose "
+                   "images gpufx cannot read (multiplane, not sampled or host image copies; "
+                   "image usage 0x%x).\n", ctx->input_pads[i].name, vk->usage);
+            return AVERROR(ENOSYS);
+        }
+        /* libgpufx keeps wrappers of its images: hold it as long as the effect. */
+        if ((ret = hold_vk_frames(s, in->hw_frames_ctx)) < 0)
+            return ret;
+    }
+#endif
+    return 0;
 }
 
 /* Sets what the output frame takes from the output link instead of from input 0. */
@@ -1667,6 +1725,236 @@ static void set_output_props(AVFrame *out, const AVFrame *in0, AVFilterLink *inl
     out->time_base = outlink->time_base;
     out->sample_aspect_ratio = outlink->sample_aspect_ratio;
     out->alpha_mode          = outlink->alpha_mode;
+}
+
+/*
+ * Disabled by enable= (passthrough=auto): instead of copying each source input frame into a
+ * frame of the output's own frames context on the GPU, the output frame is the input's
+ * texture relabelled: hw_frames_ctx is the output link's, buf[]/data[] the input's. Only for
+ * the filters below, which read a frame through its hw_frames_ctx and its texture alone;
+ * others (encoders, hwmap, ...) may keep the frame or rely on its pool. hwdownload and
+ * gpufx_download take only frames of their link's frames context, so a plain clone of the
+ * input frame would be refused or read with the wrong layout.
+ */
+static const char *const relabel_filters[] = { "gpufx", "gpufx_download", "hwdownload" };
+
+/*
+ * The frames contexts a gpufx output context holds (its user_opaque): the contexts of the
+ * textures relabelled as its frames. A relabelled frame holds the output context, which
+ * holds the context of its texture: the texture's pool (and hwcontext state its free
+ * callback reads) lives until the last frame, and the last holder of the output context,
+ * is gone. gpufx downstream keeps wrappers of the Vulkan images it read, keyed by VkImage,
+ * while it holds the output context (hold_vk_frames): the images are not destroyed, and
+ * their handles not reused, before those wrappers are.
+ */
+typedef struct RelabelHold {
+    AVBufferRef **refs;
+    int nb;
+} RelabelHold;
+
+static void relabel_hold_free(AVHWFramesContext *fc)
+{
+    RelabelHold *h = fc->user_opaque;
+
+    if (!h)
+        return;
+    for (int i = 0; i < h->nb; i++)
+        av_buffer_unref(&h->refs[i]);
+    av_freep(&h->refs);
+    av_freep(&fc->user_opaque);
+}
+
+/*
+ * Assumes the output frames context is gpufx's own (made in config_vulkan_output() or the
+ * D3D output config) and nobody else sets its free / user_opaque. hwcontext.c frees a
+ * context in order pool_uninit, frames_uninit, then ctx->free, so the real input context
+ * held here outlives the output's pool and frames_uninit.
+ */
+static int relabel_hold(AVBufferRef *out_frames, AVBufferRef *src_frames)
+{
+    AVHWFramesContext *ofc = (AVHWFramesContext *)out_frames->data;
+    RelabelHold *h;
+    AVBufferRef *ref, **list;
+
+    if (!ofc->free) {
+        if (!(ofc->user_opaque = av_mallocz(sizeof(RelabelHold))))
+            return AVERROR(ENOMEM);
+        ofc->free = relabel_hold_free;
+    } else if (ofc->free != relabel_hold_free) {
+        return AVERROR_BUG; /* gpufx makes its output contexts: never set */
+    }
+    h = ofc->user_opaque;
+    for (int i = 0; i < h->nb; i++)
+        if (h->refs[i]->data == src_frames->data)
+            return 0;
+    if (!(list = av_realloc_array(h->refs, h->nb + 1, sizeof(*list))))
+        return AVERROR(ENOMEM);
+    h->refs = list;
+    if (!(ref = av_buffer_ref(src_frames)))
+        return AVERROR(ENOMEM);
+    h->refs[h->nb++] = ref;
+    return 0;
+}
+
+/*
+ * Whether the textures of frames context ifc can be read as frames of ofc (same device,
+ * sw_format and size checked by the caller): what gpufx, gpufx_download and hwdownload read
+ * from the frames context, they must find the same in the texture. NULL when they can,
+ * else why not.
+ */
+static const char *relabel_compatible(AVHWFramesContext *ifc, AVHWFramesContext *ofc)
+{
+    if (ifc->format != ofc->format)
+        return "other GPU API";
+    switch (ifc->format) {
+#if CONFIG_VULKAN
+    case AV_PIX_FMT_VULKAN: {
+        const AVVulkanFramesContext *iv = ifc->hwctx, *ov = ofc->hwctx;
+        /* Read by gpufx (sampled) and copied to buffers by hwdownload and gpufx_download.
+         * hwdownload takes the host image copy path when the output context has the usage
+         * (gpufx drops it, gpufx_hwframe_ctx_init): then the texture needs it too. */
+        const VkImageUsageFlags need = ov->usage & (VK_IMAGE_USAGE_SAMPLED_BIT |
+                                                    VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                                    VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT);
+
+        if (iv->tiling != ov->tiling)
+            return "Vulkan image tiling";
+        /* One image per plane or not: format[] says it (the device's disable_multiplane
+         * gives it without the flag); other flags (memory layout) must match. */
+        if ((iv->flags ^ ov->flags) & ~AV_VK_FRAME_FLAG_DISABLE_MULTIPLANE)
+            return "Vulkan frame flags";
+        for (int j = 0; j < FF_ARRAY_ELEMS(iv->format); j++)
+            if (iv->format[j] != ov->format[j])
+                return "Vulkan plane formats";
+        if ((need & iv->usage) != need)
+            return "Vulkan image usage";
+        /* Image views the readers make (mutable format, extended usage) must be allowed. */
+        if ((ov->img_flags & iv->img_flags) != ov->img_flags)
+            return "Vulkan image create flags";
+        if (iv->create_pnext || ov->create_pnext || iv->nb_layers != ov->nb_layers)
+            return "Vulkan image create chain or layers";
+        /* Frames are locked through the frame's context: same functions. */
+        if (iv->lock_frame != ov->lock_frame || iv->unlock_frame != ov->unlock_frame)
+            return "Vulkan frame locking";
+        return NULL;
+    }
+#endif
+#if CONFIG_D3D12VA
+    case AV_PIX_FMT_D3D12: {
+        const AVD3D12VAFramesContext *iv = ifc->hwctx, *ov = ofc->hwctx;
+
+        /* hwdownload copies subresources 0 and 1 of the texture in the context's format:
+         * no texture arrays. */
+        if (iv->format != ov->format)
+            return "D3D12 texture format";
+        if (iv->texture_array || ov->texture_array ||
+            (iv->flags & AV_D3D12VA_FRAME_FLAG_TEXTURE_ARRAY) || (ov->flags & AV_D3D12VA_FRAME_FLAG_TEXTURE_ARRAY))
+            return "D3D12 texture array";
+        return NULL;
+    }
+#endif
+#if CONFIG_D3D11VA
+    case AV_PIX_FMT_D3D11:
+        /* hwdownload copies subresource data[1] of texture data[0] into a staging texture of
+         * the context's size and of the first texture's DXGI format (the same: same
+         * sw_format); gpufx already reads this input's textures. No further D3D11 checks:
+         * hwcontext_d3d11va.c's transfer takes texture and array index from the frame's
+         * data[0] / data[1], and the staging texture from the shared DXGI format; a next
+         * gpufx can import the texture because this gpufx already read it. */
+        return NULL;
+#endif
+    default:
+        return "GPU API without relabelling";
+    }
+}
+
+/*
+ * Whether a disabled event can hand every output its source input's texture relabelled as
+ * an output frame (no GPU work): only when the GPU bypass would copy the pixels unchanged
+ * and the next filter is in relabel_filters. All outputs or none. NULL when it can, else why
+ * not (logged once).
+ */
+static const char *passthrough_ok(AVFilterContext *ctx)
+{
+    GpufxContext *s = ctx->priv;
+
+    if (s->passthrough == PASSTHROUGH_OFF)
+        return "passthrough=off";
+    for (unsigned k = 0; k < s->nb_outputs; k++) {
+        AVFilterLink *ol = ctx->outputs[k];
+        AVBufferRef *out_frames = ff_filter_link(ol)->hw_frames_ctx;
+        const int src = s->source[k];
+        const AVFrame *in = s->in[src];
+        const char *dst = ol->dst ? ol->dst->filter->name : "";
+        const char *why;
+        AVHWFramesContext *ifc, *ofc;
+        int listed = 0;
+
+        for (int j = 0; j < FF_ARRAY_ELEMS(relabel_filters); j++)
+            listed |= !strcmp(dst, relabel_filters[j]);
+        if (!listed)
+            return "the next filter is not gpufx, gpufx_download or hwdownload";
+        /* Not started (blank frame) or uploaded by the filter: no texture of its own to give. */
+        if (!in || s->up_frames[src] || !in->hw_frames_ctx || !out_frames)
+            return "no GPU input frame of its own";
+        if (in->format != ol->format || in->width != ol->w || in->height != ol->h)
+            return "another output format or size";
+        ifc = (AVHWFramesContext *)in->hw_frames_ctx->data;
+        ofc = (AVHWFramesContext *)out_frames->data;
+        if (ifc->sw_format != ofc->sw_format || ifc->width != ofc->width ||
+            ifc->height != ofc->height || ifc->device_ref->data != ofc->device_ref->data)
+            return "another sw_format, size or device than the output frames";
+        if (s->out_format != AV_PIX_FMT_NONE && s->out_format != ifc->sw_format)
+            return "out_format";
+        if (ifc != ofc && (why = relabel_compatible(ifc, ofc)))
+            return why;
+        /* The bypass would convert YUV to the output link's matrix and range; RGB pixels
+         * do not depend on them. Unspecified alpha is read as straight. */
+        if (!(av_pix_fmt_desc_get(ifc->sw_format)->flags & AV_PIX_FMT_FLAG_RGB) &&
+            (in->colorspace != ol->colorspace || in->color_range != ol->color_range))
+            return "another colorspace or range";
+        if (has_alpha(ifc->sw_format) &&
+            (in->alpha_mode == AVALPHA_MODE_PREMULTIPLIED) != (ol->alpha_mode == AVALPHA_MODE_PREMULTIPLIED))
+            return "another alpha mode";
+    }
+    return NULL;
+}
+
+/* Hands every output its source input's texture as an output frame (passthrough_ok() said so). */
+static int passthrough_frame(FFFrameSync *fs, const AVFrame *in0)
+{
+    AVFilterContext *ctx = fs->parent;
+    GpufxContext *s = ctx->priv;
+    int ret;
+
+    if (s->logged_passthrough != 1) {
+        av_log(ctx, AV_LOG_VERBOSE, "Disabled: relabelling the input frames as output frames "
+               "(passthrough, no GPU copy).\n");
+        s->logged_passthrough = 1;
+    }
+    for (unsigned k = 0; k < s->nb_outputs; k++) {
+        const AVFrame *in = s->in[s->source[k]];
+        AVBufferRef *out_frames = ff_filter_link(ctx->outputs[k])->hw_frames_ctx;
+        AVFrame *out;
+
+        if (in->hw_frames_ctx->data != out_frames->data &&
+            (ret = relabel_hold(out_frames, in->hw_frames_ctx)) < 0)
+            return ret;
+        /* The input's buffers (its texture, kept alive by them) and properties and side data. */
+        if (!(out = s->out[k] = av_frame_alloc()))
+            return AVERROR(ENOMEM);
+        if ((ret = av_frame_ref(out, in)) < 0)
+            return ret;
+        av_buffer_unref(&out->hw_frames_ctx);
+        if (!(out->hw_frames_ctx = av_buffer_ref(out_frames)))
+            return AVERROR(ENOMEM);
+        /* Same pixels: only the timing and what the link fixes come from input 0 and the
+         * output link. */
+        set_output_props(out, in0, ctx->inputs[0], ctx->outputs[k], fs->pts, fs->time_base);
+        out->colorspace  = ctx->outputs[k]->colorspace;
+        out->color_range = ctx->outputs[k]->color_range;
+    }
+    return 0;
 }
 
 /* Frees the output frames of an event that failed or was sent. */
@@ -1725,7 +2013,21 @@ static int process_frame(FFFrameSync *fs)
         }
     }
 
-    /* GPU outputs have their own frames context: their frames are always written, even disabled. */
+    if (ctx->is_disabled) {
+        const char *why = passthrough_ok(ctx);
+
+        if (!why) {
+            if ((ret = passthrough_frame(fs, in0)) < 0)
+                goto fail;
+            goto send;
+        }
+        if (s->logged_passthrough != 2) {
+            av_log(ctx, AV_LOG_VERBOSE, "Disabled: copying on the GPU (no passthrough: %s).\n", why);
+            s->logged_passthrough = 2;
+        }
+    }
+
+    /* GPU outputs have their own frames context: their frames are written, even disabled. */
     for (unsigned k = 0; k < s->nb_outputs; k++) {
         AVFilterLink *ol = ctx->outputs[k];
         AVFrame *out;
@@ -1772,6 +2074,7 @@ static int process_frame(FFFrameSync *fs)
             goto fail;
         s->frame_count++;
     }
+send:
     for (unsigned k = 0; k < s->nb_outputs; k++) {
         AVFrame *out = s->out[k];
 
@@ -2100,6 +2403,9 @@ static const AVOption gpufx_options[] = {
     { "backend",  "GPU API (testing only, auto follows the frames): auto, vulkan, dx12", OFFSET(backend),    AV_OPT_TYPE_STRING, { .str = "auto" }, 0, 0, FLAGS },
     { "shortest", "end when the shortest input ends",                OFFSET(shortest),    AV_OPT_TYPE_BOOL,   { .i64 = 0 },      0, 1, FLAGS },
     { "out_format", "output pixel format (also the sw_format of GPU frames), e.g. rgba between chained gpufx; default: chosen from the input", OFFSET(out_format), AV_OPT_TYPE_PIXEL_FMT, { .i64 = AV_PIX_FMT_NONE }, -1, INT_MAX, FLAGS },
+    { "passthrough", "when disabled by enable=, hand the input textures on without a GPU copy: auto, off", OFFSET(passthrough), AV_OPT_TYPE_INT, { .i64 = PASSTHROUGH_AUTO }, PASSTHROUGH_OFF, PASSTHROUGH_AUTO, FLAGS, .unit = "passthrough" },
+        { "off",  "always copy or convert on the GPU",                                          0, AV_OPT_TYPE_CONST, { .i64 = PASSTHROUGH_OFF },  0, 0, FLAGS, .unit = "passthrough" },
+        { "auto", "relabel the input frames as output frames when unchanged and the next filter is gpufx, gpufx_download or hwdownload", 0, AV_OPT_TYPE_CONST, { .i64 = PASSTHROUGH_AUTO }, 0, 0, FLAGS, .unit = "passthrough" },
     { NULL }
 };
 

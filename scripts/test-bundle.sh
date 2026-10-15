@@ -126,6 +126,55 @@ same() {
     if [ -n "$2" ] && [ "$2" = "$3" ]; then pass "$1"
     else fail "$1"; echo "    hw: $2"; echo "    sw: $3"; show_vk_log; echo "    --- last.log:"; cat "$CLIPS/last.log"; fi
 }
+# pt_md5 FORMAT FILTERS: framemd5 of 3 frames of A in FORMAT through FILTERS (which upload
+# them first), downloaded again; the verbose log goes to $CLIPS/pt.log.
+pt_md5() {
+    gpu_ff -i "$A" -frames:v 3 -an -vf "format=$1,$2,hwdownload,format=$1" -pix_fmt "$1" -v verbose \
+        -f framemd5 - 2> "$CLIPS/pt.log" | grep -v '^#' | awk -F, '{print $NF}'
+}
+# relabelled / copied: the last pt_md5 had a disabled gpufx hand on its input textures as
+# its output frames (no GPU work), or copy them on the GPU.
+relabelled() { grep -q "relabelling the input frames as output frames" "$CLIPS/pt.log"; }
+# relabelled_n N: that line was logged N times (once per disabled gpufx that relabels).
+relabelled_n() { [ "$(grep -c "relabelling the input frames as output frames" "$CLIPS/pt.log")" = "$1" ]; }
+relabelled_twice() { relabelled_n 2; }
+copied() { grep -q "Disabled: copying on the GPU" "$CLIPS/pt.log" && ! relabelled; }
+# pt_check NAME RESULT EXPECTED PATH: RESULT equals EXPECTED (when given) and the disabled
+# gpufx took PATH (relabelled or copied).
+pt_check() {
+    if [ -n "$2" ] && { [ -z "$3" ] || [ "$2" = "$3" ]; } && $4; then pass "$1"
+    else fail "$1"; echo "    got: $2"; echo "    want: $3"; tail -n 30 "$CLIPS/pt.log"; fi
+}
+# pt_tests LABEL FORMAT UPLOAD EXACT: a gpufx disabled by enable= on GPU frames of FORMAT
+# made by UPLOAD. EXACT=1: the GPU copy is exact for FORMAT (8-bit RGBA), so its frames can
+# be compared with the input's. A relabelled frame is the input's texture: always exact.
+pt_tests() {
+    l=$1 f=$2 u=$3 I="gpufx=effect=$FX/invert.zip"
+    PT_SRC=$(pt_md5 "$f" "$u")
+    PT_ONCE=$(pt_md5 "$f" "$u,$I")
+    # Into hwdownload, which takes only frames of its link's frames context: relabelled.
+    pt_check "$l: disabled gpufx relabels its input for hwdownload" "$(pt_md5 "$f" "$u,$I:enable=0")" "$PT_SRC" relabelled
+    # Into a second gpufx, which reads the input texture in place.
+    pt_check "$l: disabled gpufx relabels its input for the next gpufx" "$(pt_md5 "$f" "$u,$I:enable=0,$I")" "$PT_ONCE" relabelled
+    # Two disabled gpufx chained: the first relabels for the second, which relabels for hwdownload.
+    pt_check "$l: two disabled gpufx both relabel" "$(pt_md5 "$f" "$u,$I:enable=0,$I:enable=0")" "$PT_SRC" relabelled_twice
+    # passthrough=off: the GPU copy as before.
+    [ "$4" = 1 ] && want=$PT_ONCE || want=
+    pt_check "$l: passthrough=off keeps the GPU copy" "$(pt_md5 "$f" "$u,$I:enable=0:passthrough=off,$I")" "$want" copied
+    # A filter not known to read only the texture (null here) next: the GPU copy.
+    [ "$4" = 1 ] && want=$PT_SRC || want=
+    pt_check "$l: other next filter keeps the GPU copy" "$(pt_md5 "$f" "$u,$I:enable=0,null")" "$want" copied
+    # Another output format than the input's: the copy converts, nothing is relabelled.
+    # Vulkan only: out_format=rgba fails at configure on D3D frames (RTX 4060, FFmpeg 9).
+    if [ "$f" != rgba ] && [ "${l#Vulkan}" != "$l" ]; then
+        pt_check "$l: out_format=rgba keeps the GPU conversion" \
+            "$(pt_md5 "$f" "$u,$I:enable=0:out_format=rgba,$I:out_format=$f")" "" copied
+    fi
+    # Disabled after the first frame, into hwdownload: the later frames are the input's.
+    PT_EN=$(pt_md5 "$f" "$u,$I:enable='eq(n\,0)'")
+    pt_check "$l: frames after enable= turns off equal the input" "$PT_EN" \
+        "$(echo "$PT_ONCE" | head -n 1; echo "$PT_SRC" | tail -n +2)" relabelled
+}
 # Main frame count, without gpufx (the late input tests compare against it).
 MAIN_N=$("$FF" -hide_banner -nostdin -v error -i "$A" -an -vf "format=rgba" -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | wc -l | tr -d ' ')
 
@@ -255,6 +304,22 @@ if [ -n "$ONCE_MD5" ] && [ "$SHARED_MD5" = "$ONCE_MD5" ]; then
     pass "same package twice keeps parameters per filter"
 else
     fail "same package twice keeps parameters per filter"; cat "$CLIPS/last.log"
+fi
+echo "disabled by enable= (passthrough):"
+pt_tests "Vulkan rgba" rgba "$UP" 1
+pt_tests "Vulkan nv12" nv12 "$UP" 0
+# Into gpufx_download, which copies by the layout of its link's frames context: relabelled,
+# same pixels as the input.
+if grep -qw gpufx_download "$CLIPS/filters.txt"; then
+    for f in rgba nv12; do
+        dl() {
+            gpu_ff -i "$A" -frames:v 3 -an -vf "format=$f,$UP,$1gpufx_download,format=$f" -pix_fmt $f -v verbose \
+                -f framemd5 - 2> "$CLIPS/pt.log" | grep -v '^#' | awk -F, '{print $NF}'
+        }
+        DL_SRC=$(dl "")
+        pt_check "Vulkan $f: disabled gpufx relabels its input for gpufx_download" \
+            "$(dl "gpufx=effect=$FX/invert.zip:enable=0,")" "$DL_SRC" relabelled
+    done
 fi
 echo "chains in one filter:"
 # effect='a|b' runs both on the GPU in one go: same pixels as two filters in a row.
@@ -688,6 +753,7 @@ for api in d3d12va d3d11va; do
     same "$API: invert twice equals software frames" \
         "$(dx_md5 nv12 "gpufx=effect=$FX/invert.zip,gpufx=effect=$FX/invert.zip")" \
         "$(sw_md5 nv12 "gpufx=effect=$FX/invert.zip,gpufx=effect=$FX/invert.zip")"
+    pt_tests "$API nv12" nv12 hwupload 0
     # One frame on two input pads (split before gpufx).
     G="[0]split[a][b]; [a]$FX/gaussian-blur.zip[ba]; [b]$FX/grayscale.zip|$FX/vignette.zip[gb]; [ba][gb]$FX/crossfade.zip[x]; [x][1]$FX/wipe-transition.zip[out]"
     same "$API: graph equals software frames" \

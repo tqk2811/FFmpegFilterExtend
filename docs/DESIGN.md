@@ -137,8 +137,8 @@ initialize the graph instead of running incorrectly.
 ## 5. The `gpufx` FFmpeg filter
 
 ```
-gpufx=effect=<zip|directory>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)'][:backend=auto|vulkan|dx12][:shortest=0|1][:out_format=<pix_fmt>]
-gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backend=...][:shortest=0|1][:out_format=<pix_fmt>]
+gpufx=effect=<zip|directory>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)'][:backend=auto|vulkan|dx12][:shortest=0|1][:out_format=<pix_fmt>][:passthrough=auto|off]
+gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backend=...][:shortest=0|1][:out_format=<pix_fmt>][:passthrough=auto|off]
 ```
 
 - **effect**: path to the package. The filter's number of inputs comes from the manifest.
@@ -172,6 +172,20 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   is uploaded in) when the effect may output it, else its first output format the GPU writes (see "Vulkan frames"). Use: `out_format=rgba` between separate `gpufx` filters, so the middle
   ones skip the YUV ↔ RGBA conversions (the last one goes back with `out_format=nv12`).
   Limits: one format for every output of the filter; on D3D frames only nv12, p010le, rgba and rgba64le; on VideoToolbox frames nv12 and p010le.
+- **passthrough** (`auto`, `off`; default `auto`): what the filter does while timeline `enable=`
+  turns it off. `auto` hands each output its source input's texture relabelled as an output frame
+  (the input's buffers with the output link's frames context, no GPU copy) when the GPU copy would
+  leave the pixels unchanged and the next filter is `gpufx`, `gpufx_download` or `hwdownload`
+  (filters that read a frame only through its frames context and texture). It needs a GPU frame not
+  uploaded by gpufx; the same size, sw_format, device, colorspace, range and alpha mode as the
+  output link; `out_format` unset or the same; and textures the output's frames context can
+  describe: Vulkan same tiling, plane formats, frame flags (but the multiplane one), create flags and layers and at
+  least the usage readers need (sampled, transfer source, host transfer when the output context
+  has it); D3D12 same DXGI format, no texture array; D3D11 any (hwdownload copies the frame's
+  texture and index); VideoToolbox never. With several outputs, all of them or none. Other next
+  filters (encoders, `null`, ...) and `off` get the GPU copy as before. The output frames context
+  holds the frames context of every texture it relabelled, so the textures outlive every frame and
+  every gpufx downstream that keeps wrappers of them.
 - **params**: `name=value` separated by `|`. A value is a literal (`0.5`, `1,0,0`, `#ff8800`)
   or an **FFmpeg expression** in `t`, `n`, `w`, `h`, `a` (`w/h`), `sar`, `dar` (`a*sar`),
   re-evaluated for every frame. This is how you do keyframes/transitions without external tools.
