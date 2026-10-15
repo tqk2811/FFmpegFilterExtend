@@ -90,3 +90,59 @@ What the numbers say:
   0.14 s for `xfade`), so short clips gain less.
 - Not measured yet: Vulkan hw frames end to end (`-hwaccel vulkan` → gpufx → GPU encode), which skips the
   upload and readback.
+
+## Joining six clips with five transitions
+
+Build `c62d150` (win64 bundle), measured on 2026-10-15, same machine as above.
+
+- **Input**: six H.264 clips A–F made from `testsrc2`, each with its RGB channels in another order (CRF 12,
+  yuv420p, BT.709 limited range), 1920×1080, 30 fps, 10 s each (300 frames). A 1 s fade at each of the 5 joins:
+  output 55 s, 1650 frames, `-f null`. Software decode in every row.
+- **Three ways** (the full filter scripts are passed with `-/filter_complex <file>`):
+  1. CPU: FFmpeg 8.0.1, chain of 5 `xfade=transition=fade:duration=1:offset=9|18|27|36|45`, then
+     `format=yuv420p`.
+  2. Five separate `gpufx`, one per join, each on only while its transition runs:
+     `[x1][u2]gpufx=effect=effects/crossfade.zip:params='progress=clip(t-18\,0\,1)':enable='between(t,18,19)':bypass=auto[x2]`.
+     Outside its window a filter hands on its input texture relabelled (`passthrough=auto`): input 0 before
+     the transition and the incoming clip after it (`bypass=auto`).
+  3. One `gpufx` with a graph of 5 crossfades, each switched by `<node>.enable` / `<node>.bypass`:
+     `[u0]...[u5]gpufx=graph='[0][1]effects/crossfade.zip[x1]; [x1][2]effects/crossfade.zip[x2]; ...[out]':params='x1.progress=clip(t-9\,0\,1)|x1.enable=between(t\,9\,10)|x1.bypass=auto|...'`.
+- **Inputs of the gpufx ways**: each clip is uploaded once (`gpufx_upload`, Vulkan device
+  `vulkan=vk:0,disable_multiplane=1`) and shifted to its join (`setpts=PTS+9*k/TB`). Clip A is held on its last
+  frame with `tpad=stop_mode=clone:stop_duration=45` (GPU frames, nothing uploaded again), because the first input
+  sets the length of a gpufx; a clip that has not started yet is a black frame and is never shown. The output goes
+  through `gpufx_download,format=yuv420p`. D3D rows: `-init_hw_device d3d11va=dx:0`, `format=nv12,hwupload` and
+  `hwdownload,format=nv12`.
+- Median of 3 runs per column; wall time measured around the process, `utime`/`rtime`/`maxrss` from
+  `-benchmark`. fps = 1650 / wall time.
+
+| Way | Wall | fps | rtime | utime | maxrss |
+|---|---|---|---|---|---|
+| Decode only (6 clips, no filter) | 1.07 s | – | 0.87 s | 20.3 s | 868 MB |
+| 1. 5 × `xfade` fade (CPU, FFmpeg 8.0.1) | 3.19 s | 518 | 2.96 s | 27.3 s | 1618 MB |
+| 2. 5 × `gpufx` + `enable`/`bypass=auto`, Vulkan | 2.62 s | 631 | 1.96 s | 13.8 s | 845 MB |
+| 3. one `gpufx` graph + `<node>.enable`/`.bypass`, Vulkan | **2.61 s** | 632 | 2.00 s | 13.3 s | 847 MB |
+| 2., without `gpufx_download` | 2.63 s | 627 | 1.96 s | 13.7 s | 836 MB |
+| 3., without `gpufx_download` | 3.43 s (2.7–3.8) | 482 | 2.60 s | 17.6 s | 831 MB |
+| 2., `passthrough=off` (GPU copy while off) | 5.83 s | 283 | 4.94 s | 16.9 s | 873 MB |
+| 2., D3D11 frames, `hwupload`/`hwdownload` | 5.10 s | 323 | 4.67 s | 15.9 s | 938 MB |
+| 3., D3D11 frames, `hwupload`/`hwdownload` | 5.07 s | 325 | 4.61 s | 15.6 s | 938 MB |
+
+**Correctness**: the outputs of ways 2 and 3 are bit identical (Vulkan and D3D11 alike). Outside the
+transitions they equal the decoded clips bit for bit (relabelled frames, no conversion). `crossfade.zip` mixes
+with `smoothstep(progress)`, not linearly like `xfade` fade, so it was checked against
+`xfade=transition=custom` with the same curve: PSNR 47.0 dB average, 45.3 dB minimum over the 155 transition
+frames (YUV → RGBA → YUV and rounding); 46.4 dB over the other frames, where `xfade` itself converts to yuv444p
+and back. Against the linear `fade` the transition frames drop to 26.8 dB in the middle of each half, as
+expected from the different curve.
+
+What the numbers say:
+
+- Five transitions in a 55 s join: gpufx is about 1.2× faster than the CPU in wall time and needs half the CPU
+  time and half the RAM. The run is bound by decoding the six clips; the shaders run for only 155 of 1650 frames.
+- Five separate gpufx with `enable=` and one graph with `<node>.enable` cost the same: while off, a filter
+  hands its texture on without a copy, so a chain of disabled filters is nearly free.
+- `passthrough=off` makes each disabled filter copy (and convert) the frame on the GPU: 2.2× slower, and the
+  YUV → RGBA → YUV round trip of every copy lowers the chroma (PSNR 37 dB against the relabelled output).
+- Dropping `gpufx_download` gains nothing: its copies already overlap the rest.
+- D3D11 frames are about 2× slower than Vulkan here (`hwupload`/`hwdownload` wait for every copy, see above).

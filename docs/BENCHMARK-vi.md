@@ -87,3 +87,56 @@ Nhận xét:
 - Khởi động một `gpufx` mất khoảng 0.4 s (tạo device, biên dịch shader: 0.5 s cho một frame so với 0.14 s của
   `xfade`), nên clip ngắn được lợi ít hơn.
 - Chưa đo: frame Vulkan suốt đường (`-hwaccel vulkan` → gpufx → encode trên GPU), bỏ được upload và readback.
+
+## Nối sáu clip với năm chuyển cảnh
+
+Bản build `c62d150` (bundle win64), đo ngày 2026-10-15, cùng máy như trên.
+
+- **Input**: sáu clip H.264 A–F tạo từ `testsrc2`, mỗi clip đảo thứ tự kênh RGB khác nhau (CRF 12, yuv420p,
+  BT.709 limited range), 1920×1080, 30 fps, mỗi clip 10 s (300 frame). Fade 1 s ở mỗi chỗ nối trong 5 chỗ nối:
+  output 55 s, 1650 frame, `-f null`. Mọi dòng đều decode bằng CPU.
+- **Ba cách** (script filter đầy đủ truyền bằng `-/filter_complex <file>`):
+  1. CPU: FFmpeg 8.0.1, chuỗi 5 `xfade=transition=fade:duration=1:offset=9|18|27|36|45`, rồi `format=yuv420p`.
+  2. Năm `gpufx` riêng, mỗi chỗ nối một filter, chỉ bật trong lúc chuyển cảnh của nó:
+     `[x1][u2]gpufx=effect=effects/crossfade.zip:params='progress=clip(t-18\,0\,1)':enable='between(t,18,19)':bypass=auto[x2]`.
+     Ngoài cửa sổ, filter chuyền texture input đi dưới nhãn mới (`passthrough=auto`, không copy): input 0 trước
+     chuyển cảnh và clip mới sau chuyển cảnh (`bypass=auto`).
+  3. Một `gpufx` với graph gồm 5 crossfade, bật tắt từng node bằng `<node>.enable` / `<node>.bypass`:
+     `[u0]...[u5]gpufx=graph='[0][1]effects/crossfade.zip[x1]; [x1][2]effects/crossfade.zip[x2]; ...[out]':params='x1.progress=clip(t-9\,0\,1)|x1.enable=between(t\,9\,10)|x1.bypass=auto|...'`.
+- **Input của hai cách gpufx**: mỗi clip upload một lần (`gpufx_upload`, device Vulkan
+  `vulkan=vk:0,disable_multiplane=1`) rồi dời tới chỗ nối của nó (`setpts=PTS+9*k/TB`). Clip A giữ frame cuối bằng
+  `tpad=stop_mode=clone:stop_duration=45` (frame GPU, không upload lại), vì input đầu quyết định độ dài của gpufx;
+  clip chưa bắt đầu là frame đen và không bao giờ được hiện. Output qua `gpufx_download,format=yuv420p`. Dòng D3D:
+  `-init_hw_device d3d11va=dx:0`, `format=nv12,hwupload` và `hwdownload,format=nv12`.
+- Lấy trung vị của 3 lần cho từng cột; thời gian thực đo bao quanh tiến trình, `utime`/`rtime`/`maxrss` lấy từ
+  `-benchmark`. fps = 1650 / thời gian thực.
+
+| Cách | Thời gian | fps | rtime | utime | maxrss |
+|---|---|---|---|---|---|
+| Chỉ decode (6 clip, không filter) | 1.07 s | – | 0.87 s | 20.3 s | 868 MB |
+| 1. 5 × `xfade` fade (CPU, FFmpeg 8.0.1) | 3.19 s | 518 | 2.96 s | 27.3 s | 1618 MB |
+| 2. 5 × `gpufx` + `enable`/`bypass=auto`, Vulkan | 2.62 s | 631 | 1.96 s | 13.8 s | 845 MB |
+| 3. một graph `gpufx` + `<node>.enable`/`.bypass`, Vulkan | **2.61 s** | 632 | 2.00 s | 13.3 s | 847 MB |
+| 2., không `gpufx_download` | 2.63 s | 627 | 1.96 s | 13.7 s | 836 MB |
+| 3., không `gpufx_download` | 3.43 s (2.7–3.8) | 482 | 2.60 s | 17.6 s | 831 MB |
+| 2., `passthrough=off` (copy trên GPU khi tắt) | 5.83 s | 283 | 4.94 s | 16.9 s | 873 MB |
+| 2., frame D3D11, `hwupload`/`hwdownload` | 5.10 s | 323 | 4.67 s | 15.9 s | 938 MB |
+| 3., frame D3D11, `hwupload`/`hwdownload` | 5.07 s | 325 | 4.61 s | 15.6 s | 938 MB |
+
+**Độ đúng**: output của cách 2 và 3 giống nhau từng bit (cả Vulkan lẫn D3D11). Ngoài các đoạn chuyển cảnh, chúng
+giống từng bit với clip đã decode (frame chỉ đổi nhãn, không chuyển đổi). `crossfade.zip` trộn theo
+`smoothstep(progress)` chứ không tuyến tính như `xfade` fade, nên được so với `xfade=transition=custom` cùng đường
+cong: PSNR trung bình 47.0 dB, thấp nhất 45.3 dB trên 155 frame chuyển cảnh (YUV → RGBA → YUV và làm tròn); 46.4 dB
+ở các frame còn lại, nơi chính `xfade` đổi sang yuv444p rồi đổi lại. So với `fade` tuyến tính thì frame chuyển cảnh
+xuống 26.8 dB ở giữa mỗi nửa, đúng như dự kiến vì khác đường cong.
+
+Nhận xét:
+
+- Năm chuyển cảnh trong 55 s: gpufx nhanh hơn CPU khoảng 1.2 lần về thời gian thực, tốn một nửa thời gian CPU và
+  một nửa RAM. Phần chậm nhất là decode sáu clip; shader chỉ chạy ở 155 trên 1650 frame.
+- Năm `gpufx` riêng với `enable=` và một graph với `<node>.enable` tốn như nhau: khi tắt, filter chuyền texture đi
+  không copy, nên một chuỗi filter đang tắt gần như không tốn gì.
+- `passthrough=off` bắt mỗi filter đang tắt copy (và chuyển đổi) frame trên GPU: chậm hơn 2.2 lần, và vòng
+  YUV → RGBA → YUV của mỗi lần copy làm giảm chroma (PSNR 37 dB so với output đổi nhãn).
+- Bỏ `gpufx_download` không nhanh hơn: các lần copy của nó vốn đã chạy chồng lên phần còn lại.
+- Frame D3D11 chậm hơn Vulkan khoảng 2 lần ở đây (`hwupload`/`hwdownload` chờ từng lần copy, xem ở trên).

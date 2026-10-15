@@ -229,3 +229,7 @@
 - **Vị trí**: [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`add_node_expr`), [crates/gpufx-ffi/src/lib.rs](../crates/gpufx-ffi/src/lib.rs) (`gpufx_effect_find_node`), [crates/gpufx-core/src/graph.rs](../crates/gpufx-core/src/graph.rs) (`find_node`).
 - **Vì sao**: FFI trả tập effect của một tên node thì C có thể từ chối hai mục chồng nhau, tránh kết quả phụ thuộc thứ tự.
 - **Ngày ghi**: 2026-10-15
+
+### [Thấp] `passthrough=off`: mỗi gpufx tắt copy qua RGBA làm chroma giảm dần
+
+Vấn đề: với `passthrough=off` (hoặc khi không gắn nhãn được), gpufx bị tắt copy frame trên GPU qua một vòng YUV→RGBA→YUV. Chuỗi 5 gpufx tắt liên tiếp làm chroma giảm còn khoảng 37 dB so với bản gắn nhãn, và chậm hơn 2,2 lần (bài đo nối 6 clip trong `docs/BENCHMARK-vi.md`). Vị trí: `passthrough_frame` / nhánh copy trong `ffmpeg/vf_gpufx.c`. Nên làm: khi input và output cùng `sw_format` thì copy thẳng từng plane (không đổi màu). Ghi ngày 2026-10-15.
