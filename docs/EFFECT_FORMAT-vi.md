@@ -315,7 +315,9 @@ let x = gpufx_expr_path_x(u, p, x0);   // tham số theo thứ tự `vars`, đ�
   (`sendcmd` báo lại) và giữ biểu thức đúng gần nhất; stream vẫn chạy tiếp. Biểu thức mặc định dùng
   pipeline chung của mọi hiệu ứng mở từ gói.
 - Trên dòng lệnh FFmpeg, dấu phẩy trong `effect='...'`/`graph='...'` phải escape như mọi option của filter, còn
-  dấu `:` giữa các key inline viết là `\:`: `effect='x.zip=angle=max(90*u\,0)\:speed=2'`.
+  các key inline phân tách bằng `&` (không cần escape): `effect='x.zip=angle=max(90*u\,0)&speed=2'`. Dấu `:` kiểu
+  FFmpeg cũng được chấp nhận nhưng ở đó phải viết `\:` (`...\,0)\:speed=2`). Trong chuỗi effect, `\&` là `&`
+  nguyên văn (tập ký tự escape được: `\ ' : & ; | = [ ]`).
 
 ## Ví dụ có sẵn
 

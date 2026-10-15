@@ -36,7 +36,7 @@ Video effects powered by **GPU shaders** for FFmpeg, loaded from external **`.zi
 # gpufx outputs GPU frames: give it a device (it uploads software inputs itself) and
 # download before the encoder
 ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i a.mp4 -i b.mp4 -filter_complex \
-  "[0][1]gpufx=effect='wipe-transition.zip=progress=clip((t-1)/1.5\,0\,1)\:angle=45',hwdownload,format=yuv420p" out.mp4
+  "[0][1]gpufx=effect='wipe-transition.zip=progress=clip((t-1)/1.5\,0\,1)&angle=45',hwdownload,format=yuv420p" out.mp4
 ```
 
 ```sh
@@ -55,9 +55,10 @@ frame and `bypass=0|auto` picks the input it copies while off. They are separate
 `bypass` other than `0`/`auto` is an error that names the effect and the key.
 
 - Put the whole `effect=`/`graph=` value in `'...'`. FFmpeg splits filter options at `:` *after* it removes
-  those quotes, so write the `:` between inline keys as `\:` (a single key needs none:
-  `effect='vignette.zip=strength=0.7'`). Commas in expressions are escaped `\,` as for any filter option.
-- Inside the effect string, `\` escapes one of `\ ' : ; | = [ ]` (before any other character it stays literal, so
+  those quotes, so separate inline keys with `&` (`effect='x.zip=a=1&b=2'`, no escaping needed at the FFmpeg
+  level). The FFmpeg-style `:` also works but must be written `\:` there (`effect='x.zip=a=1\:b=2'`); a single
+  key needs no separator. Commas in expressions are escaped `\,` as for any filter option.
+- Inside the effect string, `\` escapes one of `\ ' : & ; | = [ ]` (`\&` is a literal `&` in a value; before any other character it stays literal, so
   Windows paths work) and `'...'` quotes a value.
 - `sendcmd` is a runtime command, not a filter option: `sendcmd=c='0.5 gpufx@g params gb.strength=0.2'` sets
   `node.name=value` pairs (separated by `|`) while the stream runs; see [design](docs/DESIGN.md).

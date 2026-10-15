@@ -200,11 +200,12 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip=k=v[out]'[:backend=...][:s
   An unknown key is an error naming the effect and the key; so is a key given twice. The filter has no
   `params` option; to change values while the stream runs use the `sendcmd` command below.
   - **Escaping.** Put the whole `effect=`/`graph=` value in `'...'`. FFmpeg's own option parser splits the filter
-    options at `:` *after* it removes those quotes, so in an ffmpeg command line the `:` between inline keys is
-    written `\:` (a single key needs none), and commas in expressions keep the usual `\,`:
-    `-vf "gpufx=effect='wipe.zip=progress=clip(t/2\,0\,1)\:angle=45'"`,
+    options at `:` *after* it removes those quotes, so in an ffmpeg command line inline keys are separated by `&`
+    (needs no escaping; the FFmpeg-style `:` is also accepted but must be written `\:`, e.g. `a=1\:b=2`; a single
+    key needs no separator), and commas in expressions keep the usual `\,`:
+    `-vf "gpufx=effect='wipe.zip=progress=clip(t/2\,0\,1)&angle=45'"`,
     `effect='vignette.zip=strength=0.7'`. Inside the effect/graph string itself (after FFmpeg's unescaping),
-    `\` escapes one of `\ ' : ; | = [ ]` (before any other character the `\` stays literal, so Windows paths
+    `\` escapes one of `\ ' : & ; | = [ ]` (`\&` is a literal `&` in a value; before any other character the `\` stays literal, so Windows paths
     work) and `'...'` quotes a value; commas need no escaping at this level.
 - **Inline `enable=<expr>`** on an effect switches that effect per frame (on while the expression is not 0; a
   constant is an expression too): `effect='a.zip|b.zip=enable=lt(t\,2)'`. In a graph node of several effects
@@ -254,11 +255,11 @@ Examples:
 VK="-init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk"   # or d3d12va=dx ... dx
 
 # 1 input, parameter animated over time (gpufx uploads the frame, hwdownload brings it back)
-ffmpeg $VK -i in.mp4 -vf "gpufx=effect='vignette.zip=strength=clip(t/2\,0\,1)\:color=#200040',hwdownload,format=yuv420p" out.mp4
+ffmpeg $VK -i in.mp4 -vf "gpufx=effect='vignette.zip=strength=clip(t/2\,0\,1)&color=#200040',hwdownload,format=yuv420p" out.mp4
 
 # 2-input transition
 ffmpeg $VK -i a.mp4 -i b.mp4 -filter_complex \
-  "[0][1]gpufx=effect='wipe-transition.zip=progress=clip((t-1)/1.5\,0\,1)\:angle=45',hwdownload,format=yuv420p" out.mp4
+  "[0][1]gpufx=effect='wipe-transition.zip=progress=clip((t-1)/1.5\,0\,1)&angle=45',hwdownload,format=yuv420p" out.mp4
 
 # chaining several effects: two filters, the frame stays on the GPU between them
 ffmpeg $VK -i in.mp4 -vf "gpufx=effect=gaussian-blur.zip,gpufx=effect='gradient-map.zip=intensity=0.6',hwdownload,format=yuv420p" out.mp4
@@ -351,7 +352,7 @@ The single quotes protect `;` and `[]` from the outer filter graph. Rules:
   `Effect` runs through the same code. `effect` and `graph` are mutually exclusive.
 - Parameters are written inline after each package of a node (`[b]grayscale.zip|vignette.zip=strength=0.6[gb]`, see
   "Inline parameters" in section 5), so a graph example with values reads
-  `graph='[0]split[a][b]; [a]gaussian-blur.zip=radius=8[ba]; [b]grayscale.zip|vignette.zip=strength=0.6[gb]; [ba][gb]crossfade.zip=progress=clip((t-1)/1.5\,0\,1)\:enable=between(t\,1\,3)\:bypass=auto[x]'`.
+  `graph='[0]split[a][b]; [a]gaussian-blur.zip=radius=8[ba]; [b]grayscale.zip|vignette.zip=strength=0.6[gb]; [ba][gb]crossfade.zip=progress=clip((t-1)/1.5\,0\,1)&enable=between(t\,1\,3)&bypass=auto[x]'`.
   `sendcmd` addresses values at run time as `node.name=value` over all packages of the graph in statement order
   (package label, 0-based index, bare name, or a node's output label: `ba.radius`, `gb.strength` finds the one
   effect of `grayscale|vignette` that has `strength`).

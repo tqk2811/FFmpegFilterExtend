@@ -198,11 +198,12 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip=k=v[out]'[:backend=...][:s
   Key lạ là lỗi có nêu tên effect và key; key cho hai lần cũng vậy. Filter không có option `params`; muốn đổi
   giá trị trong lúc stream chạy thì dùng lệnh `sendcmd` bên dưới.
   - **Escape.** Bọc cả giá trị `effect=`/`graph=` trong `'...'`. Bộ parse option của FFmpeg tách option của filter
-    tại `:` *sau khi* đã bỏ các dấu nháy đó, nên trên dòng lệnh ffmpeg dấu `:` giữa các key inline phải viết là
-    `\:` (chỉ một key thì không cần), còn dấu phẩy trong biểu thức giữ `\,` như thường lệ:
-    `-vf "gpufx=effect='wipe.zip=progress=clip(t/2\,0\,1)\:angle=45'"`,
+    tại `:` *sau khi* đã bỏ các dấu nháy đó, nên trên dòng lệnh ffmpeg các key inline phân tách bằng `&` (không
+    cần escape; dấu `:` kiểu FFmpeg cũng được chấp nhận nhưng phải viết `\:`, vd `a=1\:b=2`; một key thì không cần
+    dấu phân tách), còn dấu phẩy trong biểu thức giữ `\,` như thường lệ:
+    `-vf "gpufx=effect='wipe.zip=progress=clip(t/2\,0\,1)&angle=45'"`,
     `effect='vignette.zip=strength=0.7'`. Bên trong chính chuỗi effect/graph (sau khi FFmpeg đã bỏ escape),
-    `\` escape một ký tự trong `\ ' : ; | = [ ]` (đứng trước ký tự khác thì `\` giữ nguyên, nên đường dẫn
+    `\` escape một ký tự trong `\ ' : & ; | = [ ]` (`\&` là `&` nguyên văn trong giá trị; đứng trước ký tự khác thì `\` giữ nguyên, nên đường dẫn
     Windows vẫn dùng được) và `'...'` bọc một giá trị; ở tầng này dấu phẩy không cần escape.
 - **`enable=<expr>` inline** trên một effect bật/tắt effect đó theo từng frame (bật khi biểu thức khác 0; hằng
   số cũng là biểu thức): `effect='a.zip|b.zip=enable=lt(t\,2)'`. Node graph gồm nhiều effect
@@ -250,11 +251,11 @@ Ví dụ:
 VK="-init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk"   # hoặc d3d12va=dx ... dx
 
 # 1 input, tham số động theo thời gian (gpufx tự upload frame, hwdownload đưa về)
-ffmpeg $VK -i in.mp4 -vf "gpufx=effect='vignette.zip=strength=clip(t/2\,0\,1)\:color=#200040',hwdownload,format=yuv420p" out.mp4
+ffmpeg $VK -i in.mp4 -vf "gpufx=effect='vignette.zip=strength=clip(t/2\,0\,1)&color=#200040',hwdownload,format=yuv420p" out.mp4
 
 # transition 2 input
 ffmpeg $VK -i a.mp4 -i b.mp4 -filter_complex \
-  "[0][1]gpufx=effect='wipe-transition.zip=progress=clip((t-1)/1.5\,0\,1)\:angle=45',hwdownload,format=yuv420p" out.mp4
+  "[0][1]gpufx=effect='wipe-transition.zip=progress=clip((t-1)/1.5\,0\,1)&angle=45',hwdownload,format=yuv420p" out.mp4
 
 # xâu chuỗi nhiều hiệu ứng: hai filter, frame nằm trên GPU giữa hai filter
 ffmpeg $VK -i in.mp4 -vf "gpufx=effect=gaussian-blur.zip,gpufx=effect='gradient-map.zip=intensity=0.6',hwdownload,format=yuv420p" out.mp4
@@ -345,7 +346,7 @@ Dấu nháy đơn che `;` và `[]` khỏi filter graph bên ngoài. Quy tắc:
   qua cùng đoạn mã. `effect` và `graph` không dùng cùng lúc.
 - Tham số viết inline sau từng gói của một nút (`[b]grayscale.zip|vignette.zip=strength=0.6[gb]`, xem "Tham số
   inline" ở mục 5), nên ví dụ graph có giá trị là
-  `graph='[0]split[a][b]; [a]gaussian-blur.zip=radius=8[ba]; [b]grayscale.zip|vignette.zip=strength=0.6[gb]; [ba][gb]crossfade.zip=progress=clip((t-1)/1.5\,0\,1)\:enable=between(t\,1\,3)\:bypass=auto[x]'`.
+  `graph='[0]split[a][b]; [a]gaussian-blur.zip=radius=8[ba]; [b]grayscale.zip|vignette.zip=strength=0.6[gb]; [ba][gb]crossfade.zip=progress=clip((t-1)/1.5\,0\,1)&enable=between(t\,1\,3)&bypass=auto[x]'`.
   `sendcmd` gọi giá trị lúc chạy bằng `nút.tên=value` trên mọi gói của đồ thị theo thứ tự câu (label gói, chỉ số
   từ 0, tên trơn, hoặc nhãn output của nút: `ba.radius`; `gb.strength` tìm hiệu ứng duy nhất trong
   `grayscale|vignette` có `strength`).

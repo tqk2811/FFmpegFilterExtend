@@ -106,7 +106,7 @@ Build `c62d150` (win64 bundle), measured on 2026-10-15, same machine as above.
      Outside its window a filter hands on its input texture relabelled (`passthrough=auto`): input 0 before
      the transition and the incoming clip after it (`bypass=auto`).
   3. One `gpufx` with a graph of 5 crossfades, each switched by the inline `enable` / `bypass` keys:
-     `[u0]...[u5]gpufx=graph='[0][1]effects/crossfade.zip=progress=clip(t-9\,0\,1)\:enable=between(t\,9\,10)\:bypass=auto[x1]; [x1][2]effects/crossfade.zip=progress=clip(t-18\,0\,1)\:enable=between(t\,18\,19)\:bypass=auto[x2]; ...[out]'`.
+     `[u0]...[u5]gpufx=graph='[0][1]effects/crossfade.zip=progress=clip(t-9\,0\,1)&enable=between(t\,9\,10)&bypass=auto[x1]; [x1][2]effects/crossfade.zip=progress=clip(t-18\,0\,1)&enable=between(t\,18\,19)&bypass=auto[x2]; ...[out]'`.
 - **Inputs of the gpufx ways**: each clip is uploaded once (`gpufx_upload`, Vulkan device
   `vulkan=vk:0,disable_multiplane=1`) and shifted to its join (`setpts=PTS+9*k/TB`). Clip A is held on its last
   frame with `tpad=stop_mode=clone:stop_duration=45` (GPU frames, nothing uploaded again), because the first input

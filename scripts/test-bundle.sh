@@ -193,9 +193,9 @@ pt_tests() {
         "$(echo "$PT_SRC" | head -n 1; echo "$PT_ONCE" | sed -n 2p; echo "$PT_SRC" | sed -n 3p)" relabelled
     # Inline bypass=auto: the effect alone (every effect off: relabelled), and inside a chain
     # (copied into the input of the next effect). FFmpeg's option parser splits at ':', so
-    # the keys are separated by '\:' inside the quotes.
+    # the keys are separated by '&' (or '\:') inside the quotes.
     pt_check "$l: inline bypass=auto of a single effect" \
-        "$(pt_md5 "$f" "$u,$BX'$FX/crossfade.zip=progress=1\:enable=eq(n\,1)\:bypass=auto'")" \
+        "$(pt_md5 "$f" "$u,$BX'$FX/crossfade.zip=progress=1&enable=eq(n\,1)&bypass=auto'")" \
         "$(echo "$PT_SRC" | head -n 1; echo "$PT_ONCE" | tail -n +2)" relabelled
     pt_check "$l: inline bypass=auto inside a chain" \
         "$(pt_md5 "$f" "$u,$BX'$FX/crossfade.zip=progress=1\:enable=eq(n\,1)\:bypass=auto|$FX/invert.zip'")" \
@@ -281,7 +281,9 @@ for m in 0 1 2 3; do
 done
 echo "expressions, sendcmd, timeline, chains:"
 # shellcheck disable=SC2086
-ok "expression params" -i "$A" -vf "gpufx=effect='$FX/vignette.zip=strength=clip(t\,0\,1)\:color=#ff0000'" $NULL
+ok "expression params" -i "$A" -vf "gpufx=effect='$FX/vignette.zip=strength=clip(t\,0\,1)&color=#ff0000'" $NULL
+# shellcheck disable=SC2086
+ok "expression params: mixed & and escaped colon separators" -i "$A" -vf "gpufx=effect='$FX/vignette.zip=strength=0.5&color=#ff0000\:radius=0.5'" $NULL
 # shellcheck disable=SC2086
 ok "expression params: a, sar, dar" -i "$E" -vf "gpufx=effect='$FX/vignette.zip=strength=clip(dar/a/sar-0.5\,0\,1)'" $NULL
 # shellcheck disable=SC2086
@@ -364,7 +366,7 @@ else fail "inline parameters of one effect of a chain, and expressions"; cat "$C
 # shellcheck disable=SC2086
 rejects "inline key the effect does not have" "has no parameter" -i "$A" -an -vf "gpufx=effect='$FX/invert.zip|$FX/invert.zip=strength=0'" $NULL
 # shellcheck disable=SC2086
-rejects "inline key given twice" "given twice" -i "$A" -an -vf "gpufx=effect='$FX/invert.zip=amount=0\:amount=1'" $NULL
+rejects "inline key given twice" "given twice" -i "$A" -an -vf "gpufx=effect='$FX/invert.zip=amount=0&amount=1'" $NULL
 # shellcheck disable=SC2086
 rejects "inline option that is not key=value" "is not key=value" -i "$A" -an -vf "gpufx=effect='$FX/invert.zip=0'" $NULL
 # shellcheck disable=SC2086
@@ -454,7 +456,7 @@ else fail "sendcmd replaces an inline enable"; echo "    got: $NE_SC2"; cat "$CL
 # shellcheck disable=SC2086
 rejects "inline bypass other than 0 or auto" "bypass is 0 or auto" -i "$A" -an -vf "gpufx=effect='$FX/invert.zip=bypass=1'" $NULL
 # shellcheck disable=SC2086
-rejects "inline enable given twice" "given twice" -i "$A" -an -vf "gpufx=effect='$FX/invert.zip=enable=1\:enable=0'" $NULL
+rejects "inline enable given twice" "given twice" -i "$A" -an -vf "gpufx=effect='$FX/invert.zip=enable=1&enable=0'" $NULL
 # The input bypass passes has another size than the output: an error, not input 0.
 # shellcheck disable=SC2086
 rejects "bypass=auto onto an input of another size" "Choose another bypass" -i "$A" -an -filter_complex \
@@ -544,9 +546,9 @@ else
 fi
 # Mode 4: paths from expressions compiled into the shader, changed by sendcmd mid-stream.
 ok "falling-maple: custom path (mode 4) + sendcmd" -i "$A" \
-    -vf "sendcmd=c='0.5 gpufx@l params path_x=x0+0.2*sin(u)',gpufx@l=effect='$FX/falling-maple.zip=mode=4\:life=2\:path_y=-0.1+1.2*p\:angle=max(90*u\,0)'" -f null -
+    -vf "sendcmd=c='0.5 gpufx@l params path_x=x0+0.2*sin(u)',gpufx@l=effect='$FX/falling-maple.zip=mode=4&life=2&path_y=-0.1+1.2*p&angle=max(90*u\,0)'" -f null -
 rejects "falling-maple: bad path expression" "unknown variable .q." -i "$A" \
-    -vf "gpufx=effect='$FX/falling-maple.zip=mode=4\:path_x=q*2'" -f null -
+    -vf "gpufx=effect='$FX/falling-maple.zip=mode=4&path_x=q*2'" -f null -
 
 echo "Vulkan frames:"
 # hwupload -> gpufx -> hwdownload runs on FFmpeg's own Vulkan device, frames never leave

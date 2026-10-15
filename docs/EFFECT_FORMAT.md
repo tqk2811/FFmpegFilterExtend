@@ -320,7 +320,9 @@ let x = gpufx_expr_path_x(u, p, x0);   // the arguments in the order of `vars`, 
   is an error there (`sendcmd` reports it) and the last good expression stays; the stream goes on.
   The default expressions use the pipelines shared by every effect opened from the package.
 - On the FFmpeg command line, commas inside the quoted `effect='...'`/`graph='...'` are escaped as for any filter option, and
-  the `:` between inline keys is written `\:`: `effect='x.zip=angle=max(90*u\,0)\:speed=2'`.
+  inline keys are separated by `&` (no escaping needed): `effect='x.zip=angle=max(90*u\,0)&speed=2'`. The
+  FFmpeg-style `:` is also accepted but must be written `\:` there (`...\,0)\:speed=2`). In the effect string
+  `\&` is a literal `&` (escapable set: `\ ' : & ; | = [ ]`).
 
 ## Included examples
 

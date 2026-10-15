@@ -968,7 +968,7 @@ fn split_unquoted(mut s: &str, c: u8) -> Vec<&str> {
 }
 
 /// Characters `\` escapes in a chain or graph; before any other it is a plain `\` (Windows paths).
-const ESCAPED: &str = "\\':;|=[]";
+const ESCAPED: &str = "\\':&;|=[]";
 
 /// Removes the escapes and quotes of an inline value: `\:` is `:` (see [`ESCAPED`]),
 /// `'...'` is taken as it is.
@@ -998,7 +998,8 @@ pub type InlineOptions = Vec<(String, String)>;
 const NODE_KEYS: [&str; 2] = ["enable", "bypass"];
 
 /// Splits one effect of a chain or graph node, `path=key=value:key=value`, into its path
-/// and options, without escapes and quotes. `\` escapes the next character (one of
+/// and options, without escapes and quotes. Options are separated by `:` (as in FFmpeg) or `&`
+/// (no `:` needed inside an FFmpeg option value). `\` escapes the next character (one of
 /// [`ESCAPED`]; before others it stays, for Windows paths) and `'...'` quotes, so values may hold `:`, `;`, `|`, `[`, `]` and `=`. Keys are named (parameter
 /// names, `enable`, `bypass`); a key given twice fails.
 pub fn parse_effect_item(item: &str) -> Result<(String, InlineOptions), Error> {
@@ -1009,7 +1010,9 @@ pub fn parse_effect_item(item: &str) -> Result<(String, InlineOptions), Error> {
     };
     let path = unescape(path.trim(), item)?;
     let mut options = InlineOptions::new();
-    for option in rest.map(|r| split_unquoted(r, b':')).unwrap_or_default() {
+    for option in
+        rest.map(|r| split_unquoted(r, b':').into_iter().flat_map(|o| split_unquoted(o, b'&')).collect::<Vec<_>>()).unwrap_or_default()
+    {
         let option = option.trim();
         let Some(eq) = find_unquoted(option, b'=') else {
             return Err(graph_err(format!("`{option}` in `{item}` is not key=value (options are named: `{path}=key=value:key=value`)")));
@@ -1968,5 +1971,13 @@ mod tests {
         assert_eq!(split_unquoted(r"C:\fx\\|b.zip", b'|'), [r"C:\fx\\", "b.zip"]);
         // An escaped separator does not split.
         assert_eq!(split_unquoted(r"a\|b|c", b'|'), [r"a\|b", "c"]);
+    }
+
+    #[test]
+    fn options_split_at_colon_and_ampersand() {
+        let (path, options) = super::parse_effect_item(r"fx.zip=a=1&b=t/2:c=x\&y").unwrap();
+        assert_eq!(path, "fx.zip");
+        let pairs: Vec<(&str, &str)> = options.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        assert_eq!(pairs, [("a", "1"), ("b", "t/2"), ("c", "x&y")]);
     }
 }

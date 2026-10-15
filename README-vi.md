@@ -33,7 +33,7 @@ Hiệu ứng video chạy bằng **shader trên GPU** cho FFmpeg, nạp từ **g
 # gpufx trả ra frame GPU: đưa cho nó một device (frame CPU ở input nó tự upload) và
 # download trước encoder
 ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i a.mp4 -i b.mp4 -filter_complex \
-  "[0][1]gpufx=effect='wipe-transition.zip=progress=clip((t-1)/1.5\,0\,1)\:angle=45',hwdownload,format=yuv420p" out.mp4
+  "[0][1]gpufx=effect='wipe-transition.zip=progress=clip((t-1)/1.5\,0\,1)&angle=45',hwdownload,format=yuv420p" out.mp4
 ```
 
 ```sh
@@ -52,9 +52,10 @@ của chính filter, vốn nằm ngoài chuỗi effect. Key lạ, key cho hai l�
 nêu tên effect và key.
 
 - Bọc cả giá trị `effect=`/`graph=` trong `'...'`. FFmpeg tách option của filter tại `:` *sau khi* đã bỏ các dấu
-  nháy đó, nên dấu `:` giữa các key inline phải viết là `\:` (chỉ một key thì không cần:
-  `effect='vignette.zip=strength=0.7'`). Dấu phẩy trong biểu thức vẫn escape `\,` như mọi option của filter.
-- Bên trong chuỗi effect, `\` escape một ký tự trong `\ ' : ; | = [ ]` (đứng trước ký tự khác thì `\` giữ
+  nháy đó, nên phân tách các key inline bằng `&` (`effect='x.zip=a=1&b=2'`, không cần escape ở tầng FFmpeg). Dấu
+  `:` kiểu FFmpeg cũng dùng được nhưng ở đó phải viết `\:` (`effect='x.zip=a=1\:b=2'`); một key thì không cần dấu
+  phân tách. Dấu phẩy trong biểu thức vẫn escape `\,` như mọi option của filter.
+- Bên trong chuỗi effect, `\` escape một ký tự trong `\ ' : & ; | = [ ]` (`\&` là `&` nguyên văn trong giá trị; đứng trước ký tự khác thì `\` giữ
   nguyên, nên đường dẫn Windows vẫn dùng được) và `'...'` bọc một giá trị.
 - `sendcmd` là lệnh lúc chạy, không phải option của filter: `sendcmd=c='0.5 gpufx@g params gb.strength=0.2'` đặt
   các cặp `node.name=value` (cách nhau bởi `|`) trong khi stream đang chạy; xem [design](docs/DESIGN-vi.md).
