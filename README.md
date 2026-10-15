@@ -7,8 +7,7 @@ Video effects powered by **GPU shaders** for FFmpeg, loaded from external **`.zi
 
 - **WGSL** or **GLSL** shaders, multiple passes, multiple inputs, bundled textures, auto-generated parameters.
 - The FFmpeg filter runs on **Vulkan, Direct3D 12, Direct3D 11** and **Metal** (macOS) frames (via
-  [wgpu](https://wgpu.rs)), on Windows/Linux/macOS. OpenGL is only available through the library and the
-  `gpufx` CLI, and is untested.
+  [wgpu](https://wgpu.rs)), on Windows/Linux/macOS. OpenGL is not supported.
 - Parameters are literals or time-based expressions; change them at run time with `sendcmd`.
 - Several effects in one filter (`effect='blur.zip|vignette.zip'`): the whole chain runs in one GPU
   submission, without intermediate frames.
@@ -77,7 +76,7 @@ corrupts the picture through the driver's host image copy; use `gpufx_upload` / 
 device with `disable_multiplane=1,linear_images=1`. `gpufx` refuses such frames. See [docs/INTEL_VULKAN.md](docs/INTEL_VULKAN.md).
 
 The filter's `backend` option is for testing only (leave it at `auto`, which follows the frames); it refuses
-`backend=gl`, and `backend=metal` too except on macOS (the library and the `gpufx` CLI still take them). On macOS the filter works on VideoToolbox frames (nv12, p010le) through Metal, e.g.
+`backend=metal` except on macOS (the library and the `gpufx` CLI still take it). On macOS the filter works on VideoToolbox frames (nv12, p010le) through Metal, e.g.
 `-init_hw_device videotoolbox=vt -filter_hw_device vt -vf "gpufx=effect=vignette.zip,hwdownload,format=nv12"`;
 this path has not run on a Mac yet (see below).
 
@@ -113,7 +112,7 @@ Adding or editing effects **does not require rebuilding FFmpeg**: run `scripts/p
 GPU tests skip themselves (with a `skipping: ...` line) when no adapter fits, so a green run can hide
 skipped checks: add `-- --nocapture` to see them.
 
-- `GPUFX_TEST_BACKEND=vulkan|dx12|metal|gl` pins the backend (default: the best one). On Windows run the
+- `GPUFX_TEST_BACKEND=vulkan|dx12|metal` pins the backend (default: the best one). On Windows run the
   suite once with `vulkan` and once with `dx12`.
 - The D3D12 shader cache tests need `dxcompiler.dll` on `PATH`; without it they skip. Fetch it with
   `scripts/fetch-dxc.sh build/dxc` and put `build/dxc` on `PATH`.
@@ -130,7 +129,7 @@ skipped checks: add `-- --nocapture` to see them.
   tests are skipped with a warning). There is no macOS bundle to download.
 - **Linux on a real GPU**: Linux only runs on lavapipe (software Vulkan), in CI and in a VM. Vulkan frames
   shared with FFmpeg have been run on real GPUs only on Windows.
-- **OpenGL**: wgpu supports it, but no test or CI job runs on it.
+- **OpenGL**: not built in. It cannot share frames with FFmpeg and has no R8/R16 storage textures for YUV planes.
 
 ### Fast build on a prebuilt FFmpeg (recommended)
 

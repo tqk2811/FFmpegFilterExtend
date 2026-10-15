@@ -12,7 +12,7 @@ English: [DESIGN.md](DESIGN.md)
 |---|---------|--------------|
 | R1 | **Shader là ưu tiên số 1** (lý do dùng GPU) | Mỗi hiệu ứng *là* một chuỗi compute shader. Hỗ trợ WGSL và GLSL ngay từ bản đầu, kiểm tra lỗi shader có số dòng, nhiều pass, texture đi kèm, tham số tự sinh thành `uniform` |
 | R2 | Đa hệ điều hành | Windows, Linux, macOS (Android/iOS về sau) |
-| R3 | Đa phần cứng / API | Vulkan, DirectX 12, Metal, OpenGL qua **wgpu**; CUDA/D3D11/VAAPI qua interop (giai đoạn 2). Hiện filter FFmpeg nhận frame Vulkan, D3D12, D3D11 và Metal (macOS), từ chối OpenGL; OpenGL chỉ còn trong thư viện và CLI |
+| R3 | Đa phần cứng / API | Vulkan, DirectX 12, Metal qua **wgpu**; CUDA/D3D11/VAAPI qua interop (giai đoạn 2). Đã bỏ OpenGL: không dùng chung frame với FFmpeg được và không có texture storage R8/R16 cho các plane YUV |
 | R4 | Hiệu ứng nạp ngoài, không build lại FFmpeg | Một filter duy nhất `gpufx` build **một lần**; hiệu ứng là gói zip |
 | R5 | Dùng Rust hoặc C/C++ | Engine viết bằng **Rust**; phần nối vào FFmpeg là một file C nhỏ |
 
@@ -32,9 +32,9 @@ English: [DESIGN.md](DESIGN.md)
  │  - sendcmd / timeline      │                      │              chạy pass trên wgpu  │
  └────────────────────────────┘                      └───────────────┬──────────────────┘
                                                                      │ wgpu
-                                         ┌────────────┬──────────────┼─────────────┬────────┐
-                                         ▼            ▼              ▼             ▼        ▼
-                                      Vulkan      DirectX 12       Metal        OpenGL   (WebGPU)
+                                         ┌────────────┬──────────────┼─────────────┐
+                                         ▼            ▼              ▼             ▼
+                                      Vulkan      DirectX 12       Metal       (WebGPU)
 ```
 
 **Vì sao chỉ một filter?** FFmpeg không có cơ chế plugin filter lúc chạy: mọi filter phải
@@ -161,7 +161,7 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   (`AVFILTER_FLAG_HWDEVICE`), loại device quyết định API; chỉ có input CPU mà không có device thì filter báo lỗi
   kèm các option cần thêm. `-filter_hw_device` khác API với input GPU thì bị từ chối (nó quyết
   định format output); cùng API nhưng khác device thì bị bỏ qua: device của input GPU được dùng, input CPU
-  được upload lên đó, kèm cảnh báo. Option `backend` chỉ để thử nghiệm (`auto` tự theo frame); `backend=gl` bị từ chối, `backend=metal` cũng vậy trừ trên macOS (thư viện và CLI vẫn giữ).
+  được upload lên đó, kèm cảnh báo. Option `backend` chỉ để thử nghiệm (`auto` tự theo frame); `backend=metal` bị từ chối trừ trên macOS (thư viện và CLI vẫn giữ).
   Thêm một API là thêm một dòng vào `hw_apis[]` và các nhánh trong các switch theo API của
   `vf_gpufx.c`.
 - **out_format**: ép pixel format của mọi output (với frame Vulkan/D3D: sw_format của frames context đầu
@@ -314,7 +314,7 @@ CPU hay CUDA.
 ### Đồ thị GPU trong một filter (xong, C API v5)
 
 Một `gpufx` chạy cả đồ thị hiệu ứng, nên nhánh phức tạp ở lại trên GPU với mọi backend
-(Vulkan, D3D12, Metal, GL), không cần hw frame:
+(Vulkan, D3D12, Metal), không cần hw frame:
 
 ```sh
 ffmpeg -i a.mp4 -i b.mp4 -filter_complex "[0:v][1:v]gpufx=graph='[0]split[a][b]; [a]gaussian-blur.zip[ba]; [b]grayscale.zip|vignette.zip[gb]; [ba][gb]crossfade.zip[x]; [x][1]wipe-transition.zip[out]'[v]" -map "[v]" out.mp4
@@ -647,7 +647,7 @@ VRAM có hạn, nên bộ nhớ GPU giữ ở mức thấp nhất và không nh�
   SHA-256 nối cuối chỉ chứng minh file nguyên vẹn, không chứng minh ai dựng gói. Blob thiếu hoặc bị từ
   chối thì đi đường thường (blob bị từ chối được log một lần);
   `ShaderCacheStats::precompiled` đếm số lần dùng được.
-- Metal, GL: wgpu 30 không có cache ra đĩa, chỉ dựa vào cache của driver.
+- Metal: wgpu 30 không có cache ra đĩa, chỉ dựa vào cache của driver.
 
 ## 7. Bảo mật gói hiệu ứng
 

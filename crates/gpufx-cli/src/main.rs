@@ -13,7 +13,7 @@ usage:
   gpufx pack [--precompile] <dir> <out.zip>
              --precompile adds D3D12 shaders, used when GPUFX_TRUST_PRECOMPILED=1
   gpufx run  <package> -i <in.png> [-i <in2.png>...] -o <out.png>
-             [-p name=value]... [--backend auto|vulkan|dx12|metal|gl] [--time seconds]";
+             [-p name=value]... [--backend auto|vulkan|dx12|metal] [--time seconds]";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

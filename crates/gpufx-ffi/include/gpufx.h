@@ -133,7 +133,7 @@ int gpufx_format_supported(const char *format);
  * Opens a package (.zip file or unpacked directory) and compiles its shaders.
  * Effects opened from the same path with the same backend share the compiled package
  * while any of them is open: the file is read again only after all of them are freed.
- * backend: NULL or "auto", "vulkan", "dx12", "metal", "gl".
+ * backend: NULL or "auto", "vulkan", "dx12", "metal".
  * Since version 8 no GPU device is made here: shaders are checked on a device with no
  * GPU, limited to the WebGPU default formats. The device comes from gpufx_effect_use_*
  * or the first frame, so a missing GPU is reported there, not by open.

@@ -5,8 +5,7 @@ Hiệu ứng video chạy bằng **shader trên GPU** cho FFmpeg, nạp từ **g
 
 - Shader **WGSL** hoặc **GLSL**, nhiều pass, nhiều input, texture đi kèm, tham số tự sinh.
 - Filter FFmpeg chạy trên frame **Vulkan, Direct3D 12, Direct3D 11** và **Metal** (macOS) (qua
-  [wgpu](https://wgpu.rs)), Windows/Linux/macOS. OpenGL chỉ dùng được qua thư viện và CLI `gpufx`, chưa
-  có test.
+  [wgpu](https://wgpu.rs)), Windows/Linux/macOS. Không hỗ trợ OpenGL.
 - Tham số là literal hoặc biểu thức theo thời gian; đổi lúc chạy bằng `sendcmd`.
 - Nhiều hiệu ứng trong một filter (`effect='blur.zip|vignette.zip'`): cả chuỗi chạy trong một lần
   submit GPU, không qua frame trung gian.
@@ -73,7 +72,7 @@ GPU Intel trên Windows với FFmpeg 9: `hwupload` (và `hwdownload` frame của
 làm hỏng ảnh do host image copy của driver; dùng `gpufx_upload` / `gpufx_download`, hoặc mở device với
 `disable_multiplane=1,linear_images=1`. `gpufx` từ chối các frame đó. Xem [docs/INTEL_VULKAN-vi.md](docs/INTEL_VULKAN-vi.md).
 
-Option `backend` của filter chỉ để thử nghiệm (để mặc định `auto`, tự theo frame); filter từ chối `backend=gl`, và cả
+Option `backend` của filter chỉ để thử nghiệm (để mặc định `auto`, tự theo frame); filter từ chối
 `backend=metal` trừ trên macOS (thư viện và CLI `gpufx` vẫn nhận). Trên macOS
 filter chạy trên frame VideoToolbox (nv12, p010le) qua Metal, ví dụ
 `-init_hw_device videotoolbox=vt -filter_hw_device vt -vf "gpufx=effect=vignette.zip,hwdownload,format=nv12"`;
@@ -111,7 +110,7 @@ Thêm hoặc sửa hiệu ứng **không cần build lại FFmpeg**: chạy `scr
 Test GPU tự bỏ qua (in dòng `skipping: ...`) khi không có adapter phù hợp, nên chạy xanh vẫn có thể sót
 phần chưa kiểm: thêm `-- --nocapture` để thấy các dòng đó.
 
-- `GPUFX_TEST_BACKEND=vulkan|dx12|metal|gl` chọn cố định backend (mặc định: backend tốt nhất). Trên Windows
+- `GPUFX_TEST_BACKEND=vulkan|dx12|metal` chọn cố định backend (mặc định: backend tốt nhất). Trên Windows
   chạy bộ test hai lần, một lần `vulkan` và một lần `dx12`.
 - Test shader cache D3D12 cần `dxcompiler.dll` trên `PATH`, thiếu thì bị bỏ qua. Lấy bằng
   `scripts/fetch-dxc.sh build/dxc` rồi thêm `build/dxc` vào `PATH`.
@@ -128,7 +127,7 @@ phần chưa kiểm: thêm `-- --nocapture` để thấy các dòng đó.
   test bị bỏ qua kèm cảnh báo). Chưa có bản build macOS để tải.
 - **Linux trên GPU thật**: Linux mới chạy trên lavapipe (Vulkan phần mềm), trong CI và máy ảo. Frame Vulkan
   dùng chung với FFmpeg mới chạy trên GPU thật ở Windows.
-- **OpenGL**: wgpu có hỗ trợ nhưng chưa có test hay job CI nào chạy trên nó.
+- **OpenGL**: không build vào. OpenGL không dùng chung frame với FFmpeg được và không có texture storage R8/R16 cho các plane YUV.
 
 ### Build nhanh trên bản FFmpeg build sẵn (khuyên dùng)
 

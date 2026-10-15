@@ -1,4 +1,4 @@
-//! GPU execution of an effect package with wgpu (Vulkan, DirectX 12, Metal, OpenGL).
+//! GPU execution of an effect package with wgpu (Vulkan, DirectX 12, Metal).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -21,7 +21,6 @@ pub enum Backend {
     Vulkan,
     Dx12,
     Metal,
-    Gl,
 }
 
 impl std::str::FromStr for Backend {
@@ -32,7 +31,6 @@ impl std::str::FromStr for Backend {
             "vulkan" | "vk" => Backend::Vulkan,
             "dx12" | "d3d12" | "directx" => Backend::Dx12,
             "metal" | "mtl" => Backend::Metal,
-            "gl" | "opengl" | "gles" => Backend::Gl,
             _ => return Err(Error::Gpu(format!("unknown backend `{s}`"))),
         })
     }
@@ -45,7 +43,6 @@ impl Backend {
             Backend::Vulkan => wgpu::Backends::VULKAN,
             Backend::Dx12 => wgpu::Backends::DX12,
             Backend::Metal => wgpu::Backends::METAL,
-            Backend::Gl => wgpu::Backends::GL,
         }
     }
 }

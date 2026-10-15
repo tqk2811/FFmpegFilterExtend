@@ -12,7 +12,7 @@ Tiếng Việt: [DESIGN-vi.md](DESIGN-vi.md)
 |---|-------------|---------------|
 | R1 | **Shaders come first** (the reason to use a GPU) | Each effect *is* a chain of compute shaders. WGSL and GLSL are supported from the first version, with shader error checking that reports line numbers, multiple passes, bundled textures, and parameters generated automatically as `uniform`s |
 | R2 | Multiple operating systems | Windows, Linux, macOS (Android/iOS later) |
-| R3 | Multiple hardware / APIs | Vulkan, DirectX 12, Metal, OpenGL through **wgpu**; CUDA/D3D11/VAAPI through interop (phase 2). Today the FFmpeg filter takes Vulkan, D3D12, D3D11 and (macOS) Metal frames and rejects OpenGL; OpenGL stays only in the library and CLI |
+| R3 | Multiple hardware / APIs | Vulkan, DirectX 12, Metal through **wgpu**; CUDA/D3D11/VAAPI through interop (phase 2). OpenGL was dropped: it cannot share FFmpeg frames and has no R8/R16 storage textures for YUV planes |
 | R4 | Effects loaded externally, no FFmpeg rebuild | A single `gpufx` filter built **once**; effects are zip packages |
 | R5 | Use Rust or C/C++ | The engine is written in **Rust**; the glue into FFmpeg is one small C file |
 
@@ -33,9 +33,9 @@ Tiếng Việt: [DESIGN-vi.md](DESIGN-vi.md)
  │  - sendcmd / timeline      │                      │                                   │
  └────────────────────────────┘                      └───────────────┬──────────────────┘
                                                                      │ wgpu
-                                         ┌────────────┬──────────────┼─────────────┬────────┐
-                                         ▼            ▼              ▼             ▼        ▼
-                                      Vulkan      DirectX 12       Metal        OpenGL   (WebGPU)
+                                         ┌────────────┬──────────────┼─────────────┐
+                                         ▼            ▼              ▼             ▼
+                                      Vulkan      DirectX 12       Metal       (WebGPU)
 ```
 
 **Why only one filter?** FFmpeg has no run-time filter plugin mechanism: every filter must be
@@ -162,8 +162,8 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   `-filter_hw_device` (`AVFILTER_FLAG_HWDEVICE`), and its type picks the API; with software inputs only and
   no device the filter fails and names the options to add. A `-filter_hw_device` of another API than the
   GPU inputs is refused (it sets the output format); one of the same API but another device is ignored
-  (their device wins, software inputs are uploaded there, with a warning). The `backend` option is for testing only (`auto` follows the frames); `backend=gl` is refused, `backend=metal` too except on macOS (the library and the
-  CLI keep them). Adding an API is one entry in `hw_apis[]` plus
+  (their device wins, software inputs are uploaded there, with a warning). The `backend` option is for testing only (`auto` follows the frames); `backend=metal` is refused except on macOS (the library and the
+  CLI keep it). Adding an API is one entry in `hw_apis[]` plus
   its cases in the per-API switches of `vf_gpufx.c`.
 - **out_format**: forces the pixel format of every output (on Vulkan/D3D frames: the sw_format of the
   output frames context). It must be in the effect's output formats and converted on the GPU by libgpufx
@@ -320,7 +320,7 @@ the CPU or from CUDA.
 ### GPU graph inside one filter (done, C API v5)
 
 A single `gpufx` runs a whole effect graph, so complex branching stays on the GPU on every
-backend (Vulkan, D3D12, Metal, GL), without hardware frames:
+backend (Vulkan, D3D12, Metal), without hardware frames:
 
 ```sh
 ffmpeg -i a.mp4 -i b.mp4 -filter_complex "[0:v][1:v]gpufx=graph='[0]split[a][b]; [a]gaussian-blur.zip[ba]; [b]grayscale.zip|vignette.zip[gb]; [ba][gb]crossfade.zip[x]; [x][1]wipe-transition.zip[out]'[v]" -map "[v]" out.mp4
@@ -666,7 +666,7 @@ VRAM is limited, so GPU memory is kept as low as possible and nothing is duplica
   trusts every package that context opens; the appended SHA-256 only proves integrity, not who built the
   package. Missing or refused blobs fall back to the normal path (a refused blob is logged once);
   `ShaderCacheStats::precompiled` counts the hits.
-- Metal, GL: no on-disk cache in wgpu 30; only driver caches apply.
+- Metal: no on-disk cache in wgpu 30; only driver caches apply.
 
 ## 7. Effect package security
 

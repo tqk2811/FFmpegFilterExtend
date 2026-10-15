@@ -7,7 +7,7 @@
 //! `wgpu::PipelineCache`. On D3D12 with `Features::PASSTHROUGH_SHADERS` and
 //! `dxcompiler.dll` on the DLL search path, it (`.dxil`) holds the DXIL gpufx compiled
 //! itself, loaded back as a passthrough shader (see `dxil.rs`; the key then also has
-//! the DXC version and shader model). Metal and GL have no on-disk cache in wgpu 30.
+//! the DXC version and shader model). Metal has no on-disk cache in wgpu 30.
 //!
 //! D3D12 can also take DXIL from the package itself (`compiled/dx12/<hash>.dxil`, written
 //! by `gpufx pack --precompile`, see [`precompile`]), with or without a directory, but
@@ -212,7 +212,7 @@ impl ShaderCache {
         let (usable, trust) = (pipeline_cache || dxc.is_some(), dx12 && trust_precompiled());
         #[cfg(not(windows))]
         let (usable, trust) = (pipeline_cache, false);
-        // Metal, GL, or D3D12 without dxcompiler.dll: wgpu 30 has no on-disk cache there
+        // Metal, or D3D12 without dxcompiler.dll: wgpu 30 has no on-disk cache there
         // (driver caches still apply).
         let dir = dir.filter(|d| usable && usable_dir(d));
         if dir.is_none() && !trust {
