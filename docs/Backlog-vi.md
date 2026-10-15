@@ -223,3 +223,9 @@
 - Vị trí: `ffmpeg/vf_gpufx.c`, `upload_input` (~1436) và lời gọi trong vòng event (~1618).
 - Vì sao nên làm: cache theo danh tính frame (buffer + pts) sẽ bỏ được các lần chép thừa.
 - Ngày ghi: 2026-10-14 (review đợt chỉ xuất frame GPU).
+
+### [Thấp] `<node>.enable`: hai cách gọi cùng một effect không bị từ chối
+- **Vấn đề**: `invert.enable` và `0.enable` (hoặc nhãn câu graph và chỉ số bên trong) trỏ cùng effect nhưng được lưu thành hai mục riêng; nếu mâu thuẫn thì mục được tính sau thắng (đã ghi trong DESIGN). `gpufx_effect_find_node` chỉ trả 0/-1, không trả danh sách effect, nên C không phát hiện được chồng lấn.
+- **Vị trí**: [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (`add_node_expr`), [crates/gpufx-ffi/src/lib.rs](../crates/gpufx-ffi/src/lib.rs) (`gpufx_effect_find_node`), [crates/gpufx-core/src/graph.rs](../crates/gpufx-core/src/graph.rs) (`find_node`).
+- **Vì sao**: FFI trả tập effect của một tên node thì C có thể từ chối hai mục chồng nhau, tránh kết quả phụ thuộc thứ tự.
+- **Ngày ghi**: 2026-10-15

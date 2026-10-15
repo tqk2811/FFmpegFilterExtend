@@ -189,6 +189,22 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
 - **params**: `name=value` separated by `|`. A value is a literal (`0.5`, `1,0,0`, `#ff8800`)
   or an **FFmpeg expression** in `t`, `n`, `w`, `h`, `a` (`w/h`), `sar`, `dar` (`a*sar`),
   re-evaluated for every frame. This is how you do keyframes/transitions without external tools.
+- **`<node>.enable=<expr>`** in `params` switches effects of a chain or graph per frame (on while
+  the expression is not 0; a constant is an expression too): `params='0.enable=lt(t\,2)'`. The node
+  is named like a parameter prefix: the package label when only one effect has it, the 0-based index
+  (always valid), or a graph statement's output label (`[x]` → `x.enable`, every effect of that
+  statement). A bare `enable` inside `params` is allowed only for a single effect; it is not the
+  filter's own timeline option `enable=`, which stays outside `params`. No package may declare a
+  parameter named `enable`. An effect switched off copies its first input into its output texture
+  (every effect has its first input's size), so the plan, the pooled textures and the bindings of the
+  rest of the graph stay as they are and toggling allocates nothing. Switching an effect off saves
+  its shader work but not all of it: the copy is still one compute pass, and the effect keeps its
+  output texture. With every effect off, the event is handled as a disabled filter (relabel when
+  `passthrough` allows, else the GPU bypass), and `n` still counts. A node is matched as spelled:
+  `invert.enable` and `0.enable` naming the same effect are two separate entries, and the one
+  evaluated last for a frame wins; a bare `.enable` (no effect name) is an error. Via `sendcmd`,
+  `params 0.enable=1` switches an effect back on: an `.enable` entry cannot be removed, only
+  replaced, by naming the same spelling of the node again.
 - **sendcmd / zmq**: the `params` command changes values at run time, for example
   `sendcmd=c='2.0 gpufx@fx params strength=0.2'`.
 - **timeline** (`enable='between(t,1,3)'`) is supported.

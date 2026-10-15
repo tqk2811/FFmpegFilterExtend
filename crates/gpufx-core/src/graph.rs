@@ -114,6 +114,14 @@ pub(crate) struct FrameIo {
     /// Bind groups made for the textures of GPU frames (input and output passes, effects
     /// bound to frames in place); those of a recent frame are reused.
     frame_binds: usize,
+    /// Effects switched off (`<effect>.enable`), by index; empty when all are on. An
+    /// effect switched off copies its first input into its output texture instead of
+    /// running, so the plan and the bindings of the others stay as they are.
+    enabled: Vec<bool>,
+    /// The copies of the effects switched off for the frame being recorded, and those
+    /// made for recent textures (frames read or written in place change every frame).
+    copy_groups: Vec<Option<wgpu::BindGroup>>,
+    copies: Vec<crate::lru::Lru<(wgpu::Texture, wgpu::Texture), wgpu::BindGroup>>,
 }
 
 /// The planned textures of a graph for one set of inputs.
@@ -128,6 +136,33 @@ struct Layout {
 }
 
 impl FrameIo {
+    fn enabled(&self, k: usize) -> bool {
+        self.enabled.get(k).copied().unwrap_or(true)
+    }
+
+    /// Picks the copy of every effect switched off, once the effects are bound for the
+    /// frame: from its first input to its output texture. Effects that are on get none.
+    fn bind_copies(&mut self, effects: &[Effect], topo: &Topology) {
+        let ctx = &effects[0].program.ctx;
+        self.copy_groups.clear();
+        self.copy_groups.resize(effects.len(), None);
+        if self.enabled.iter().all(|&on| on) {
+            return;
+        }
+        self.copies.resize_with(effects.len(), Default::default);
+        for k in 0..effects.len() {
+            if self.enabled(k) {
+                continue;
+            }
+            let src = source_texture(effects, &self.inputs, topo.node_inputs[k][0]);
+            let dst = effects[k].output().clone();
+            let made = self.copies[k].get_or_make((src, dst), |(src, dst)| Ok::<_, Error>(ctx.mips.copy_group(&ctx.device, src, dst)));
+            let (group, made) = made.expect("infallible");
+            self.copy_groups[k] = Some(group.clone());
+            self.frame_binds += made as usize;
+        }
+    }
+
     /// Gives back what the last frame borrowed: its submission was made (or nothing was).
     pub(crate) fn release(&mut self) {
         if let Some(ctx) = &self.ctx {
@@ -229,6 +264,12 @@ fn plan(
     for &k in &topo.order {
         let m = &effects[k].program.package.manifest;
         let passes = effects[k].passes(deep)?;
+        if let Source::Node(j) = topo.node_inputs[k][0] {
+            // Read by the copy of the effect when it is switched off, even if no pass reads it.
+            // The copy writes the output of the last pass: keep the input alive until then so
+            // the pool cannot give its texture to that output.
+            bump(&mut last, (j, finals[j]), g + passes.len() - 1);
+        }
         for pass in passes {
             for name in &pass.inputs {
                 if let Some(p) = passes.iter().find(|p| p.output == *name) {
@@ -453,6 +494,8 @@ fn acquire(effects: &mut [Effect], topo: &Topology, io: &mut FrameIo, ctx: &Arc<
         return Ok(());
     }
     io.bound_ids.clear();
+    // The copies of effects switched off hold the old textures.
+    io.copies.clear();
     let mut textures = leases.iter().map(|l| l.texture().clone());
     io.input_mips.clear();
     io.node_mips.clear();
@@ -579,6 +622,9 @@ pub(crate) fn run(
         }
     }
     io.allocations += bound as usize;
+    if !bypass {
+        io.bind_copies(effects, topo);
+    }
 
     for (slot, f) in io.inputs.iter().zip(inputs) {
         slot.upload(queue, &f.planes, &f.strides, &f.color);
@@ -642,7 +688,14 @@ fn encode_nodes(effects: &[Effect], topo: &Topology, io: &FrameIo, info: Option<
     let ctx = &effects[0].program.ctx;
     if let Some(info) = info {
         for &k in &topo.order {
-            effects[k].encode(cpass, info);
+            match (io.copy_groups.get(k).and_then(Option::as_ref), &io.layout) {
+                // Switched off: its first input copied into its output (see `bind_copies`).
+                (Some(group), Some(layout)) => {
+                    let format = effects[k].output().format();
+                    ctx.mips.encode_copy(&ctx.device, format, group, layout.sizes[k], cpass);
+                }
+                _ => effects[k].encode(cpass, info),
+            }
             if let Some(Some(chain)) = io.node_mips.get(k) {
                 chain.encode(&ctx.device, &ctx.mips, cpass);
             }
@@ -743,6 +796,7 @@ fn record_gpu(
                 io.frame_binds += effects[k].rebind(&sources.iter().collect::<Vec<_>>(), writes)? as usize;
             }
         }
+        io.bind_copies(effects, topo);
     }
     for (k, out) in outs.iter().enumerate() {
         if !bypass && direct_out.contains(&Some(k)) {
@@ -1238,31 +1292,7 @@ impl EffectGraph {
         }
         let find = |k: usize, param: &str| self.params.iter().position(|&(e, p)| e == k && self.effects[e].params.defs()[p].name == param);
         if let Some((prefix, param)) = name.split_once('.') {
-            let what = self.what;
-            let effects: Vec<usize> = match prefix.parse::<usize>() {
-                Ok(k) if k < self.effects.len() => vec![k],
-                Ok(_) => Vec::new(),
-                Err(_) => {
-                    let matches: Vec<usize> = (0..self.labels.len()).filter(|&k| self.labels[k] == prefix).collect();
-                    if matches.len() > 1 {
-                        return Err(Error::Param(format!(
-                            "`{prefix}` names {} effects of the {what}; use the index, e.g. `{}.{param}`",
-                            matches.len(),
-                            matches[0]
-                        )));
-                    }
-                    if matches.is_empty() {
-                        self.nodes.iter().find(|(l, _)| l == prefix).map(|(_, ks)| ks.clone()).unwrap_or_default()
-                    } else {
-                        matches
-                    }
-                }
-            };
-            if effects.is_empty() {
-                let mut known = self.labels.clone();
-                known.extend(self.nodes.iter().map(|(l, _)| l.clone()));
-                return Err(Error::Param(format!("the {what} has no effect `{prefix}` (effects: {})", known.join(", "))));
-            }
+            let effects = self.node_effects(prefix, param)?;
             let owners: Vec<usize> = effects.iter().filter_map(|&k| find(k, param)).collect();
             return match owners.as_slice() {
                 [i] => Ok(*i),
@@ -1283,6 +1313,80 @@ impl EffectGraph {
                 owners.iter().map(|&i| self.param_names[i].as_str()).collect::<Vec<_>>().join(", ")
             ))),
         }
+    }
+
+    /// The effects a name prefix stands for, as in `prefix.param`: a package label naming
+    /// one effect, an index (0 based; digits are always an index), or the output label of
+    /// a graph node (every effect of its statement). `param` only goes in messages.
+    fn node_effects(&self, prefix: &str, param: &str) -> Result<Vec<usize>, Error> {
+        let what = self.what;
+        let effects: Vec<usize> = match prefix.parse::<usize>() {
+            Ok(k) if k < self.effects.len() => vec![k],
+            Ok(_) => Vec::new(),
+            Err(_) => {
+                let matches: Vec<usize> = (0..self.labels.len()).filter(|&k| self.labels[k] == prefix).collect();
+                if matches.len() > 1 {
+                    return Err(Error::Param(format!(
+                        "`{prefix}` names {} effects of the {what}; use the index, e.g. `{}.{param}`",
+                        matches.len(),
+                        matches[0]
+                    )));
+                }
+                if matches.is_empty() {
+                    self.nodes.iter().find(|(l, _)| l == prefix).map(|(_, ks)| ks.clone()).unwrap_or_default()
+                } else {
+                    matches
+                }
+            }
+        };
+        if effects.is_empty() {
+            let mut known = self.labels.clone();
+            known.extend(self.nodes.iter().map(|(l, _)| l.clone()));
+            return Err(Error::Param(format!("the {what} has no effect `{prefix}` (effects: {})", known.join(", "))));
+        }
+        Ok(effects)
+    }
+
+    /// The effects `node.enable` switches, by the prefixes of [`EffectGraph::find_param`]:
+    /// `label`, `index` or a graph node's output label. An empty `node` (a bare `enable`)
+    /// is the effect of a graph holding only one.
+    pub fn find_node(&self, node: &str) -> Result<Vec<usize>, Error> {
+        if node.is_empty() {
+            if self.effects.len() == 1 {
+                return Ok(vec![0]);
+            }
+            return Err(Error::Param(format!(
+                "the {} runs {} effects: say which one `enable` switches, e.g. `0.enable`",
+                self.what,
+                self.effects.len()
+            )));
+        }
+        self.node_effects(node, "enable")
+    }
+
+    /// Switches effect `k` on or off. An effect switched off passes its first input
+    /// through (it has that input's size, as every effect): nothing is planned or bound
+    /// again, so this is cheap enough to do on every frame.
+    pub fn set_node_enabled(&mut self, k: usize, on: bool) -> Result<(), Error> {
+        if k >= self.effects.len() {
+            return Err(Error::Param(format!("the {} has no effect {k}", self.what)));
+        }
+        if self.io.enabled.len() != self.effects.len() {
+            self.io.enabled = vec![true; self.effects.len()];
+        }
+        self.io.enabled[k] = on;
+        Ok(())
+    }
+
+    /// Whether effect `k` runs (see [`EffectGraph::set_node_enabled`]).
+    pub fn node_enabled(&self, k: usize) -> bool {
+        self.io.enabled(k)
+    }
+
+    /// Every effect is switched off: the outputs are their input pads, so a caller may
+    /// pass the frames through as when the filter is disabled.
+    pub fn all_nodes_disabled(&self) -> bool {
+        (0..self.effects.len()).all(|k| !self.io.enabled(k))
     }
 
     /// Parameter `index` of `param_names` as (block, name inside its effect).
@@ -1417,6 +1521,7 @@ impl EffectGraph {
         for (a, b) in self.effects.iter_mut().zip(&other.effects) {
             a.params = b.params.clone();
         }
+        self.io.enabled = other.io.enabled.clone();
         Ok(())
     }
 

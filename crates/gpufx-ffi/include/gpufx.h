@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define GPUFX_API_VERSION 9
+#define GPUFX_API_VERSION 10
 
 typedef struct GpufxEffect GpufxEffect;
 
@@ -249,6 +249,20 @@ int gpufx_effect_set_param(GpufxEffect *fx, const char *name, const char *value)
 /* Sets the first count (1..4) components of a parameter. */
 int gpufx_effect_set_param_values(GpufxEffect *fx, const char *name,
                                   const double *values, uint32_t count);
+
+/*
+ * Effects of a chain or graph switched on and off (since API 10). node names effects as
+ * the prefix of a parameter name does: a package label naming one effect, an index
+ * ("0", "1"... always valid) or a graph statement's output label (every effect of that
+ * statement); "" is the only effect of a single effect. An effect switched off copies
+ * its first input into its output, without planning or binding anything again.
+ * gpufx_effect_find_node returns 0 when node names effects, else -1.
+ * gpufx_effect_all_nodes_disabled returns 1 when every effect is off: the outputs are
+ * then their input pads, as with the filter disabled.
+ */
+int gpufx_effect_find_node(const GpufxEffect *fx, const char *node);
+int gpufx_effect_set_node_enabled(GpufxEffect *fx, const char *node, int enabled);
+int gpufx_effect_all_nodes_disabled(const GpufxEffect *fx);
 
 /*
  * Runs the effect. inputs holds one image per input, in order. out must have the size of

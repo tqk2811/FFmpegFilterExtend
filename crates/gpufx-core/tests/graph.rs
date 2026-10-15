@@ -224,3 +224,120 @@ fn graph_mistakes_are_explained() {
     let got = g.find_param("nothing.amount").unwrap_err().to_string();
     assert!(got.contains("invert, crossfade, a, out"), "{got}");
 }
+
+/// Switches the effects `node` names on or off.
+fn switch(g: &mut EffectGraph, node: &str, on: bool) {
+    for k in g.find_node(node).unwrap() {
+        g.set_node_enabled(k, on).unwrap();
+    }
+}
+
+#[test]
+fn effects_switched_off_pass_their_input_through() {
+    let Some(ctx) = own_gpu() else { return };
+    let src = gradient(W, H);
+    let info = FrameInfo::new(0.5, 3);
+    let gray = run(&mut effect(&ctx, "grayscale"), &[&src], &info);
+    let inv = run(&mut effect(&ctx, "invert"), &[&src], &info);
+    let gray_inv = run(&mut effect(&ctx, "invert"), &[&gray], &info);
+    let vig = |input: &[u8]| run(&mut effect(&ctx, "vignette"), &[input], &info);
+
+    let mut g = graph(&ctx, "[0]grayscale.zip|invert.zip|vignette.zip[out]").unwrap();
+    let full = run_graph(&mut g, &[&src], &info).remove(0);
+    assert_eq!(full, vig(&gray_inv));
+    let allocations = g.allocations();
+    // The middle, the first, the last, then all of them.
+    switch(&mut g, "invert", false);
+    assert!(!g.node_enabled(1) && !g.all_nodes_disabled());
+    assert_eq!(run_graph(&mut g, &[&src], &info)[0], vig(&gray));
+    switch(&mut g, "invert", true);
+    switch(&mut g, "0", false);
+    assert_eq!(run_graph(&mut g, &[&src], &info)[0], vig(&inv));
+    switch(&mut g, "0", true);
+    switch(&mut g, "vignette", false);
+    assert_eq!(run_graph(&mut g, &[&src], &info)[0], gray_inv);
+    for k in 0..3 {
+        g.set_node_enabled(k, false).unwrap();
+    }
+    assert!(g.all_nodes_disabled());
+    assert_eq!(run_graph(&mut g, &[&src], &info)[0], src, "all off is the input");
+    // Toggling plans and binds nothing again: the copies reuse their bind groups.
+    let binds = g.frame_binds();
+    for on in [true, false, true, false] {
+        switch(&mut g, "1", on);
+        run_graph(&mut g, &[&src], &info);
+    }
+    assert_eq!(g.allocations(), allocations);
+    assert_eq!(g.frame_binds(), binds, "the copy of effect 1 was made when it was first off");
+    for k in 0..3 {
+        g.set_node_enabled(k, true).unwrap();
+    }
+    assert_eq!(run_graph(&mut g, &[&src], &info)[0], full);
+}
+
+#[test]
+fn switched_effects_are_named_like_parameters() {
+    let Some(ctx) = gpu() else { return };
+    let src = gradient(W, H);
+    let info = FrameInfo::new(0.0, 0);
+    let inv = run(&mut effect(&ctx, "invert"), &[&src], &info);
+
+    // One package twice: by index only.
+    let mut g = graph(&ctx, "[0]invert.zip|invert.zip[out]").unwrap();
+    let got = g.find_node("invert").unwrap_err().to_string();
+    assert!(got.contains("names 2 effects") && got.contains("`0.enable`"), "{got}");
+    assert!(g.find_node("").unwrap_err().to_string().contains("say which one"));
+    assert!(g.find_node("2").is_err() && g.find_node("nothing").is_err());
+    assert!(g.set_node_enabled(2, false).is_err());
+    switch(&mut g, "1", false);
+    assert_eq!(run_graph(&mut g, &[&src], &info)[0], inv);
+    switch(&mut g, "0", false);
+    assert_eq!(run_graph(&mut g, &[&src], &info)[0], src);
+
+    // A bare `enable` is the only effect of a single one.
+    let single = graph(&ctx, "[0]invert.zip[out]").unwrap();
+    assert_eq!(single.find_node("").unwrap(), [0]);
+
+    // A graph statement's output label switches every effect of the statement; an
+    // effect switched off still feeds its readers and the outputs.
+    let text = "[0]split[a][b]; [a]invert.zip[i]; [i]split[inv][i2]; [b]grayscale.zip|vignette.zip[y]; [i2][y]crossfade.zip[out]";
+    let mut g = graph(&ctx, text).unwrap();
+    assert_eq!(g.find_node("y").unwrap(), [1, 2]);
+    assert_eq!(g.find_node("i").unwrap(), g.find_node("invert").unwrap());
+    g.set_param_str("progress", "0.3").unwrap();
+    let mut crossfade = effect(&ctx, "crossfade");
+    crossfade.params_mut().set_str("progress", "0.3").unwrap();
+    switch(&mut g, "y", false);
+    assert_eq!(run_graph(&mut g, &[&src], &info), [inv.clone(), run(&mut crossfade, &[&inv, &src], &info)]);
+    switch(&mut g, "y", true);
+    switch(&mut g, "i", false);
+    let gray = run(&mut effect(&ctx, "grayscale"), &[&src], &info);
+    let vig = run(&mut effect(&ctx, "vignette"), &[&gray], &info);
+    assert_eq!(run_graph(&mut g, &[&src], &info), [src.clone(), run(&mut crossfade, &[&src, &vig], &info)]);
+    // Every effect off: each output is its input pad, as the bypass writes it.
+    for k in 0..4 {
+        g.set_node_enabled(k, false).unwrap();
+    }
+    assert!(g.all_nodes_disabled());
+    assert_eq!(run_graph(&mut g, &[&src], &info), [src.clone(), src.clone()]);
+}
+
+#[test]
+fn a_multi_pass_effect_switched_off_copies_an_input_only_its_first_pass_reads() {
+    let Some(ctx) = own_gpu() else { return };
+    let src = gradient(W, H);
+    let info = FrameInfo::new(0.5, 3);
+    let gray = run(&mut effect(&ctx, "grayscale"), &[&src], &info);
+    let inv = run(&mut effect(&ctx, "invert"), &[&gray], &info);
+
+    // The blur has two passes and its last one reads the first one's output, not its
+    // input: the pooled texture of the invert output must stay alive up to the copy.
+    let mut g = graph(&ctx, "[0]grayscale.zip|invert.zip|gaussian-blur.zip|vignette.zip[out]").unwrap();
+    switch(&mut g, "gaussian-blur", false);
+    let vig = run(&mut effect(&ctx, "vignette"), &[&inv], &info);
+    assert_eq!(run_graph(&mut g, &[&src], &info)[0], vig);
+    // As the last effect: the copy writes the output.
+    let mut g = graph(&ctx, "[0]grayscale.zip|invert.zip|gaussian-blur.zip[out]").unwrap();
+    switch(&mut g, "gaussian-blur", false);
+    assert_eq!(run_graph(&mut g, &[&src], &info)[0], inv);
+}

@@ -88,6 +88,13 @@ typedef struct ParamExpr {
     AVExpr *expr;
 } ParamExpr;
 
+/* "<node>.enable=<expr>" in params: an effect of a chain or graph switched per frame. */
+typedef struct NodeExpr {
+    char *node;   /* the prefix before ".enable", "" for a bare "enable" */
+    AVExpr *expr;
+    int state;    /* last value given to libgpufx, -1 before the first frame */
+} NodeExpr;
+
 typedef struct GpufxContext {
     const AVClass *class;
 
@@ -102,7 +109,9 @@ typedef struct GpufxContext {
     unsigned nb_outputs;
     ParamExpr *exprs;
     int nb_exprs;
-    AVFrame **conv;   /* per-input copies to upload: swscale conversions or flipped frames */
+    NodeExpr *node_exprs;
+    int nb_node_exprs;
+    AVFrame **conv;  /* per-input copies to upload: swscale conversions or flipped frames */
     SwsContext **in_sws;
     AVFrame **blank;  /* GPU black frame for inputs > 0 before their first frame */
     AVFrame **in;     /* frame of each input in the current event, NULL before it starts */
@@ -190,12 +199,71 @@ static void drop_expr(GpufxContext *s, const char *name)
     }
 }
 
+static void free_node_expr(NodeExpr *e)
+{
+    av_freep(&e->node);
+    av_expr_free(e->expr);
+    e->expr = NULL;
+}
+
+/*
+ * "<node>.enable=<expr>": switches the effects node names (package label, index or graph
+ * output label, as in "<node>.<param>"; a bare "enable" for a single effect) on while the
+ * expression is not 0, evaluated for every frame like parameter expressions. Not the
+ * filter's own timeline option enable=, which is outside params. Entries are kept per
+ * spelling of the node: "invert.enable" and "0.enable" naming the same effect are two
+ * entries, and the one evaluated last for a frame wins.
+ */
+static int add_node_expr(AVFilterContext *ctx, const char *name, const char *value)
+{
+    GpufxContext *s = ctx->priv;
+    size_t len = strlen(name) - strlen("enable");
+    char *node = av_strndup(name, len ? len - 1 : 0);
+    AVExpr *expr = NULL;
+    NodeExpr *tmp;
+    int ret;
+
+    if (!node)
+        return AVERROR(ENOMEM);
+    if (name[0] == '.') {
+        av_log(ctx, AV_LOG_ERROR, "Invalid '%s': missing effect name before .enable.\n", name);
+        av_free(node);
+        return AVERROR(EINVAL);
+    }
+    if (gpufx_effect_find_node(s->fx, node) < 0) {
+        av_log(ctx, AV_LOG_ERROR, "Effect '%s': %s\n", gpufx_effect_name(s->fx), gpufx_last_error());
+        av_free(node);
+        return AVERROR(EINVAL);
+    }
+    if ((ret = av_expr_parse(&expr, value, var_names, NULL, NULL, NULL, NULL, 0, ctx)) < 0) {
+        av_log(ctx, AV_LOG_ERROR, "Invalid expression for '%s': '%s'.\n", name, value);
+        av_free(node);
+        return ret;
+    }
+    for (int i = 0; i < s->nb_node_exprs; i++) {
+        if (!strcmp(s->node_exprs[i].node, node)) {
+            free_node_expr(&s->node_exprs[i]);
+            s->node_exprs[i] = s->node_exprs[--s->nb_node_exprs];
+            break;
+        }
+    }
+    if (!(tmp = av_realloc_array(s->node_exprs, s->nb_node_exprs + 1, sizeof(*s->node_exprs)))) {
+        av_expr_free(expr);
+        av_free(node);
+        return AVERROR(ENOMEM);
+    }
+    s->node_exprs = tmp;
+    s->node_exprs[s->nb_node_exprs++] = (NodeExpr){ node, expr, -1 };
+    return 0;
+}
+
 /*
  * Parses "name=value|name=value". A value is either a literal the package
  * understands ("0.5", "1,0,0", "#ff8800") or, for scalar parameters, an
  * expression of t, n, w, h, a (w/h), sar and dar evaluated for every frame
  * ("clip((t-2)/1.5,0,1)"). In a chain, names are "package.name", "index.name"
  * or a bare name only one effect has; they are stored by their full name.
+ * "<node>.enable" (or a bare "enable") switches effects: see add_node_expr().
  */
 static int apply_params(AVFilterContext *ctx, const char *str)
 {
@@ -209,7 +277,7 @@ static int apply_params(AVFilterContext *ctx, const char *str)
         return AVERROR(ENOMEM);
 
     for (item = av_strtok(dup, "|", &saveptr); item; item = av_strtok(NULL, "|", &saveptr)) {
-        char *value = strchr(item, '=');
+        char *value = strchr(item, '='), *dot;
         const char *name;
         AVExpr *expr = NULL;
         ParamExpr *tmp;
@@ -221,6 +289,13 @@ static int apply_params(AVFilterContext *ctx, const char *str)
             break;
         }
         *value++ = 0;
+        /* No package has a parameter named enable: the name is reserved for this. */
+        dot = strrchr(item, '.');
+        if (!strcmp(item, "enable") || (dot && !strcmp(dot + 1, "enable"))) {
+            if ((ret = add_node_expr(ctx, item, value)) < 0)
+                break;
+            continue;
+        }
         if ((index = gpufx_effect_find_param(s->fx, item)) < 0) {
             av_log(ctx, AV_LOG_ERROR, "Effect '%s': %s\n", gpufx_effect_name(s->fx),
                    gpufx_last_error());
@@ -430,6 +505,9 @@ static av_cold void uninit(AVFilterContext *ctx)
     for (int i = 0; i < s->nb_exprs; i++)
         free_expr(&s->exprs[i]);
     av_freep(&s->exprs);
+    for (int i = 0; i < s->nb_node_exprs; i++)
+        free_node_expr(&s->node_exprs[i]);
+    av_freep(&s->node_exprs);
     for (unsigned i = 0; s->conv && i < s->nb_inputs; i++)
         av_frame_free(&s->conv[i]);
     for (unsigned i = 0; s->in_sws && i < s->nb_inputs; i++)
@@ -1977,7 +2055,7 @@ static int process_frame(FFFrameSync *fs)
     AVFrame *in0 = NULL;
     GpufxFrameInfo info;
     double vars[VAR_NB];
-    int ret;
+    int ret, disabled;
 
     for (unsigned i = 0; i < s->nb_inputs; i++) {
         AVFrame *in;
@@ -2013,7 +2091,34 @@ static int process_frame(FFFrameSync *fs)
         }
     }
 
-    if (ctx->is_disabled) {
+    vars[VAR_T]   = fs->pts == AV_NOPTS_VALUE ? NAN : fs->pts * av_q2d(fs->time_base);
+    vars[VAR_N]   = s->frame_count;
+    vars[VAR_W]   = outlink->w;
+    vars[VAR_H]   = outlink->h;
+    vars[VAR_A]   = (double)outlink->w / outlink->h;
+    vars[VAR_SAR] = outlink->sample_aspect_ratio.num ? av_q2d(outlink->sample_aspect_ratio) : 1.0;
+    vars[VAR_DAR] = vars[VAR_A] * vars[VAR_SAR];
+    /* Effects switched by <node>.enable; with every one off the event is a disabled one. */
+    disabled = ctx->is_disabled;
+    if (!disabled && s->nb_node_exprs) {
+        for (int i = 0; i < s->nb_node_exprs; i++) {
+            NodeExpr *e = &s->node_exprs[i];
+            const int on = av_expr_eval(e->expr, vars, NULL) != 0;
+
+            if (on != e->state) {
+                if (gpufx_effect_set_node_enabled(s->fx, e->node, on) < 0) {
+                    ret = gpufx_error(ctx, "enable");
+                    goto fail;
+                }
+                e->state = on;
+            }
+        }
+        disabled = gpufx_effect_all_nodes_disabled(s->fx);
+        /* n counts on: the expressions read it. */
+        s->frame_count += disabled;
+    }
+
+    if (disabled) {
         const char *why = passthrough_ok(ctx);
 
         if (!why) {
@@ -2049,18 +2154,11 @@ static int process_frame(FFFrameSync *fs)
         av_frame_remove_side_data(out, AV_FRAME_DATA_VIDEO_ENC_PARAMS);
     }
 
-    if (ctx->is_disabled) {
+    if (disabled) {
         /* Pass the inputs through, converted to the output formats. */
         if ((ret = process_hw(ctx, NULL)) < 0)
             goto fail;
     } else {
-        vars[VAR_T]   = fs->pts == AV_NOPTS_VALUE ? NAN : fs->pts * av_q2d(fs->time_base);
-        vars[VAR_N]   = s->frame_count;
-        vars[VAR_W]   = outlink->w;
-        vars[VAR_H]   = outlink->h;
-        vars[VAR_A]   = (double)outlink->w / outlink->h;
-        vars[VAR_SAR] = outlink->sample_aspect_ratio.num ? av_q2d(outlink->sample_aspect_ratio) : 1.0;
-        vars[VAR_DAR] = vars[VAR_A] * vars[VAR_SAR];
         for (int i = 0; i < s->nb_exprs; i++) {
             double v = av_expr_eval(s->exprs[i].expr, vars, NULL);
             if (gpufx_effect_set_param_values(s->fx, s->exprs[i].name, &v, 1) < 0) {

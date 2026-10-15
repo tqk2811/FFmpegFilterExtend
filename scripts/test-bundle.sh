@@ -174,6 +174,13 @@ pt_tests() {
     PT_EN=$(pt_md5 "$f" "$u,$I:enable='eq(n\,0)'")
     pt_check "$l: frames after enable= turns off equal the input" "$PT_EN" \
         "$(echo "$PT_ONCE" | head -n 1; echo "$PT_SRC" | tail -n +2)" relabelled
+    # <node>.enable in params: every effect of a chain off is a disabled gpufx (relabelled);
+    # one off copies its input on the GPU inside the chain.
+    NC="gpufx=effect='$FX/invert.zip|$FX/invert.zip'"
+    pt_check "$l: every effect switched off by <node>.enable relabels" \
+        "$(pt_md5 "$f" "$u,$NC:params='0.enable=0|1.enable=0'")" "$PT_SRC" relabelled
+    [ "$4" = 1 ] && want=$PT_ONCE || want=
+    pt_check "$l: one effect of a chain switched off" "$(pt_md5 "$f" "$u,$NC:params='1.enable=0'")" "$want" true
 }
 # Main frame count, without gpufx (the late input tests compare against it).
 MAIN_N=$("$FF" -hide_banner -nostdin -v error -i "$A" -an -vf "format=rgba" -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | wc -l | tr -d ' ')
@@ -379,6 +386,47 @@ rejects "graph: label read twice" "is read twice" -i "$A" -an -vf "gpufx=graph='
 rejects "graph: wrong number of labels" "takes 2 inputs, the node gives it 1" -i "$A" -an -vf "gpufx=graph='[0]$FX/crossfade.zip[out]'" $NULL
 # shellcheck disable=SC2086
 rejects "graph: same size rule inside the graph" "must equal the first input" -i "$A" -i "$C" -filter_complex "[0][1]gpufx=graph='[0]$FX/invert.zip[i]; [i][1]$FX/crossfade.zip[out]'" -an $NULL
+
+echo "effects switched by <node>.enable:"
+NE_IDX=$(md5 "gpufx=effect='$FX/invert.zip|$FX/invert.zip':params='0.enable=0'")
+NE_LBL=$(md5 "gpufx=effect='$FX/grayscale.zip|$FX/invert.zip':params='grayscale.enable=0'")
+if [ -n "$ONCE_MD5" ] && [ "$NE_IDX" = "$ONCE_MD5" ] && [ "$NE_LBL" = "$ONCE_MD5" ]; then pass "index.enable=0 and label.enable=0 skip that effect"
+else fail "index.enable=0 and label.enable=0 skip that effect"; cat "$CLIPS/last.log"; fi
+# Per frame: both effects on for frame 0 (restored), the first off later (inverted once).
+NE_EXPR=$(md5 "gpufx=effect='$FX/invert.zip|$FX/invert.zip':params='0.enable=lt(n\,1)'")
+if [ -n "$SRC_MD5" ] && [ "$NE_EXPR" = "$(echo "$SRC_MD5" | head -n 1; echo "$ONCE_MD5" | tail -n +2)" ]; then pass "enable expression per frame"
+else fail "enable expression per frame"; echo "    got: $NE_EXPR"; cat "$CLIPS/last.log"; fi
+# A graph statement switched off by its output label still writes its output pad (in place
+# on Vulkan frames).
+rm -f "$CLIPS/p.md5" "$CLIPS/q.md5"
+gpu_ff -i "$A" -filter_complex \
+    "[0:v]format=rgba,gpufx=graph='[0]split[a][b]; [a]$FX/invert.zip[inv]; [b]$FX/grayscale.zip|$FX/invert.zip[gray]':params='inv.enable=0|1.enable=0'[p][q];[p]hwdownload,format=rgba[p2];[q]hwdownload,format=rgba[q2]" \
+    -map "[p2]" -frames:v 3 -pix_fmt rgba -f framemd5 -y "$CLIPS/p.md5" \
+    -map "[q2]" -frames:v 3 -pix_fmt rgba -f framemd5 -y "$CLIPS/q.md5" > "$CLIPS/last.log" 2>&1
+P_MD5=$(grep -v '^#' "$CLIPS/p.md5" 2>/dev/null | awk -F, '{print $NF}')
+Q_MD5=$(grep -v '^#' "$CLIPS/q.md5" 2>/dev/null | awk -F, '{print $NF}')
+if [ -n "$P_MD5" ] && [ "$P_MD5" = "$SRC_MD5" ] && [ "$Q_MD5" = "$ONCE_MD5" ]; then
+    pass "graph: statement switched off by its output label"
+else fail "graph: statement switched off by its output label"; cat "$CLIPS/last.log"; fi
+# A single effect: a bare enable.
+NE_ONE=$(md5 "gpufx=effect=$FX/invert.zip:params='enable=0'")
+if [ -n "$SRC_MD5" ] && [ "$NE_ONE" = "$SRC_MD5" ]; then pass "bare enable=0 in params of a single effect"
+else fail "bare enable=0 in params of a single effect"; cat "$CLIPS/last.log"; fi
+# shellcheck disable=SC2086
+rejects "ambiguous <node>.enable" "names 2 effects" -i "$A" -an -vf "gpufx=effect='$FX/invert.zip|$FX/invert.zip':params='invert.enable=0'" $NULL
+# shellcheck disable=SC2086
+rejects "bare enable in a chain" "say which one" -i "$A" -an -vf "gpufx=effect='$FX/invert.zip|$FX/invert.zip':params='enable=0'" $NULL
+# shellcheck disable=SC2086
+ok "<node>.enable toggled by sendcmd (accepted)" -i "$A" -an -vf \
+    "gpufx@n=effect='$FX/invert.zip|$FX/grayscale.zip',sendcmd=c='0.3 gpufx@n params 1.enable=0;0.6 gpufx@n params 0.enable=0;0.9 gpufx@n params 0.enable=1'" $NULL
+# The clip has 25 fps: sendcmd switches the first of two inverts off before frame 1 and on
+# again before frame 2, so the frames are the source, inverted once, the source.
+NE_SC=$(md5 "sendcmd=c='0.03 gpufx@n params 0.enable=0;0.07 gpufx@n params 0.enable=1',gpufx@n=effect='$FX/invert.zip|$FX/invert.zip'")
+if [ -n "$SRC_MD5" ] && [ "$NE_SC" = "$(echo "$SRC_MD5" | sed -n 1p; echo "$ONCE_MD5" | sed -n 2p; echo "$SRC_MD5" | sed -n 3p)" ]; then
+    pass "<node>.enable toggled by sendcmd changes the frames"
+else fail "<node>.enable toggled by sendcmd changes the frames"; echo "    got: $NE_SC"; cat "$CLIPS/last.log"; fi
+# shellcheck disable=SC2086
+rejects "bare .enable" "missing effect name before .enable" -i "$A" -an -vf "gpufx=effect=$FX/invert.zip:params='.enable=0'" $NULL
 
 echo "frame rate:"
 # The first input sets the output frame rate: a 25 fps clip mixed with a 60 fps clip must

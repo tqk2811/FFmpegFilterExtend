@@ -414,6 +414,10 @@ impl Manifest {
         let mut param_names: Vec<&str> = Vec::new();
         for p in &self.params {
             declare(&p.name, "param", &mut param_names)?;
+            if p.name == "enable" {
+                // `<node>.enable` turns an effect of a chain or graph on and off (the filter's `params`).
+                return bad("param name `enable` is reserved: `<effect>.enable` switches an effect of a chain or graph".into());
+            }
             param_names.push(&p.name);
             if p.kind == ParamType::Expr {
                 if self.api < 2 {
@@ -596,6 +600,17 @@ mod tests {
         };
         var("u_2").unwrap();
         assert!(var("_u").is_err() && var("a__b").is_err() && var("2u").is_err());
+        // `enable` switches an effect of a chain or graph (`0.enable`): no package declares it.
+        let param = |n: &str| {
+            Manifest::parse(
+                format!(
+                    r#"{{"id":"t.x","name":"X","params":[{{"name":"{n}","type":"float","default":1}}],"passes":[{{"shader":"a.wgsl"}}]}}"#
+                )
+                .as_bytes(),
+            )
+        };
+        param("enabled").unwrap();
+        assert!(param("enable").unwrap_err().to_string().contains("`enable` is reserved"));
         assert!(err(3, r#"{"name":"a","path":"x.png","colorspace":"linear"}"#).contains("unsupported manifest api 3"));
     }
 }

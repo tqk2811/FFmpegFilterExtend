@@ -128,6 +128,7 @@ Mỗi phần tử `passes`:
 
 Output có kích thước bằng input đầu tiên. Tên input/texture/param phải là định danh hợp lệ,
 không trùng nhau, không bắt đầu bằng `gpufx` và không dùng `globals`, `params`, `out_tex`, `smp`.
+Param không được tên `enable`: `<effect>.enable` dùng để bật/tắt một effect của chain hoặc graph.
 
 ## Viết shader WGSL
 

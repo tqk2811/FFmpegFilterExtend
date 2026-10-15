@@ -597,3 +597,34 @@ fn bindings_of_pooled_gpu_frames_are_made_once() {
         assert!(fresh.frame_binds() > after_first_round, "`{text}`: new textures are bound anew");
     }
 }
+
+#[test]
+fn effects_switched_off_write_their_copy_in_place() {
+    use PixelFormat::*;
+    let Some(ctx) = own_gpu() else { return };
+    let info = FrameInfo::new(0.5, 3);
+    let mips = MipPackage::new();
+    let (w, h) = (37, 22);
+    // The copy of a switched-off effect writes the output frame itself, with one pass or two.
+    for (text, node) in [("[0]grayscale.zip[out]", "grayscale"), ("[0]invert.zip|gaussian-blur.zip[out]", "gaussian-blur")] {
+        let mut copied = graph_with_mips(&ctx, text, &mips);
+        let mut direct = graph_with_mips(&ctx, text, &mips);
+        direct.allow_direct_gpu();
+        for frame in 0..4u32 {
+            // Off, on, off, on: the frames change and so does the copy.
+            let on = frame % 2 == 1;
+            for g in [&mut copied, &mut direct] {
+                for k in g.find_node(node).unwrap() {
+                    g.set_node_enabled(k, on).unwrap();
+                }
+            }
+            let data = pattern(Rgba, w, h, frame);
+            let want = gpu_run(&ctx, &mut copied, &[upload(&ctx, Rgba, &data, w, h)], &[target(&ctx, Rgba, w, h)], Some(&info));
+            let got = gpu_run(&ctx, &mut direct, &[upload(&ctx, Rgba, &data, w, h)], &[target(&ctx, Rgba, w, h)], Some(&info));
+            assert_eq!(got, want, "`{text}`, frame {frame}");
+            if text.starts_with("[0]grayscale") && !on {
+                assert_eq!(got[0], data, "off is the input");
+            }
+        }
+    }
+}

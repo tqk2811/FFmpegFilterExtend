@@ -187,6 +187,21 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
 - **params**: `tên=giá trị` cách nhau bởi `|`. Giá trị là literal (`0.5`, `1,0,0`, `#ff8800`)
   hoặc **biểu thức FFmpeg** theo `t`, `n`, `w`, `h`, `a` (`w/h`), `sar`, `dar` (`a*sar`),
   tính lại mỗi frame. Đây là cách làm keyframe/transition không cần tool ngoài.
+- **`<node>.enable=<expr>`** trong `params` bật/tắt từng effect của chain hoặc graph theo từng frame
+  (bật khi biểu thức khác 0; hằng số cũng là biểu thức): `params='0.enable=lt(t\,2)'`. Node được gọi
+  như tiền tố của tên param: label của package khi chỉ một effect mang nó, chỉ số tính từ 0 (luôn
+  dùng được), hoặc nhãn đầu ra của một câu lệnh graph (`[x]` → `x.enable`, mọi effect của câu lệnh
+  đó). `enable` trần trong `params` chỉ dùng được khi có một effect; nó không phải option timeline
+  `enable=` của filter, vốn nằm ngoài `params`. Package không được khai báo param tên `enable`.
+  Effect bị tắt copy input đầu của nó vào texture output của nó (effect nào cũng có kích thước của
+  input đầu), nên plan, các texture trong pool và binding của phần còn lại giữ nguyên, bật/tắt không
+  cấp phát gì. Tắt một effect chỉ tiết kiệm phần shader, không tiết kiệm hết: bước copy vẫn là một
+  compute pass và effect vẫn giữ texture output. Khi mọi effect đều tắt, frame được xử lý như
+  filter bị disable (relabel nếu `passthrough` cho phép, nếu không thì bypass trên GPU), và `n`
+  vẫn đếm tiếp. Node được khớp đúng như cách viết: `invert.enable` và `0.enable` cùng chỉ một
+  effect là hai mục riêng, mục được tính sau cùng cho frame đó thắng; `.enable` trần (không có tên
+  effect) là lỗi. Qua `sendcmd`, `params 0.enable=1` bật lại effect: một mục `.enable` không xoá
+  được, chỉ thay được, bằng cách gọi lại đúng cách viết node đó.
 - **sendcmd / zmq**: lệnh `params` đổi giá trị lúc chạy, ví dụ
   `sendcmd=c='2.0 gpufx@fx params strength=0.2'`.
 - **timeline** (`enable='between(t,1,3)'`) được hỗ trợ.

@@ -21,7 +21,7 @@ use gpufx_core::{
 };
 
 /// Bumped when the C ABI changes incompatibly. Must match `GPUFX_API_VERSION` in gpufx.h.
-const API_VERSION: u32 = 9;
+const API_VERSION: u32 = 10;
 
 thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
@@ -598,6 +598,32 @@ pub unsafe extern "C" fn gpufx_effect_set_param_values(fx: *mut GpufxEffect, nam
         fx.graph.set_param(name, values).map_err(|e| e.to_string())?;
         Ok(0)
     })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_find_node(fx: *const GpufxEffect, node: *const c_char) -> c_int {
+    guard(-1, || {
+        let fx = fx.as_ref().ok_or("effect is NULL")?;
+        fx.graph.find_node(str_arg(node, "node")?).map_err(|e| e.to_string())?;
+        Ok(0)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_set_node_enabled(fx: *mut GpufxEffect, node: *const c_char, enabled: c_int) -> c_int {
+    guard(-1, || {
+        let fx = fx.as_mut().ok_or("effect is NULL")?;
+        let effects = fx.graph.find_node(str_arg(node, "node")?).map_err(|e| e.to_string())?;
+        for k in effects {
+            fx.graph.set_node_enabled(k, enabled != 0).map_err(|e| e.to_string())?;
+        }
+        Ok(0)
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_all_nodes_disabled(fx: *const GpufxEffect) -> c_int {
+    fx.as_ref().map_or(0, |fx| fx.graph.all_nodes_disabled() as c_int)
 }
 
 #[no_mangle]
