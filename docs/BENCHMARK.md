@@ -102,11 +102,11 @@ Build `c62d150` (win64 bundle), measured on 2026-10-15, same machine as above.
   1. CPU: FFmpeg 8.0.1, chain of 5 `xfade=transition=fade:duration=1:offset=9|18|27|36|45`, then
      `format=yuv420p`.
   2. Five separate `gpufx`, one per join, each on only while its transition runs:
-     `[x1][u2]gpufx=effect=effects/crossfade.zip:params='progress=clip(t-18\,0\,1)':enable='between(t,18,19)':bypass=auto[x2]`.
+     `[x1][u2]gpufx=effect='effects/crossfade.zip=progress=clip(t-18\,0\,1)':enable='between(t,18,19)':bypass=auto[x2]`.
      Outside its window a filter hands on its input texture relabelled (`passthrough=auto`): input 0 before
      the transition and the incoming clip after it (`bypass=auto`).
-  3. One `gpufx` with a graph of 5 crossfades, each switched by `<node>.enable` / `<node>.bypass`:
-     `[u0]...[u5]gpufx=graph='[0][1]effects/crossfade.zip[x1]; [x1][2]effects/crossfade.zip[x2]; ...[out]':params='x1.progress=clip(t-9\,0\,1)|x1.enable=between(t\,9\,10)|x1.bypass=auto|...'`.
+  3. One `gpufx` with a graph of 5 crossfades, each switched by the inline `enable` / `bypass` keys:
+     `[u0]...[u5]gpufx=graph='[0][1]effects/crossfade.zip=progress=clip(t-9\,0\,1)\:enable=between(t\,9\,10)\:bypass=auto[x1]; [x1][2]effects/crossfade.zip=progress=clip(t-18\,0\,1)\:enable=between(t\,18\,19)\:bypass=auto[x2]; ...[out]'`.
 - **Inputs of the gpufx ways**: each clip is uploaded once (`gpufx_upload`, Vulkan device
   `vulkan=vk:0,disable_multiplane=1`) and shifted to its join (`setpts=PTS+9*k/TB`). Clip A is held on its last
   frame with `tpad=stop_mode=clone:stop_duration=45` (GPU frames, nothing uploaded again), because the first input
@@ -121,7 +121,7 @@ Build `c62d150` (win64 bundle), measured on 2026-10-15, same machine as above.
 | Decode only (6 clips, no filter) | 1.07 s | – | 0.87 s | 20.3 s | 868 MB |
 | 1. 5 × `xfade` fade (CPU, FFmpeg 8.0.1) | 3.19 s | 518 | 2.96 s | 27.3 s | 1618 MB |
 | 2. 5 × `gpufx` + `enable`/`bypass=auto`, Vulkan | 2.62 s | 631 | 1.96 s | 13.8 s | 845 MB |
-| 3. one `gpufx` graph + `<node>.enable`/`.bypass`, Vulkan | **2.61 s** | 632 | 2.00 s | 13.3 s | 847 MB |
+| 3. one `gpufx` graph + inline `enable`/`bypass`, Vulkan | **2.61 s** | 632 | 2.00 s | 13.3 s | 847 MB |
 | 2., without `gpufx_download` | 2.63 s | 627 | 1.96 s | 13.7 s | 836 MB |
 | 3., without `gpufx_download` | 3.43 s (2.7–3.8) | 482 | 2.60 s | 17.6 s | 831 MB |
 | 2., `passthrough=off` (GPU copy while off) | 5.83 s | 283 | 4.94 s | 16.9 s | 873 MB |
@@ -140,7 +140,7 @@ What the numbers say:
 
 - Five transitions in a 55 s join: gpufx is about 1.2× faster than the CPU in wall time and needs half the CPU
   time and half the RAM. The run is bound by decoding the six clips; the shaders run for only 155 of 1650 frames.
-- Five separate gpufx with `enable=` and one graph with `<node>.enable` cost the same: while off, a filter
+- Five separate gpufx with `enable=` and one graph with inline `enable` cost the same: while off, a filter
   hands its texture on without a copy, so a chain of disabled filters is nearly free.
 - `passthrough=off` makes each disabled filter copy (and convert) the frame on the GPU: 2.2× slower, and the
   YUV → RGBA → YUV round trip of every copy lowers the chroma (PSNR 37 dB against the relabelled output).
@@ -188,7 +188,7 @@ Build `de39c81` (win64 bundle), measured on 2026-10-15, same machine as above (I
 which is the decoder); RAM is about 0.42 GB for gpufx against 0.1–0.37 GB on the CPU.
 
 **Joining six clips with five transitions** (same setup as the section above, only the transition changed;
-chain = 5 `gpufx` with `enable`/`bypass=auto`, graph = one `gpufx` with `<node>.enable`/`.bypass`):
+chain = 5 `gpufx` with `enable`/`bypass=auto`, graph = one `gpufx` with inline `enable`/`bypass`):
 
 | Transition | CPU `xfade` | gpufx chain | gpufx graph | CPU utime / gpufx utime | maxrss CPU / gpufx |
 |---|---|---|---|---|---|

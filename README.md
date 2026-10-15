@@ -36,15 +36,31 @@ Video effects powered by **GPU shaders** for FFmpeg, loaded from external **`.zi
 # gpufx outputs GPU frames: give it a device (it uploads software inputs itself) and
 # download before the encoder
 ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i a.mp4 -i b.mp4 -filter_complex \
-  "[0][1]gpufx=effect=wipe-transition.zip:params='progress=clip((t-1)/1.5\,0\,1)|angle=45',hwdownload,format=yuv420p" out.mp4
+  "[0][1]gpufx=effect='wipe-transition.zip=progress=clip((t-1)/1.5\,0\,1)\:angle=45',hwdownload,format=yuv420p" out.mp4
 ```
 
 ```sh
 # a diamond of effects on the GPU, two output pads written to two files
 ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i a.mp4 -i b.mp4 -filter_complex \
-  "[0:v][1:v]gpufx=graph='[0]split[a][b]; [a]gaussian-blur.zip[ba]; [b]grayscale.zip|vignette.zip[gb]; [ba][gb]crossfade.zip[x]; [x]split[x1][x2]; [x2][1]wipe-transition.zip[w]':params='x.progress=0.5|w.progress=t'[mix][wipe];[mix]hwdownload,format=yuv420p[m];[wipe]hwdownload,format=yuv420p[w2]" \
+  "[0:v][1:v]gpufx=graph='[0]split[a][b]; [a]gaussian-blur.zip[ba]; [b]grayscale.zip|vignette.zip[gb]; [ba][gb]crossfade.zip=progress=0.5[x]; [x]split[x1][x2]; [x2][1]wipe-transition.zip=progress=t[w]'[mix][wipe];[mix]hwdownload,format=yuv420p[m];[wipe]hwdownload,format=yuv420p[w2]" \
   -map "[m]" mix.mp4 -map "[w2]" wipe.mp4
 ```
+
+Parameters are written **inline**, right after the package name, like the options of a native FFmpeg filter:
+`pkg.zip=key=value:key2=value2`. This works in `effect=` (also in a chain: `effect='a.zip=k=1|b.zip'`) and in
+every node of `graph=`. Keys are named, a value is a constant or an expression (`t`, `n`, `w`, `h`, `a`, `sar`,
+`dar`), and two keys are reserved for the effect instance: `enable=<expr>` switches that effect on and off per
+frame and `bypass=0|auto` picks the input it copies while off. They are separate from the filter's own timeline
+`enable=` and `bypass=` options, which stay outside the effect string. An unknown key, a key given twice or a
+`bypass` other than `0`/`auto` is an error that names the effect and the key.
+
+- Put the whole `effect=`/`graph=` value in `'...'`. FFmpeg splits filter options at `:` *after* it removes
+  those quotes, so write the `:` between inline keys as `\:` (a single key needs none:
+  `effect='vignette.zip=strength=0.7'`). Commas in expressions are escaped `\,` as for any filter option.
+- Inside the effect string, `\` escapes one of `\ ' : ; | = [ ]` (before any other character it stays literal, so
+  Windows paths work) and `'...'` quotes a value.
+- `sendcmd` is a runtime command, not a filter option: `sendcmd=c='0.5 gpufx@g params gb.strength=0.2'` sets
+  `node.name=value` pairs (separated by `|`) while the stream runs; see [design](docs/DESIGN.md).
 
 ```sh
 # a chain: the first gpufx uploads, every effect runs on FFmpeg's Vulkan device, one download
@@ -100,7 +116,7 @@ You need Rust (stable) and a GPU driver (on Linux without a GPU you can use `mes
 ```sh
 cargo build --release
 cargo test --release                       # run the sample effects on the available GPU
-./target/release/gpufx run examples/effects/vignette -i in.png -o out.png -p strength=0.9
+./target/release/gpufx run 'examples/effects/vignette=strength=0.9' -i in.png -o out.png
 scripts/pack-effects.sh                    # only package the effects: examples/effects -> dist/effects/*.zip
 ```
 

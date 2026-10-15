@@ -33,15 +33,31 @@ Hiệu ứng video chạy bằng **shader trên GPU** cho FFmpeg, nạp từ **g
 # gpufx trả ra frame GPU: đưa cho nó một device (frame CPU ở input nó tự upload) và
 # download trước encoder
 ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i a.mp4 -i b.mp4 -filter_complex \
-  "[0][1]gpufx=effect=wipe-transition.zip:params='progress=clip((t-1)/1.5\,0\,1)|angle=45',hwdownload,format=yuv420p" out.mp4
+  "[0][1]gpufx=effect='wipe-transition.zip=progress=clip((t-1)/1.5\,0\,1)\:angle=45',hwdownload,format=yuv420p" out.mp4
 ```
 
 ```sh
 # đồ thị hình thoi trên GPU, hai output pad ghi ra hai file
 ffmpeg -init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk -i a.mp4 -i b.mp4 -filter_complex \
-  "[0:v][1:v]gpufx=graph='[0]split[a][b]; [a]gaussian-blur.zip[ba]; [b]grayscale.zip|vignette.zip[gb]; [ba][gb]crossfade.zip[x]; [x]split[x1][x2]; [x2][1]wipe-transition.zip[w]':params='x.progress=0.5|w.progress=t'[mix][wipe];[mix]hwdownload,format=yuv420p[m];[wipe]hwdownload,format=yuv420p[w2]" \
+  "[0:v][1:v]gpufx=graph='[0]split[a][b]; [a]gaussian-blur.zip[ba]; [b]grayscale.zip|vignette.zip[gb]; [ba][gb]crossfade.zip=progress=0.5[x]; [x]split[x1][x2]; [x2][1]wipe-transition.zip=progress=t[w]'[mix][wipe];[mix]hwdownload,format=yuv420p[m];[wipe]hwdownload,format=yuv420p[w2]" \
   -map "[m]" mix.mp4 -map "[w2]" wipe.mp4
 ```
+
+Tham số được viết **inline**, ngay sau tên package, giống option của một filter FFmpeg gốc:
+`pkg.zip=key=value:key2=value2`. Dùng được trong `effect=` (kể cả chain: `effect='a.zip=k=1|b.zip'`) và trong
+mọi node của `graph=`. Key phải có tên, giá trị là hằng số hoặc biểu thức (`t`, `n`, `w`, `h`, `a`, `sar`, `dar`),
+và có hai key dành riêng cho từng instance effect: `enable=<expr>` bật/tắt effect đó theo từng frame, còn
+`bypass=0|auto` chọn input mà nó copy khi đang tắt. Chúng khác với option timeline `enable=` và option `bypass=`
+của chính filter, vốn nằm ngoài chuỗi effect. Key lạ, key cho hai lần, hoặc `bypass` khác `0`/`auto` là lỗi, có
+nêu tên effect và key.
+
+- Bọc cả giá trị `effect=`/`graph=` trong `'...'`. FFmpeg tách option của filter tại `:` *sau khi* đã bỏ các dấu
+  nháy đó, nên dấu `:` giữa các key inline phải viết là `\:` (chỉ một key thì không cần:
+  `effect='vignette.zip=strength=0.7'`). Dấu phẩy trong biểu thức vẫn escape `\,` như mọi option của filter.
+- Bên trong chuỗi effect, `\` escape một ký tự trong `\ ' : ; | = [ ]` (đứng trước ký tự khác thì `\` giữ
+  nguyên, nên đường dẫn Windows vẫn dùng được) và `'...'` bọc một giá trị.
+- `sendcmd` là lệnh lúc chạy, không phải option của filter: `sendcmd=c='0.5 gpufx@g params gb.strength=0.2'` đặt
+  các cặp `node.name=value` (cách nhau bởi `|`) trong khi stream đang chạy; xem [design](docs/DESIGN-vi.md).
 
 ```sh
 # một chuỗi: gpufx đầu tiên upload, mọi hiệu ứng chạy trên device Vulkan của FFmpeg, download một lần
@@ -98,7 +114,7 @@ Cần Rust (stable) và một driver GPU (Linux không có GPU có thể dùng `
 ```sh
 cargo build --release
 cargo test --release                       # chạy các hiệu ứng mẫu trên GPU hiện có
-./target/release/gpufx run examples/effects/vignette -i in.png -o out.png -p strength=0.9
+./target/release/gpufx run 'examples/effects/vignette=strength=0.9' -i in.png -o out.png
 scripts/pack-effects.sh                    # chỉ đóng gói hiệu ứng: examples/effects -> dist/effects/*.zip
 ```
 

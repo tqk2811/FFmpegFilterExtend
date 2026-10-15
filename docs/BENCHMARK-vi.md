@@ -98,11 +98,11 @@ Bản build `c62d150` (bundle win64), đo ngày 2026-10-15, cùng máy như trê
 - **Ba cách** (script filter đầy đủ truyền bằng `-/filter_complex <file>`):
   1. CPU: FFmpeg 8.0.1, chuỗi 5 `xfade=transition=fade:duration=1:offset=9|18|27|36|45`, rồi `format=yuv420p`.
   2. Năm `gpufx` riêng, mỗi chỗ nối một filter, chỉ bật trong lúc chuyển cảnh của nó:
-     `[x1][u2]gpufx=effect=effects/crossfade.zip:params='progress=clip(t-18\,0\,1)':enable='between(t,18,19)':bypass=auto[x2]`.
+     `[x1][u2]gpufx=effect='effects/crossfade.zip=progress=clip(t-18\,0\,1)':enable='between(t,18,19)':bypass=auto[x2]`.
      Ngoài cửa sổ, filter chuyền texture input đi dưới nhãn mới (`passthrough=auto`, không copy): input 0 trước
      chuyển cảnh và clip mới sau chuyển cảnh (`bypass=auto`).
-  3. Một `gpufx` với graph gồm 5 crossfade, bật tắt từng node bằng `<node>.enable` / `<node>.bypass`:
-     `[u0]...[u5]gpufx=graph='[0][1]effects/crossfade.zip[x1]; [x1][2]effects/crossfade.zip[x2]; ...[out]':params='x1.progress=clip(t-9\,0\,1)|x1.enable=between(t\,9\,10)|x1.bypass=auto|...'`.
+  3. Một `gpufx` với graph gồm 5 crossfade, bật tắt từng effect bằng key inline `enable` / `bypass`:
+     `[u0]...[u5]gpufx=graph='[0][1]effects/crossfade.zip=progress=clip(t-9\,0\,1)\:enable=between(t\,9\,10)\:bypass=auto[x1]; [x1][2]effects/crossfade.zip=progress=clip(t-18\,0\,1)\:enable=between(t\,18\,19)\:bypass=auto[x2]; ...[out]'`.
 - **Input của hai cách gpufx**: mỗi clip upload một lần (`gpufx_upload`, device Vulkan
   `vulkan=vk:0,disable_multiplane=1`) rồi dời tới chỗ nối của nó (`setpts=PTS+9*k/TB`). Clip A giữ frame cuối bằng
   `tpad=stop_mode=clone:stop_duration=45` (frame GPU, không upload lại), vì input đầu quyết định độ dài của gpufx;
@@ -116,7 +116,7 @@ Bản build `c62d150` (bundle win64), đo ngày 2026-10-15, cùng máy như trê
 | Chỉ decode (6 clip, không filter) | 1.07 s | – | 0.87 s | 20.3 s | 868 MB |
 | 1. 5 × `xfade` fade (CPU, FFmpeg 8.0.1) | 3.19 s | 518 | 2.96 s | 27.3 s | 1618 MB |
 | 2. 5 × `gpufx` + `enable`/`bypass=auto`, Vulkan | 2.62 s | 631 | 1.96 s | 13.8 s | 845 MB |
-| 3. một graph `gpufx` + `<node>.enable`/`.bypass`, Vulkan | **2.61 s** | 632 | 2.00 s | 13.3 s | 847 MB |
+| 3. một graph `gpufx` + `enable`/`bypass` inline, Vulkan | **2.61 s** | 632 | 2.00 s | 13.3 s | 847 MB |
 | 2., không `gpufx_download` | 2.63 s | 627 | 1.96 s | 13.7 s | 836 MB |
 | 3., không `gpufx_download` | 3.43 s (2.7–3.8) | 482 | 2.60 s | 17.6 s | 831 MB |
 | 2., `passthrough=off` (copy trên GPU khi tắt) | 5.83 s | 283 | 4.94 s | 16.9 s | 873 MB |
@@ -134,7 +134,7 @@ Nhận xét:
 
 - Năm chuyển cảnh trong 55 s: gpufx nhanh hơn CPU khoảng 1.2 lần về thời gian thực, tốn một nửa thời gian CPU và
   một nửa RAM. Phần chậm nhất là decode sáu clip; shader chỉ chạy ở 155 trên 1650 frame.
-- Năm `gpufx` riêng với `enable=` và một graph với `<node>.enable` tốn như nhau: khi tắt, filter chuyền texture đi
+- Năm `gpufx` riêng với `enable=` và một graph với `enable` inline tốn như nhau: khi tắt, filter chuyền texture đi
   không copy, nên một chuỗi filter đang tắt gần như không tốn gì.
 - `passthrough=off` bắt mỗi filter đang tắt copy (và chuyển đổi) frame trên GPU: chậm hơn 2.2 lần, và vòng
   YUV → RGBA → YUV của mỗi lần copy làm giảm chroma (PSNR 37 dB so với output đổi nhãn).
@@ -182,7 +182,7 @@ của 3 lần chạy, wall time đo quanh tiến trình; fps = số frame / wall
 decoder); RAM khoảng 0.42 GB với gpufx so với 0.1–0.37 GB ở CPU.
 
 **Nối sáu clip với năm chuyển cảnh** (cùng thiết lập như mục trên, chỉ đổi chuyển cảnh; chain = 5 `gpufx` với
-`enable`/`bypass=auto`, graph = một `gpufx` với `<node>.enable`/`.bypass`):
+`enable`/`bypass=auto`, graph = một `gpufx` với `enable`/`bypass` inline):
 
 | Chuyển cảnh | CPU `xfade` | gpufx chain | gpufx graph | CPU utime / gpufx utime | maxrss CPU / gpufx |
 |---|---|---|---|---|---|

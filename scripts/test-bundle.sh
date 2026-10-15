@@ -174,38 +174,31 @@ pt_tests() {
     PT_EN=$(pt_md5 "$f" "$u,$I:enable='eq(n\,0)'")
     pt_check "$l: frames after enable= turns off equal the input" "$PT_EN" \
         "$(echo "$PT_ONCE" | head -n 1; echo "$PT_SRC" | tail -n +2)" relabelled
-    # <node>.enable in params: every effect of a chain off is a disabled gpufx (relabelled);
-    # one off copies its input on the GPU inside the chain.
-    NC="gpufx=effect='$FX/invert.zip|$FX/invert.zip'"
-    pt_check "$l: every effect switched off by <node>.enable relabels" \
-        "$(pt_md5 "$f" "$u,$NC:params='0.enable=0|1.enable=0'")" "$PT_SRC" relabelled
+    # Inline enable= of the effects: every effect of a chain off is a disabled gpufx
+    # (relabelled); one off copies its input on the GPU inside the chain.
+    pt_check "$l: every effect switched off by its inline enable relabels" \
+        "$(pt_md5 "$f" "$u,gpufx=effect='$FX/invert.zip=enable=0|$FX/invert.zip=enable=0'")" "$PT_SRC" relabelled
     [ "$4" = 1 ] && want=$PT_ONCE || want=
-    pt_check "$l: one effect of a chain switched off" "$(pt_md5 "$f" "$u,$NC:params='1.enable=0'")" "$want" true
+    pt_check "$l: one effect of a chain switched off" \
+        "$(pt_md5 "$f" "$u,gpufx=effect='$FX/invert.zip|$FX/invert.zip=enable=0'")" "$want" true
     # bypass: which input a disabled two-input gpufx passes (input 1: the clip inverted).
     # A crossfade at progress=1 is its second input; exact on 8-bit RGBA only.
     [ "$4" = 1 ] || return 0
-    BX="split[x][y];[y]$I[yi];[x][yi]gpufx=effect=$FX/crossfade.zip"
+    BX="split[x][y];[y]$I[yi];[x][yi]gpufx=effect="
     pt_check "$l: bypass=auto after the enabled frames relabels the last input" \
-        "$(pt_md5 "$f" "$u,$BX:params='progress=1':enable='eq(n\,1)':bypass=auto")" \
+        "$(pt_md5 "$f" "$u,$BX'$FX/crossfade.zip=progress=1':enable='eq(n\,1)':bypass=auto")" \
         "$(echo "$PT_SRC" | head -n 1; echo "$PT_ONCE" | tail -n +2)" relabelled
     pt_check "$l: bypass=0 passes input 0" \
-        "$(pt_md5 "$f" "$u,$BX:params='progress=1':enable='eq(n\,1)':bypass=0")" \
+        "$(pt_md5 "$f" "$u,$BX'$FX/crossfade.zip=progress=1':enable='eq(n\,1)':bypass=0")" \
         "$(echo "$PT_SRC" | head -n 1; echo "$PT_ONCE" | sed -n 2p; echo "$PT_SRC" | sed -n 3p)" relabelled
-    # <node>.bypass=auto: the effect alone (every effect off: relabelled), and inside a chain
-    # (copied into the input of the next effect).
-    pt_check "$l: <node>.bypass=auto of a single effect" \
-        "$(pt_md5 "$f" "$u,$BX:params='progress=1|enable=eq(n\,1)|bypass=auto'")" \
+    # Inline bypass=auto: the effect alone (every effect off: relabelled), and inside a chain
+    # (copied into the input of the next effect). FFmpeg's option parser splits at ':', so
+    # the keys are separated by '\:' inside the quotes.
+    pt_check "$l: inline bypass=auto of a single effect" \
+        "$(pt_md5 "$f" "$u,$BX'$FX/crossfade.zip=progress=1\:enable=eq(n\,1)\:bypass=auto'")" \
         "$(echo "$PT_SRC" | head -n 1; echo "$PT_ONCE" | tail -n +2)" relabelled
-    pt_check "$l: <node>.bypass=auto inside a chain" \
-        "$(pt_md5 "$f" "$u,split[x][y];[y]$I[yi];[x][yi]gpufx=effect='$FX/crossfade.zip|$FX/invert.zip':params='progress=1|crossfade.enable=eq(n\,1)|crossfade.bypass=auto'")" \
-        "$(echo "$PT_ONCE" | head -n 1; echo "$PT_SRC" | tail -n +2)" true
-    # Two names of one effect (label and index) are one entry: enable from one, bypass from the other.
-    PT_CH="split[x][y];[y]$I[yi];[x][yi]gpufx=effect='$FX/crossfade.zip|$FX/invert.zip'"
-    pt_check "$l: <node>.enable and <node>.bypass by label and index are one effect" \
-        "$(pt_md5 "$f" "$u,$PT_CH:params='progress=1|crossfade.enable=eq(n\,1)|0.bypass=auto'")" \
-        "$(echo "$PT_ONCE" | head -n 1; echo "$PT_SRC" | tail -n +2)" true
-    pt_check "$l: <node>.bypass then <node>.enable by index and label are one effect" \
-        "$(pt_md5 "$f" "$u,$PT_CH:params='progress=1|0.bypass=auto|crossfade.enable=eq(n\,1)'")" \
+    pt_check "$l: inline bypass=auto inside a chain" \
+        "$(pt_md5 "$f" "$u,$BX'$FX/crossfade.zip=progress=1\:enable=eq(n\,1)\:bypass=auto|$FX/invert.zip'")" \
         "$(echo "$PT_ONCE" | head -n 1; echo "$PT_SRC" | tail -n +2)" true
 }
 # Main frame count, without gpufx (the late input tests compare against it).
@@ -278,19 +271,19 @@ done
 echo "two input effects:"
 for e in $TRANSITIONS; do
     # shellcheck disable=SC2086
-    ok "$e" -i "$A" -i "$B" -filter_complex "[0][1]gpufx=effect=$FX/$e.zip:params='progress=t'" -an $NULL
+    ok "$e" -i "$A" -i "$B" -filter_complex "[0][1]gpufx=effect='$FX/$e.zip=progress=t'" -an $NULL
 done
 # shellcheck disable=SC2086
-ok "overlay (different sizes)" -i "$A" -i "$C" -filter_complex "[0][1]gpufx=effect=$FX/overlay.zip:params='border=2'" -an $NULL
+ok "overlay (different sizes)" -i "$A" -i "$C" -filter_complex "[0][1]gpufx=effect='$FX/overlay.zip=border=2'" -an $NULL
 for m in 0 1 2 3; do
     # shellcheck disable=SC2086
-    ok "fit mode $m (different sizes)" -i "$A" -i "$C" -filter_complex "[0][1]gpufx=effect=$FX/fit.zip:params='mode=$m'" -an $NULL
+    ok "fit mode $m (different sizes)" -i "$A" -i "$C" -filter_complex "[0][1]gpufx=effect='$FX/fit.zip=mode=$m'" -an $NULL
 done
 echo "expressions, sendcmd, timeline, chains:"
 # shellcheck disable=SC2086
-ok "expression params" -i "$A" -vf "gpufx=effect=$FX/vignette.zip:params='strength=clip(t\,0\,1)|color=#ff0000'" $NULL
+ok "expression params" -i "$A" -vf "gpufx=effect='$FX/vignette.zip=strength=clip(t\,0\,1)\:color=#ff0000'" $NULL
 # shellcheck disable=SC2086
-ok "expression params: a, sar, dar" -i "$E" -vf "gpufx=effect=$FX/vignette.zip:params='strength=clip(dar/a/sar-0.5\,0\,1)'" $NULL
+ok "expression params: a, sar, dar" -i "$E" -vf "gpufx=effect='$FX/vignette.zip=strength=clip(dar/a/sar-0.5\,0\,1)'" $NULL
 # shellcheck disable=SC2086
 ok "sendcmd + chain" -i "$A" -vf "gpufx=effect=$FX/gaussian-blur.zip,sendcmd=c='0.5 gpufx@g params intensity=0.2',gpufx@g=effect=$FX/gradient-map.zip,gpufx=effect=$FX/rgb-split.zip" $NULL
 # shellcheck disable=SC2086
@@ -332,7 +325,7 @@ else
     fail "invert changes pixels, twice restores them"; cat "$CLIPS/last.log"
 fi
 # Both filters share one compiled package; their parameters must stay separate.
-SHARED_MD5=$(md5 "gpufx=effect=$FX/invert.zip,gpufx=effect=$FX/invert.zip:params='amount=0'")
+SHARED_MD5=$(md5 "gpufx=effect=$FX/invert.zip,gpufx=effect='$FX/invert.zip=amount=0'")
 if [ -n "$ONCE_MD5" ] && [ "$SHARED_MD5" = "$ONCE_MD5" ]; then
     pass "same package twice keeps parameters per filter"
 else
@@ -359,17 +352,23 @@ echo "chains in one filter:"
 CHAIN_MD5=$(md5 "gpufx=effect='$FX/invert.zip|$FX/invert.zip'")
 if [ -n "$SRC_MD5" ] && [ "$CHAIN_MD5" = "$SRC_MD5" ]; then pass "invert|invert restores the frame"
 else fail "invert|invert restores the frame"; cat "$CLIPS/last.log"; fi
-TWO_MD5=$(md5 "gpufx=effect=$FX/grayscale.zip,gpufx=effect=$FX/vignette.zip:params='strength=0.8'")
-ONE_MD5=$(md5 "gpufx=effect='$FX/grayscale.zip|$FX/vignette.zip':params='vignette.strength=0.8'")
+TWO_MD5=$(md5 "gpufx=effect=$FX/grayscale.zip,gpufx=effect='$FX/vignette.zip=strength=0.8'")
+ONE_MD5=$(md5 "gpufx=effect='$FX/grayscale.zip|$FX/vignette.zip=strength=0.8'")
 if [ -n "$TWO_MD5" ] && [ "$ONE_MD5" = "$TWO_MD5" ]; then pass "grayscale|vignette equals two filters"
 else fail "grayscale|vignette equals two filters"; cat "$CLIPS/last.log"; fi
-# Parameters by index (spaces around | allowed), and expressions on qualified names.
-IDX_MD5=$(md5 "gpufx=effect='$FX/invert.zip | $FX/invert.zip':params='1.amount=0'")
-EXPR_MD5=$(md5 "gpufx=effect='$FX/invert.zip|$FX/invert.zip':params='1.amount=0*t'")
-if [ -n "$ONCE_MD5" ] && [ "$IDX_MD5" = "$ONCE_MD5" ] && [ "$EXPR_MD5" = "$ONCE_MD5" ]; then pass "index.param and expressions"
-else fail "index.param and expressions"; cat "$CLIPS/last.log"; fi
+# Inline parameters belong to their effect (spaces around | allowed), constants and expressions.
+IDX_MD5=$(md5 "gpufx=effect='$FX/invert.zip | $FX/invert.zip=amount=0'")
+EXPR_MD5=$(md5 "gpufx=effect='$FX/invert.zip|$FX/invert.zip=amount=0*t'")
+if [ -n "$ONCE_MD5" ] && [ "$IDX_MD5" = "$ONCE_MD5" ] && [ "$EXPR_MD5" = "$ONCE_MD5" ]; then pass "inline parameters of one effect of a chain, and expressions"
+else fail "inline parameters of one effect of a chain, and expressions"; cat "$CLIPS/last.log"; fi
 # shellcheck disable=SC2086
-rejects "ambiguous parameter" "0.amount, 1.amount" -i "$A" -an -vf "gpufx=effect='$FX/invert.zip|$FX/invert.zip':params='amount=0'" $NULL
+rejects "inline key the effect does not have" "has no parameter" -i "$A" -an -vf "gpufx=effect='$FX/invert.zip|$FX/invert.zip=strength=0'" $NULL
+# shellcheck disable=SC2086
+rejects "inline key given twice" "given twice" -i "$A" -an -vf "gpufx=effect='$FX/invert.zip=amount=0\:amount=1'" $NULL
+# shellcheck disable=SC2086
+rejects "inline option that is not key=value" "is not key=value" -i "$A" -an -vf "gpufx=effect='$FX/invert.zip=0'" $NULL
+# shellcheck disable=SC2086
+rejects "the params option is gone" "params" -i "$A" -an -vf "gpufx=effect=$FX/invert.zip:params='amount=0'" $NULL
 # shellcheck disable=SC2086
 rejects "only the first effect takes two inputs" "takes 2 inputs" -i "$A" -an -vf "gpufx=effect='$FX/invert.zip|$FX/crossfade.zip'" $NULL
 # shellcheck disable=SC2086
@@ -377,8 +376,8 @@ ok "a transition first in a chain" -i "$A" -i "$B" -filter_complex "[0][1]gpufx=
 
 echo "graphs in one filter:"
 # graph='...' runs a DAG on the GPU: same pixels as the filters it stands for.
-SPLIT_MD5=$(md5 "split[a][b];[a]gpufx=effect=$FX/grayscale.zip[g];[g][b]gpufx=effect=$FX/crossfade.zip:params='progress=0.3'")
-GRAPH_MD5=$(md5 "gpufx=graph='[0]split[a][b]; [a]$FX/grayscale.zip[g]; [g][b]$FX/crossfade.zip[out]':params='progress=0.3'")
+SPLIT_MD5=$(md5 "split[a][b];[a]gpufx=effect=$FX/grayscale.zip[g];[g][b]gpufx=effect='$FX/crossfade.zip=progress=0.3'")
+GRAPH_MD5=$(md5 "gpufx=graph='[0]split[a][b]; [a]$FX/grayscale.zip[g]; [g][b]$FX/crossfade.zip=progress=0.3[out]'")
 if [ -n "$SPLIT_MD5" ] && [ "$GRAPH_MD5" = "$SPLIT_MD5" ]; then pass "graph with split equals split + two filters"
 else fail "graph with split equals split + two filters"; cat "$CLIPS/last.log"; fi
 LINEAR_MD5=$(md5 "gpufx=graph='[0]$FX/invert.zip|$FX/invert.zip[out]'")
@@ -395,10 +394,10 @@ Q_MD5=$(grep -v '^#' "$CLIPS/q.md5" 2>/dev/null | awk -F, '{print $NF}')
 GRAY_MD5=$(md5 "gpufx=effect=$FX/grayscale.zip")
 if [ -n "$P_MD5" ] && [ "$P_MD5" = "$ONCE_MD5" ] && [ "$Q_MD5" = "$GRAY_MD5" ]; then pass "two output pads to two files"
 else fail "two output pads to two files"; cat "$CLIPS/last.log"; fi
-# Two inputs, two outputs, parameters by node label, sendcmd and the timeline.
+# Two inputs, two outputs, inline parameters, sendcmd by node label and the timeline.
 # shellcheck disable=SC2086
 ok "graph: 2 inputs, 2 outputs, sendcmd, enable" -i "$A" -i "$B" -filter_complex \
-    "[0:v][1:v]gpufx@g=graph='[0]split[a][b]; [a]$FX/gaussian-blur.zip[ba]; [b]$FX/grayscale.zip|$FX/vignette.zip[gb]; [ba][gb]$FX/crossfade.zip[x]; [x]split[x1][x2]; [x2][1]$FX/wipe-transition.zip[out]':params='x.progress=0.5|out.progress=t':enable='lt(t\,0.8)'[p][q];[q]sendcmd=c='0.5 gpufx@g params gb.strength=0.2',nullsink" \
+    "[0:v][1:v]gpufx@g=graph='[0]split[a][b]; [a]$FX/gaussian-blur.zip[ba]; [b]$FX/grayscale.zip|$FX/vignette.zip[gb]; [ba][gb]$FX/crossfade.zip=progress=0.5[x]; [x]split[x1][x2]; [x2][1]$FX/wipe-transition.zip=progress=t[out]':enable='lt(t\,0.8)'[p][q];[q]sendcmd=c='0.5 gpufx@g params gb.strength=0.2',nullsink" \
     -map "[p]" -an $NULL
 # shellcheck disable=SC2086
 rejects "graph: effect and graph together" "not both" -i "$A" -an -vf "gpufx=effect=$FX/invert.zip:graph='[0]$FX/invert.zip[o]'" $NULL
@@ -413,35 +412,31 @@ rejects "graph: wrong number of labels" "takes 2 inputs, the node gives it 1" -i
 # shellcheck disable=SC2086
 rejects "graph: same size rule inside the graph" "must equal the first input" -i "$A" -i "$C" -filter_complex "[0][1]gpufx=graph='[0]$FX/invert.zip[i]; [i][1]$FX/crossfade.zip[out]'" -an $NULL
 
-echo "effects switched by <node>.enable:"
-NE_IDX=$(md5 "gpufx=effect='$FX/invert.zip|$FX/invert.zip':params='0.enable=0'")
-NE_LBL=$(md5 "gpufx=effect='$FX/grayscale.zip|$FX/invert.zip':params='grayscale.enable=0'")
-if [ -n "$ONCE_MD5" ] && [ "$NE_IDX" = "$ONCE_MD5" ] && [ "$NE_LBL" = "$ONCE_MD5" ]; then pass "index.enable=0 and label.enable=0 skip that effect"
-else fail "index.enable=0 and label.enable=0 skip that effect"; cat "$CLIPS/last.log"; fi
+echo "effects switched by their inline enable=:"
+NE_IDX=$(md5 "gpufx=effect='$FX/invert.zip=enable=0|$FX/invert.zip'")
+NE_LBL=$(md5 "gpufx=effect='$FX/grayscale.zip=enable=0|$FX/invert.zip'")
+if [ -n "$ONCE_MD5" ] && [ "$NE_IDX" = "$ONCE_MD5" ] && [ "$NE_LBL" = "$ONCE_MD5" ]; then pass "inline enable=0 skips that effect"
+else fail "inline enable=0 skips that effect"; cat "$CLIPS/last.log"; fi
 # Per frame: both effects on for frame 0 (restored), the first off later (inverted once).
-NE_EXPR=$(md5 "gpufx=effect='$FX/invert.zip|$FX/invert.zip':params='0.enable=lt(n\,1)'")
+NE_EXPR=$(md5 "gpufx=effect='$FX/invert.zip=enable=lt(n\,1)|$FX/invert.zip'")
 if [ -n "$SRC_MD5" ] && [ "$NE_EXPR" = "$(echo "$SRC_MD5" | head -n 1; echo "$ONCE_MD5" | tail -n +2)" ]; then pass "enable expression per frame"
 else fail "enable expression per frame"; echo "    got: $NE_EXPR"; cat "$CLIPS/last.log"; fi
-# A graph statement switched off by its output label still writes its output pad (in place
+# A graph statement whose effects are switched off still writes its output pad (in place
 # on Vulkan frames).
 rm -f "$CLIPS/p.md5" "$CLIPS/q.md5"
 gpu_ff -i "$A" -filter_complex \
-    "[0:v]format=rgba,gpufx=graph='[0]split[a][b]; [a]$FX/invert.zip[inv]; [b]$FX/grayscale.zip|$FX/invert.zip[gray]':params='inv.enable=0|1.enable=0'[p][q];[p]hwdownload,format=rgba[p2];[q]hwdownload,format=rgba[q2]" \
+    "[0:v]format=rgba,gpufx=graph='[0]split[a][b]; [a]$FX/invert.zip=enable=0[inv]; [b]$FX/grayscale.zip=enable=0|$FX/invert.zip[gray]'[p][q];[p]hwdownload,format=rgba[p2];[q]hwdownload,format=rgba[q2]" \
     -map "[p2]" -frames:v 3 -pix_fmt rgba -f framemd5 -y "$CLIPS/p.md5" \
     -map "[q2]" -frames:v 3 -pix_fmt rgba -f framemd5 -y "$CLIPS/q.md5" > "$CLIPS/last.log" 2>&1
 P_MD5=$(grep -v '^#' "$CLIPS/p.md5" 2>/dev/null | awk -F, '{print $NF}')
 Q_MD5=$(grep -v '^#' "$CLIPS/q.md5" 2>/dev/null | awk -F, '{print $NF}')
 if [ -n "$P_MD5" ] && [ "$P_MD5" = "$SRC_MD5" ] && [ "$Q_MD5" = "$ONCE_MD5" ]; then
-    pass "graph: statement switched off by its output label"
-else fail "graph: statement switched off by its output label"; cat "$CLIPS/last.log"; fi
-# A single effect: a bare enable.
-NE_ONE=$(md5 "gpufx=effect=$FX/invert.zip:params='enable=0'")
-if [ -n "$SRC_MD5" ] && [ "$NE_ONE" = "$SRC_MD5" ]; then pass "bare enable=0 in params of a single effect"
-else fail "bare enable=0 in params of a single effect"; cat "$CLIPS/last.log"; fi
-# shellcheck disable=SC2086
-rejects "ambiguous <node>.enable" "names 2 effects" -i "$A" -an -vf "gpufx=effect='$FX/invert.zip|$FX/invert.zip':params='invert.enable=0'" $NULL
-# shellcheck disable=SC2086
-rejects "bare enable in a chain" "say which one" -i "$A" -an -vf "gpufx=effect='$FX/invert.zip|$FX/invert.zip':params='enable=0'" $NULL
+    pass "graph: statement switched off by inline enable"
+else fail "graph: statement switched off by inline enable"; cat "$CLIPS/last.log"; fi
+# A single effect: its inline enable (not the filter's timeline enable=).
+NE_ONE=$(md5 "gpufx=effect='$FX/invert.zip=enable=0'")
+if [ -n "$SRC_MD5" ] && [ "$NE_ONE" = "$SRC_MD5" ]; then pass "inline enable=0 of a single effect"
+else fail "inline enable=0 of a single effect"; cat "$CLIPS/last.log"; fi
 # shellcheck disable=SC2086
 ok "<node>.enable toggled by sendcmd (accepted)" -i "$A" -an -vf \
     "gpufx@n=effect='$FX/invert.zip|$FX/grayscale.zip',sendcmd=c='0.3 gpufx@n params 1.enable=0;0.6 gpufx@n params 0.enable=0;0.9 gpufx@n params 0.enable=1'" $NULL
@@ -451,12 +446,15 @@ NE_SC=$(md5 "sendcmd=c='0.03 gpufx@n params 0.enable=0;0.07 gpufx@n params 0.ena
 if [ -n "$SRC_MD5" ] && [ "$NE_SC" = "$(echo "$SRC_MD5" | sed -n 1p; echo "$ONCE_MD5" | sed -n 2p; echo "$SRC_MD5" | sed -n 3p)" ]; then
     pass "<node>.enable toggled by sendcmd changes the frames"
 else fail "<node>.enable toggled by sendcmd changes the frames"; echo "    got: $NE_SC"; cat "$CLIPS/last.log"; fi
+# sendcmd replaces an inline enable: off from the start, back on before frame 1.
+NE_SC2=$(md5 "sendcmd=c='0.03 gpufx@n params 0.enable=1',gpufx@n=effect='$FX/invert.zip=enable=0|$FX/invert.zip'")
+if [ -n "$SRC_MD5" ] && [ "$NE_SC2" = "$(echo "$ONCE_MD5" | sed -n 1p; echo "$SRC_MD5" | tail -n +2)" ]; then
+    pass "sendcmd replaces an inline enable"
+else fail "sendcmd replaces an inline enable"; echo "    got: $NE_SC2"; cat "$CLIPS/last.log"; fi
 # shellcheck disable=SC2086
-rejects "bare .enable" "missing effect name before .enable" -i "$A" -an -vf "gpufx=effect=$FX/invert.zip:params='.enable=0'" $NULL
+rejects "inline bypass other than 0 or auto" "bypass is 0 or auto" -i "$A" -an -vf "gpufx=effect='$FX/invert.zip=bypass=1'" $NULL
 # shellcheck disable=SC2086
-rejects "<node>.bypass other than 0 or auto" "bypass is 0 or auto" -i "$A" -an -vf "gpufx=effect=$FX/invert.zip:params='bypass=1'" $NULL
-# shellcheck disable=SC2086
-rejects "two names of one effect both setting enable" "given twice" -i "$A" -an -vf "gpufx=effect=$FX/invert.zip:params='enable=1|invert.enable=1'" $NULL
+rejects "inline enable given twice" "given twice" -i "$A" -an -vf "gpufx=effect='$FX/invert.zip=enable=1\:enable=0'" $NULL
 # The input bypass passes has another size than the output: an error, not input 0.
 # shellcheck disable=SC2086
 rejects "bypass=auto onto an input of another size" "Choose another bypass" -i "$A" -an -filter_complex \
@@ -524,7 +522,7 @@ echo "late second input:"
 count() {
     gpu_ff "$@" -an -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | wc -l | tr -d ' '
 }
-LATE_N=$(count -i "$A" -itsoffset 0.5 -i "$B" -filter_complex "[0][1]gpufx=effect=$FX/crossfade.zip:params='progress=0.5',hwdownload,format=yuv420p")
+LATE_N=$(count -i "$A" -itsoffset 0.5 -i "$B" -filter_complex "[0][1]gpufx=effect='$FX/crossfade.zip=progress=0.5',hwdownload,format=yuv420p")
 if [ "$MAIN_N" -gt 0 ] && [ "$LATE_N" = "$MAIN_N" ]; then
     pass "second input starting at 0.5 s keeps all $MAIN_N main frames"
 else
@@ -546,9 +544,9 @@ else
 fi
 # Mode 4: paths from expressions compiled into the shader, changed by sendcmd mid-stream.
 ok "falling-maple: custom path (mode 4) + sendcmd" -i "$A" \
-    -vf "sendcmd=c='0.5 gpufx@l params path_x=x0+0.2*sin(u)',gpufx@l=effect=$FX/falling-maple.zip:params='mode=4|life=2|path_y=-0.1+1.2*p|angle=max(90*u\,0)'" -f null -
+    -vf "sendcmd=c='0.5 gpufx@l params path_x=x0+0.2*sin(u)',gpufx@l=effect='$FX/falling-maple.zip=mode=4\:life=2\:path_y=-0.1+1.2*p\:angle=max(90*u\,0)'" -f null -
 rejects "falling-maple: bad path expression" "unknown variable .q." -i "$A" \
-    -vf "gpufx=effect=$FX/falling-maple.zip:params='mode=4|path_x=q*2'" -f null -
+    -vf "gpufx=effect='$FX/falling-maple.zip=mode=4\:path_x=q*2'" -f null -
 
 echo "Vulkan frames:"
 # hwupload -> gpufx -> hwdownload runs on FFmpeg's own Vulkan device, frames never leave
@@ -566,19 +564,19 @@ same "rgba: grayscale on Vulkan frames equals software frames" \
 for f in nv12 yuv420p yuv444p p010le yuv420p10le rgba64le; do
     VKN=vignette-$f
     same "$f: vignette on Vulkan frames equals software frames" \
-        "$(vk_md5 $f "gpufx=effect=$FX/vignette.zip:params='strength=0.7'")" \
-        "$(sw_md5 $f "gpufx=effect=$FX/vignette.zip:params='strength=0.7'")"
+        "$(vk_md5 $f "gpufx=effect='$FX/vignette.zip=strength=0.7'")" \
+        "$(sw_md5 $f "gpufx=effect='$FX/vignette.zip=strength=0.7'")"
 done
 # Two gpufx in a row: the second waits on the semaphores the first signals.
 VKN=invert-twice
 same "invert twice on Vulkan frames restores the frame" \
     "$(vk_md5 rgba "gpufx=effect=$FX/invert.zip,gpufx=effect=$FX/invert.zip")" "$(sw_md5 rgba "$UP")"
 # A graph whose two inputs are one frame (split before gpufx): locked and waited once.
-G="[0]split[a][b]; [a]$FX/gaussian-blur.zip[ba]; [b]$FX/grayscale.zip|$FX/vignette.zip[gb]; [ba][gb]$FX/crossfade.zip[x]; [x][1]$FX/wipe-transition.zip[out]"
+G="[0]split[a][b]; [a]$FX/gaussian-blur.zip[ba]; [b]$FX/grayscale.zip|$FX/vignette.zip[gb]; [ba][gb]$FX/crossfade.zip=progress=0.4[x]; [x][1]$FX/wipe-transition.zip=progress=0.6[out]"
 VKN=graph
 same "graph on Vulkan frames equals software frames" \
-    "$(vk_md5 nv12 "split[p][q];[p][q]gpufx=graph='$G':params='x.progress=0.4|out.progress=0.6'")" \
-    "$(sw_md5 nv12 "split[p][q];[p][q]gpufx=graph='$G':params='x.progress=0.4|out.progress=0.6'")"
+    "$(vk_md5 nv12 "split[p][q];[p][q]gpufx=graph='$G'")" \
+    "$(sw_md5 nv12 "split[p][q];[p][q]gpufx=graph='$G'")"
 # Output in another format than the input (the effect may output yuv420p or rgba).
 VKN=sepia-nv12
 same "sepia keeps nv12 on Vulkan frames" "$(vk_md5 nv12 "gpufx=effect=$FX/sepia.zip")" \
@@ -588,7 +586,7 @@ ok "timeline enable on Vulkan frames" -i "$A" -an \
     -vf "format=nv12,$UP,gpufx=effect=$FX/invert.zip:enable='gte(t\,0.5)',hwdownload,format=nv12" $NULL
 VKN=late-input
 LATE_VK=$(vk_ff -i "$A" -itsoffset 0.5 -i "$B" -an -filter_complex \
-    "[0]format=rgba,$UP[a];[1]format=rgba,$UP[b];[a][b]gpufx=effect=$FX/crossfade.zip:params='progress=0.5',hwdownload,format=rgba" \
+    "[0]format=rgba,$UP[a];[1]format=rgba,$UP[b];[a][b]gpufx=effect='$FX/crossfade.zip=progress=0.5',hwdownload,format=rgba" \
     -f framemd5 - 2> "$(vk_log)" | grep -v '^#' | wc -l | tr -d ' ')
 if [ "$LATE_VK" = "$MAIN_N" ]; then pass "late second input on Vulkan frames keeps all $MAIN_N frames"
 else fail "late second input on Vulkan frames (want $MAIN_N, got $LATE_VK)"; show_vk_log; fi
@@ -616,9 +614,9 @@ fi
 # Vulkan and software inputs together: gpufx uploads the software one on the same device.
 VKN=mixed
 same "Vulkan and software inputs mixed" \
-    "$(vk_ff -i "$A" -i "$B" -frames:v 3 -an -filter_complex "[0]format=rgba,$UP[a];[1]format=rgba[b];[a][b]gpufx=effect=$FX/crossfade.zip:params='progress=0.4',hwdownload,format=rgba" \
+    "$(vk_ff -i "$A" -i "$B" -frames:v 3 -an -filter_complex "[0]format=rgba,$UP[a];[1]format=rgba[b];[a][b]gpufx=effect='$FX/crossfade.zip=progress=0.4',hwdownload,format=rgba" \
         -f framemd5 - 2> "$(vk_log)" | grep -v '^#' | awk -F, '{print $NF}')" \
-    "$(gpu_ff -i "$A" -i "$B" -frames:v 3 -an -filter_complex "[0]format=rgba[a];[1]format=rgba[b];[a][b]gpufx=effect=$FX/crossfade.zip:params='progress=0.4',hwdownload,format=rgba" \
+    "$(gpu_ff -i "$A" -i "$B" -frames:v 3 -an -filter_complex "[0]format=rgba[a];[1]format=rgba[b];[a][b]gpufx=effect='$FX/crossfade.zip=progress=0.4',hwdownload,format=rgba" \
         -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | awk -F, '{print $NF}')"
 # out_format=rgba between chained gpufx: the middle ones skip the YUV conversions, and the
 # chain gives the pixels of the same effects chained in one gpufx.
@@ -649,15 +647,15 @@ if grep -qw gpufx_upload "$CLIPS/filters.txt"; then
     done
     VKN=transfer-gpufx
     same "gpufx_upload,gpufx,gpufx_download equals software frames" \
-        "$(vk_ff -i "$A" -frames:v 3 -an -vf "format=nv12,gpufx_upload,gpufx=effect=$FX/vignette.zip:params='strength=0.7',gpufx_download,format=nv12" \
+        "$(vk_ff -i "$A" -frames:v 3 -an -vf "format=nv12,gpufx_upload,gpufx=effect='$FX/vignette.zip=strength=0.7',gpufx_download,format=nv12" \
             -f framemd5 - 2> "$(vk_log)" | grep -v '^#' | awk -F, '{print $NF}')" \
-        "$(sw_md5 nv12 "gpufx=effect=$FX/vignette.zip:params='strength=0.7'")"
+        "$(sw_md5 nv12 "gpufx=effect='$FX/vignette.zip=strength=0.7'")"
     # gpufx then gpufx_download: the software-input chain with a pipelined readback.
     VKN=gpufx-download
     same "software input, gpufx, gpufx_download equals hwdownload" \
-        "$(vk_ff -i "$A" -frames:v 3 -an -vf "format=nv12,gpufx=effect=$FX/vignette.zip:params='strength=0.7',gpufx_download,format=nv12" \
+        "$(vk_ff -i "$A" -frames:v 3 -an -vf "format=nv12,gpufx=effect='$FX/vignette.zip=strength=0.7',gpufx_download,format=nv12" \
             -f framemd5 - 2> "$(vk_log)" | grep -v '^#' | awk -F, '{print $NF}')" \
-        "$(sw_md5 nv12 "gpufx=effect=$FX/vignette.zip:params='strength=0.7'")"
+        "$(sw_md5 nv12 "gpufx=effect='$FX/vignette.zip=strength=0.7'")"
     # Frames in flight at the end are flushed: every frame comes out.
     DL_N=$(vk_ff -i "$A" -an -vf "format=nv12,gpufx_upload,gpufx_download=latency=4,format=nv12" -f framemd5 - \
         2> "$(vk_log)" | grep -v '^#' | wc -l | tr -d ' ')
@@ -804,7 +802,7 @@ for api in d3d12va d3d11va; do
     # 259200 on an RTX 4060): within one step of the Vulkan run, else of software frames
     # gpufx uploads to this device itself.
     for f in nv12 p010le; do
-        V="gpufx=effect=$FX/vignette.zip:params='strength=0.7'"
+        V="gpufx=effect='$FX/vignette.zip=strength=0.7'"
         if [ $f = nv12 ]; then bytes=1 step=1; else bytes=2 step=64; fi  # p010le: 10 bits << 6
         rm -f "$CLIPS/dx.yuv" "$CLIPS/sw.yuv"
         raw "$CLIPS/dx.yuv" -i "$A" -vf "format=$f,hwupload,$V,hwdownload,format=$f" -pix_fmt $f || true
@@ -824,8 +822,8 @@ for api in d3d12va d3d11va; do
     done
     # Software frames gpufx uploads itself give the pixels of hwupload.
     same "$API: software input equals hwupload" \
-        "$(dx_md5 nv12 "gpufx=effect=$FX/vignette.zip:params='strength=0.7'")" \
-        "$(sw_md5 nv12 "gpufx=effect=$FX/vignette.zip:params='strength=0.7'")"
+        "$(dx_md5 nv12 "gpufx=effect='$FX/vignette.zip=strength=0.7'")" \
+        "$(sw_md5 nv12 "gpufx=effect='$FX/vignette.zip=strength=0.7'")"
     # yuv420p cannot be uploaded as it is: gpufx converts it to nv12 first.
     same "$API: yuv420p software input (uploaded as nv12)" \
         "$(dx_md5 nv12 "gpufx=effect=$FX/invert.zip")" \
@@ -837,29 +835,29 @@ for api in d3d12va d3d11va; do
         "$(sw_md5 nv12 "gpufx=effect=$FX/invert.zip,gpufx=effect=$FX/invert.zip")"
     pt_tests "$API nv12" nv12 hwupload 0
     # One frame on two input pads (split before gpufx).
-    G="[0]split[a][b]; [a]$FX/gaussian-blur.zip[ba]; [b]$FX/grayscale.zip|$FX/vignette.zip[gb]; [ba][gb]$FX/crossfade.zip[x]; [x][1]$FX/wipe-transition.zip[out]"
+    G="[0]split[a][b]; [a]$FX/gaussian-blur.zip[ba]; [b]$FX/grayscale.zip|$FX/vignette.zip[gb]; [ba][gb]$FX/crossfade.zip=progress=0.4[x]; [x][1]$FX/wipe-transition.zip=progress=0.6[out]"
     same "$API: graph equals software frames" \
-        "$(dx_md5 nv12 "split[p][q];[p][q]gpufx=graph='$G':params='x.progress=0.4|out.progress=0.6'")" \
-        "$(sw_md5 nv12 "split[p][q];[p][q]gpufx=graph='$G':params='x.progress=0.4|out.progress=0.6'")"
+        "$(dx_md5 nv12 "split[p][q];[p][q]gpufx=graph='$G'")" \
+        "$(sw_md5 nv12 "split[p][q];[p][q]gpufx=graph='$G'")"
     # shellcheck disable=SC2086
     ok "$API: timeline enable" -i "$A" -an \
         -vf "format=nv12,hwupload,gpufx=effect=$FX/invert.zip:enable='gte(t\,0.5)',hwdownload,format=nv12" $NULL
     LATE_DX=$(gpu_ff -i "$A" -itsoffset 0.5 -i "$B" -an -filter_complex \
-        "[0]format=nv12,hwupload[a];[1]format=nv12,hwupload[b];[a][b]gpufx=effect=$FX/crossfade.zip:params='progress=0.5',hwdownload,format=nv12" \
+        "[0]format=nv12,hwupload[a];[1]format=nv12,hwupload[b];[a][b]gpufx=effect='$FX/crossfade.zip=progress=0.5',hwdownload,format=nv12" \
         -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | wc -l | tr -d ' ')
     if [ "$LATE_DX" = "$MAIN_N" ]; then pass "$API: late second input keeps all $MAIN_N frames"
     else fail "$API: late second input (want $MAIN_N, got $LATE_DX)"; cat "$CLIPS/last.log"; fi
     # A late software input: its blank frame is made on the device too.
     LATE_SW=$(gpu_ff -i "$A" -itsoffset 0.5 -i "$B" -an -filter_complex \
-        "[0]format=nv12[a];[1]format=nv12[b];[a][b]gpufx=effect=$FX/crossfade.zip:params='progress=0.5',hwdownload,format=nv12" \
+        "[0]format=nv12[a];[1]format=nv12[b];[a][b]gpufx=effect='$FX/crossfade.zip=progress=0.5',hwdownload,format=nv12" \
         -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | wc -l | tr -d ' ')
     if [ "$LATE_SW" = "$MAIN_N" ]; then pass "$API: late second software input keeps all $MAIN_N frames"
     else fail "$API: late second software input (want $MAIN_N, got $LATE_SW)"; cat "$CLIPS/last.log"; fi
     # GPU and software inputs together: gpufx uploads the software one to the same device.
     same "$API and software inputs mixed" \
-        "$(gpu_ff -i "$A" -i "$B" -frames:v 3 -an -filter_complex "[0]format=nv12,hwupload[a];[1]format=nv12[b];[a][b]gpufx=effect=$FX/crossfade.zip:params='progress=0.4',hwdownload,format=nv12" \
+        "$(gpu_ff -i "$A" -i "$B" -frames:v 3 -an -filter_complex "[0]format=nv12,hwupload[a];[1]format=nv12[b];[a][b]gpufx=effect='$FX/crossfade.zip=progress=0.4',hwdownload,format=nv12" \
             -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | awk -F, '{print $NF}')" \
-        "$(gpu_ff -i "$A" -i "$B" -frames:v 3 -an -filter_complex "[0]format=nv12,hwupload[a];[1]format=nv12,hwupload[b];[a][b]gpufx=effect=$FX/crossfade.zip:params='progress=0.4',hwdownload,format=nv12" \
+        "$(gpu_ff -i "$A" -i "$B" -frames:v 3 -an -filter_complex "[0]format=nv12,hwupload[a];[1]format=nv12,hwupload[b];[a][b]gpufx=effect='$FX/crossfade.zip=progress=0.4',hwdownload,format=nv12" \
             -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | awk -F, '{print $NF}')"
     # -filter_hw_device against the device of decoded D3D11 frames (MPEG-2 clip made by
     # this ffmpeg, decoded with -hwaccel d3d11va on a second device instance).
@@ -939,7 +937,7 @@ vt_tests() {
     }
     # Within one step (as for D3D) of the Vulkan run, else of software frames uploaded by gpufx.
     for f in nv12 p010le; do
-        V="gpufx=effect=$FX/vignette.zip:params='strength=0.7'"
+        V="gpufx=effect='$FX/vignette.zip=strength=0.7'"
         if [ $f = nv12 ]; then bytes=1 step=1; else bytes=2 step=64; fi  # p010le: 10 bits << 6
         rm -f "$CLIPS/vt.yuv" "$CLIPS/sw.yuv"
         raw "$CLIPS/vt.yuv" -i "$A" -vf "format=$f,hwupload,$V,hwdownload,format=$f" -pix_fmt $f || true
@@ -962,18 +960,18 @@ vt_tests() {
         fi
     done
     same "VideoToolbox: software input equals hwupload" \
-        "$(vt_md5 nv12 "gpufx=effect=$FX/vignette.zip:params='strength=0.7'")" \
-        "$(sw_md5 nv12 "gpufx=effect=$FX/vignette.zip:params='strength=0.7'")"
+        "$(vt_md5 nv12 "gpufx=effect='$FX/vignette.zip=strength=0.7'")" \
+        "$(sw_md5 nv12 "gpufx=effect='$FX/vignette.zip=strength=0.7'")"
     # Two gpufx in a row: the second reads what the first wrote (no fence: each waits).
     same "VideoToolbox: invert twice equals software frames" \
         "$(vt_md5 nv12 "gpufx=effect=$FX/invert.zip,gpufx=effect=$FX/invert.zip")" \
         "$(sw_md5 nv12 "gpufx=effect=$FX/invert.zip,gpufx=effect=$FX/invert.zip")"
-    G="[0]split[a][b]; [a]$FX/gaussian-blur.zip[ba]; [b]$FX/grayscale.zip|$FX/vignette.zip[gb]; [ba][gb]$FX/crossfade.zip[x]; [x][1]$FX/wipe-transition.zip[out]"
+    G="[0]split[a][b]; [a]$FX/gaussian-blur.zip[ba]; [b]$FX/grayscale.zip|$FX/vignette.zip[gb]; [ba][gb]$FX/crossfade.zip=progress=0.4[x]; [x][1]$FX/wipe-transition.zip=progress=0.6[out]"
     same "VideoToolbox: graph equals software frames" \
-        "$(vt_md5 nv12 "split[p][q];[p][q]gpufx=graph='$G':params='x.progress=0.4|out.progress=0.6'")" \
-        "$(sw_md5 nv12 "split[p][q];[p][q]gpufx=graph='$G':params='x.progress=0.4|out.progress=0.6'")"
+        "$(vt_md5 nv12 "split[p][q];[p][q]gpufx=graph='$G'")" \
+        "$(sw_md5 nv12 "split[p][q];[p][q]gpufx=graph='$G'")"
     LATE_VT=$(gpu_ff -i "$A" -itsoffset 0.5 -i "$B" -an -filter_complex \
-        "[0]format=nv12,hwupload[a];[1]format=nv12[b];[a][b]gpufx=effect=$FX/crossfade.zip:params='progress=0.5',hwdownload,format=nv12" \
+        "[0]format=nv12,hwupload[a];[1]format=nv12[b];[a][b]gpufx=effect='$FX/crossfade.zip=progress=0.5',hwdownload,format=nv12" \
         -f framemd5 - 2> "$CLIPS/last.log" | grep -v '^#' | wc -l | tr -d ' ')
     if [ "$LATE_VT" = "$MAIN_N" ]; then pass "VideoToolbox: late second software input keeps all $MAIN_N frames"
     else fail "VideoToolbox: late second software input (want $MAIN_N, got $LATE_VT)"; cat "$CLIPS/last.log"; fi

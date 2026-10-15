@@ -937,6 +937,121 @@ fn graph_err(msg: impl Into<String>) -> Error {
     Error::Graph(msg.into())
 }
 
+/// Byte offset of the first `c` in `s` outside `'...'` quotes and not escaped by `\`
+/// (a `\` escapes only a character of [`ESCAPED`]; before others it is a plain `\`).
+fn find_unquoted(s: &str, c: u8) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let (mut quoted, mut i) = (false, 0);
+    while i < bytes.len() {
+        let b = bytes[i];
+        match b {
+            b'\\' if !quoted && bytes.get(i + 1).is_some_and(|n| ESCAPED.as_bytes().contains(n)) => i += 1,
+            b'\\' if !quoted => {}
+            b'\'' => quoted = !quoted,
+            _ if b == c && !quoted => return Some(i),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// `s` cut at every `c` outside quotes and not escaped (see [`find_unquoted`]).
+fn split_unquoted(mut s: &str, c: u8) -> Vec<&str> {
+    let mut parts = Vec::new();
+    while let Some(i) = find_unquoted(s, c) {
+        parts.push(&s[..i]);
+        s = &s[i + 1..];
+    }
+    parts.push(s);
+    parts
+}
+
+/// Characters `\` escapes in a chain or graph; before any other it is a plain `\` (Windows paths).
+const ESCAPED: &str = "\\':;|=[]";
+
+/// Removes the escapes and quotes of an inline value: `\:` is `:` (see [`ESCAPED`]),
+/// `'...'` is taken as it is.
+fn unescape(s: &str, item: &str) -> Result<String, Error> {
+    let mut out = String::with_capacity(s.len());
+    let (mut quoted, mut chars) = (false, s.chars().peekable());
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' => quoted = !quoted,
+            '\\' if !quoted => match chars.next_if(|n| ESCAPED.contains(*n)) {
+                Some(n) => out.push(n),
+                None => out.push('\\'),
+            },
+            c => out.push(c),
+        }
+    }
+    if quoted {
+        return Err(graph_err(format!("unclosed `'` in `{item}`")));
+    }
+    Ok(out)
+}
+
+/// Inline options of an effect: `key=value` pairs in the order they were written.
+pub type InlineOptions = Vec<(String, String)>;
+
+/// Keys an effect takes inline besides its parameters.
+const NODE_KEYS: [&str; 2] = ["enable", "bypass"];
+
+/// Splits one effect of a chain or graph node, `path=key=value:key=value`, into its path
+/// and options, without escapes and quotes. `\` escapes the next character (one of
+/// [`ESCAPED`]; before others it stays, for Windows paths) and `'...'` quotes, so values may hold `:`, `;`, `|`, `[`, `]` and `=`. Keys are named (parameter
+/// names, `enable`, `bypass`); a key given twice fails.
+pub fn parse_effect_item(item: &str) -> Result<(String, InlineOptions), Error> {
+    let item = item.trim();
+    let (path, rest) = match find_unquoted(item, b'=') {
+        Some(i) => (&item[..i], Some(&item[i + 1..])),
+        None => (item, None),
+    };
+    let path = unescape(path.trim(), item)?;
+    let mut options = InlineOptions::new();
+    for option in rest.map(|r| split_unquoted(r, b':')).unwrap_or_default() {
+        let option = option.trim();
+        let Some(eq) = find_unquoted(option, b'=') else {
+            return Err(graph_err(format!("`{option}` in `{item}` is not key=value (options are named: `{path}=key=value:key=value`)")));
+        };
+        let key = unescape(option[..eq].trim(), item)?;
+        let value = unescape(option[eq + 1..].trim(), item)?;
+        if key.is_empty() {
+            return Err(graph_err(format!("`{option}` in `{item}` has no key")));
+        }
+        if options.iter().any(|(k, _)| *k == key) {
+            return Err(graph_err(format!("effect `{path}`: key `{key}` given twice")));
+        }
+        options.push((key, value));
+    }
+    Ok((path, options))
+}
+
+/// Fails when an option of the effect opened from `path` is not one of its parameters,
+/// `enable` or `bypass` (`0` or `auto`).
+fn check_options(path: &str, fx: &Effect, options: &InlineOptions) -> Result<(), Error> {
+    for (key, value) in options {
+        if key == "bypass" && value != "0" && value != "auto" {
+            return Err(graph_err(format!("effect `{path}`: bypass={value}, bypass is 0 or auto")));
+        }
+        if !NODE_KEYS.contains(&key.as_str()) && !fx.params.defs().iter().any(|d| d.name == *key) {
+            let known: Vec<&str> = fx.params.defs().iter().map(|d| d.name.as_str()).chain(NODE_KEYS).collect();
+            return Err(graph_err(format!("effect `{path}` has no parameter `{key}` (keys: {})", known.join(", "))));
+        }
+    }
+    Ok(())
+}
+
+/// Sets the parameters whose inline values are constants; expressions (`t/2`) are left to
+/// the caller, which reads them back with [`EffectGraph::inline_options`].
+fn apply_constants(fx: &mut Effect, options: &InlineOptions) {
+    for (key, value) in options {
+        if !NODE_KEYS.contains(&key.as_str()) {
+            let _ = fx.params.set_str(key, value);
+        }
+    }
+}
+
 /// `[label]` lists at the start of `rest`, which is advanced past them.
 fn parse_labels<'a>(rest: &mut &'a str, statement: &str) -> Result<Vec<&'a str>, Error> {
     let mut labels = Vec::new();
@@ -961,10 +1076,10 @@ fn parse_labels<'a>(rest: &mut &'a str, statement: &str) -> Result<Vec<&'a str>,
 
 fn parse_spec(text: &str) -> Result<Vec<NodeSpec<'_>>, Error> {
     let mut nodes = Vec::new();
-    for statement in text.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+    for statement in split_unquoted(text, b';').into_iter().map(str::trim).filter(|s| !s.is_empty()) {
         let mut rest = statement;
         let inputs = parse_labels(&mut rest, statement)?;
-        let end = rest.find('[').unwrap_or(rest.len());
+        let end = find_unquoted(rest, b'[').unwrap_or(rest.len());
         let body = rest[..end].trim();
         rest = &rest[end..];
         let outputs = parse_labels(&mut rest, statement)?;
@@ -1025,6 +1140,8 @@ pub struct EffectGraph {
     /// (effect, parameter) of every entry of `param_names`.
     params: Vec<(usize, usize)>,
     param_names: Vec<String>,
+    /// Inline options of each effect (see [`EffectGraph::inline_options`]).
+    options: Vec<InlineOptions>,
     /// "chain" or "graph", in messages.
     what: &'static str,
     io: FrameIo,
@@ -1056,6 +1173,7 @@ impl EffectGraph {
         let mut producers: HashMap<&str, usize> = HashMap::new();
         let mut defined: Vec<&str> = Vec::new();
         let mut kinds = Vec::with_capacity(specs.len());
+        let mut options = Vec::new();
         let mut effects = Vec::new();
         let mut labels = Vec::new();
         for (n, spec) in specs.iter().enumerate() {
@@ -1084,8 +1202,13 @@ impl EffectGraph {
                         return Err(graph_err(format!("`{body}` writes one label, got {outs}; split it to use it twice")));
                     }
                     let mut ks = Vec::new();
-                    for path in body.split('|').map(str::trim).filter(|p| !p.is_empty()) {
-                        let (label, fx) = open(path)?;
+                    for item in split_unquoted(body, b'|').into_iter().map(str::trim).filter(|p| !p.is_empty()) {
+                        let (path, item_options) = parse_effect_item(item)?;
+                        let path = path.as_str();
+                        let (label, mut fx) = open(path)?;
+                        check_options(path, &fx, &item_options)?;
+                        apply_constants(&mut fx, &item_options);
+                        options.push(item_options);
                         let wanted = if ks.is_empty() { ins } else { 1 };
                         if fx.input_count() != wanted {
                             return Err(graph_err(if ks.is_empty() {
@@ -1193,7 +1316,23 @@ impl EffectGraph {
         let topo = Topology { nb_inputs, node_inputs, order, outputs: outputs.iter().map(|o| o.1).collect() };
         let input_names = (0..nb_inputs).map(|i| format!("in{i}")).collect();
         let output_names = outputs.into_iter().map(|o| o.0).collect();
-        Self::from_parts(effects.into_iter().zip(labels).map(|(fx, l)| (l, fx)).collect(), topo, input_names, output_names, nodes, "graph")
+        let mut graph = Self::from_parts(
+            effects.into_iter().zip(labels).map(|(fx, l)| (l, fx)).collect(),
+            topo,
+            input_names,
+            output_names,
+            nodes,
+            "graph",
+        )?;
+        graph.options = options;
+        Ok(graph)
+    }
+
+    /// Inline options of every effect, by effect index (`blur.zip=radius=8:enable=gt(t,1)`):
+    /// parameter values, `enable` and `bypass` as written. Constant parameter values are
+    /// already set; the caller evaluates the rest.
+    pub fn inline_options(&self) -> &[InlineOptions] {
+        &self.options
     }
 
     pub(crate) fn from_parts(
@@ -1283,6 +1422,7 @@ impl EffectGraph {
                 });
             }
         }
+        let nb_effects = effects.len();
         Ok(EffectGraph {
             effects,
             labels,
@@ -1293,6 +1433,7 @@ impl EffectGraph {
             output_names,
             output_formats,
             nodes,
+            options: vec![Vec::new(); nb_effects],
             params,
             param_names,
             what,
@@ -1712,6 +1853,28 @@ impl EffectChain {
         Ok(EffectChain { graph })
     }
 
+    /// Builds a chain from its description, `a.zip=key=value:key=value|b.zip`: effects
+    /// separated by `|`, each with inline options as in a graph (see [`parse_effect_item`]).
+    /// `open` loads a package from its path and returns its label and the effect.
+    pub fn parse(text: &str, mut open: impl FnMut(&str) -> Result<(String, Effect), Error>) -> Result<Self, Error> {
+        let mut effects = Vec::new();
+        let mut options = Vec::new();
+        for item in split_unquoted(text, b'|').into_iter().map(str::trim).filter(|p| !p.is_empty()) {
+            let (path, item_options) = parse_effect_item(item)?;
+            let (label, mut fx) = open(&path)?;
+            check_options(&path, &fx, &item_options)?;
+            apply_constants(&mut fx, &item_options);
+            effects.push((label, fx));
+            options.push(item_options);
+        }
+        if effects.is_empty() {
+            return Err(graph_err("the chain names no package"));
+        }
+        let mut chain = Self::new(effects)?;
+        chain.graph.options = options;
+        Ok(chain)
+    }
+
     /// The chain as the graph it is.
     pub fn graph(&self) -> &EffectGraph {
         &self.graph
@@ -1791,5 +1954,19 @@ impl EffectChain {
     /// effects, as a disabled filter passes its first input through.
     pub fn convert(&mut self, input: &Frame, out: FrameMut) -> Result<(), Error> {
         self.graph.convert(std::slice::from_ref(input), &mut [out])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_unquoted;
+
+    #[test]
+    fn backslash_escapes_only_special_characters() {
+        // A `\` before a non-special character is literal, so Windows paths split on `|`.
+        assert_eq!(split_unquoted(r"C:\fx\a.zip|C:\fx\b.zip", b'|'), [r"C:\fx\a.zip", r"C:\fx\b.zip"]);
+        assert_eq!(split_unquoted(r"C:\fx\\|b.zip", b'|'), [r"C:\fx\\", "b.zip"]);
+        // An escaped separator does not split.
+        assert_eq!(split_unquoted(r"a\|b|c", b'|'), [r"a\|b", "c"]);
     }
 }

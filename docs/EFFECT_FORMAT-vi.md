@@ -18,7 +18,7 @@ my-effect/
 
 ```sh
 gpufx check my-effect            # biên dịch mọi shader, báo lỗi kèm vị trí
-gpufx run my-effect -i in.png -o out.png -p strength=0.8
+gpufx run 'my-effect=strength=0.8' -i in.png -o out.png
 gpufx pack my-effect my-effect.zip
 ```
 
@@ -128,7 +128,7 @@ Mỗi phần tử `passes`:
 
 Output có kích thước bằng input đầu tiên. Tên input/texture/param phải là định danh hợp lệ,
 không trùng nhau, không bắt đầu bằng `gpufx` và không dùng `globals`, `params`, `out_tex`, `smp`.
-Param không được tên `enable` hay `bypass`: `<effect>.enable` và `<effect>.bypass` dùng để bật/tắt một effect của chain hoặc graph.
+Param không được tên `enable` hay `bypass`: các key inline `enable=` và `bypass=` của một effect (`effect='my-effect.zip=enable=lt(t\,2)'`) dùng để bật/tắt một effect của chain hoặc graph.
 
 ## Viết shader WGSL
 
@@ -292,8 +292,8 @@ nhiều (ảnh 4000 px trong một hộp nhỏ).
 
 ## Tham số biểu thức
 
-Tham số `expr` (api 2) giữ một biểu thức toán, truyền dạng chuỗi như mọi tham số (`params=` của filter,
-`sendcmd`, `gpufx run -p`), và được tính trên GPU ở chỗ shader gọi nó, ví dụ mỗi hạt một lần:
+Tham số `expr` (api 2) giữ một biểu thức toán, truyền dạng chuỗi như mọi tham số (inline sau tên package trong `effect=`/`graph=` của filter,
+`sendcmd`, inline trong `gpufx run`), và được tính trên GPU ở chỗ shader gọi nó, ví dụ mỗi hạt một lần:
 
 ```json
 { "name": "path_x", "type": "expr", "vars": ["u", "p", "x0"], "default": "x0 + 0.05*sin(tau*u)" }
@@ -314,8 +314,8 @@ let x = gpufx_expr_path_x(u, p, x0);   // tham số theo thứ tự `vars`, đ�
   đổi mỗi frame. Biểu thức được biên dịch ngay lúc đặt, nên chuỗi parse hay biên dịch lỗi báo lỗi tại đó
   (`sendcmd` báo lại) và giữ biểu thức đúng gần nhất; stream vẫn chạy tiếp. Biểu thức mặc định dùng
   pipeline chung của mọi hiệu ứng mở từ gói.
-- Trên dòng lệnh FFmpeg, dấu phẩy trong `params='...'` phải escape như mọi option của filter:
-  `angle=max(90*u\,0)`.
+- Trên dòng lệnh FFmpeg, dấu phẩy trong `effect='...'`/`graph='...'` phải escape như mọi option của filter, còn
+  dấu `:` giữa các key inline viết là `\:`: `effect='x.zip=angle=max(90*u\,0)\:speed=2'`.
 
 ## Ví dụ có sẵn
 

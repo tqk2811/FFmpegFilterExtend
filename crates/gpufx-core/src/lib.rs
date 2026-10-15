@@ -26,7 +26,7 @@ pub mod videotoolbox;
 pub mod vulkan;
 
 pub use frame::{ChromaLocation, ColorInfo, Frame, FrameMut, GpuFrame, Matrix, PixelFormat, Range};
-pub use graph::{BypassPad, EffectChain, EffectGraph, MemoryStats, Source};
+pub use graph::{parse_effect_item, BypassPad, EffectChain, EffectGraph, InlineOptions, MemoryStats, Source};
 pub use manifest::{Manifest, StreamInfo};
 pub use package::Package;
 pub use pool::PoolStats;

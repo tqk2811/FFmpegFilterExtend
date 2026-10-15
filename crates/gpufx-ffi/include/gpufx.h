@@ -18,7 +18,7 @@
 extern "C" {
 #endif
 
-#define GPUFX_API_VERSION 11
+#define GPUFX_API_VERSION 12
 
 typedef struct GpufxEffect GpufxEffect;
 
@@ -170,14 +170,44 @@ GpufxEffect *gpufx_effect_open_chain(const char *const *paths, uint32_t count, c
  * output read back once; edges stay on the GPU in pooled textures that are reused once
  * their last reader has run. Cycles, labels read but never written, written twice or
  * read twice, unread pads and wrong label counts fail here; the manifest size and format
- * rules of every node are checked by gpufx_effect_check_inputs(). Paths must not contain
- * '[', ']', ';' or '|'.
+ * rules of every node are checked by gpufx_effect_check_inputs().
+ * Since version 12 a package takes inline options after its path, as an FFmpeg filter
+ * does: "blur.zip=radius=8:enable=gt(t,1)" (see gpufx_effect_open_effects()). Paths
+ * holding '[', ']', ';', '|', '=', ':', '\' or '\'' escape them with '\' or are quoted.
+ * Inline constant parameter values are applied at open; expression values and the
+ * "enable"/"bypass" keys are NOT applied: the caller reads them with
+ * gpufx_effect_option_count()/gpufx_effect_option() and applies them itself.
  * Parameters are named as in a chain over all packages of the graph, in statement order;
  * gpufx_effect_find_param() also takes "label.name" where label is the output label of a
  * node ("ba.radius"). The other functions describe the graph: input formats are those
  * every effect reading the pad accepts, gpufx_effect_output_format*() describe output 0.
  */
 GpufxEffect *gpufx_effect_open_graph(const char *graph, const char *backend);
+
+/*
+ * Since version 12. Opens a chain written as one string, each package with inline
+ * options: "wipe.zip=progress=t/2:angle=45|vignette.zip". Options are named
+ * key=value pairs separated by ':': a parameter of that package, "enable" (an
+ * expression switching the effect, as gpufx_effect_set_node_enabled() does per frame)
+ * or "bypass" ("0" or "auto"). '\' escapes the next character (one of \ ' : ; | = [ ]; before any other it is a
+ * plain '\', as in Windows paths) and '...' quotes, so a
+ * value may hold ':', '|', '=', '[', ']' or ';'; commas need no escape. An unknown key,
+ * a key given twice or a bypass other than 0/auto fails here.
+ * Parameter values that are constants ("0.5", "1,0,0", "#ff8800") are applied at open;
+ * expression values and the "enable"/"bypass" keys are NOT applied: the library
+ * evaluates no expression, so the caller reads every option back with
+ * gpufx_effect_option_count()/gpufx_effect_option() and evaluates the rest itself.
+ */
+GpufxEffect *gpufx_effect_open_effects(const char *effects, const char *backend);
+
+/*
+ * Since version 12. Inline options of an effect opened by gpufx_effect_open_effects() or
+ * gpufx_effect_open_graph(), in the order they were written: effect gets the index of
+ * the effect (as in "index.name"), key and value strings owned by fx. 0 for others.
+ */
+uint32_t gpufx_effect_option_count(const GpufxEffect *fx);
+int gpufx_effect_option(const GpufxEffect *fx, uint32_t index, uint32_t *effect,
+                        const char **key, const char **value);
 void gpufx_effect_free(GpufxEffect *fx);
 
 /* Strings below are owned by the effect and live as long as it does. */

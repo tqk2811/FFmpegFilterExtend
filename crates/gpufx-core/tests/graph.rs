@@ -6,7 +6,9 @@ mod common;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use gpufx_core::{Effect, EffectChain, EffectGraph, Error, FrameInfo, GpuContext, Image, ImageMut, Package, Source, StreamInfo};
+use gpufx_core::{
+    parse_effect_item, Effect, EffectChain, EffectGraph, Error, FrameInfo, GpuContext, Image, ImageMut, Package, Source, StreamInfo,
+};
 
 fn examples() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects")
@@ -431,4 +433,77 @@ fn an_effect_switched_off_passes_the_input_bypass_picks() {
     // Switched off with progress anywhere: the second clip.
     g.set_node_enabled(0, false).unwrap();
     assert_eq!(run_graph(&mut g, &[&src, &inv], &info)[0], inv);
+}
+
+#[test]
+fn inline_options_are_split_unescaped_and_named() {
+    let opts = |pairs: &[(&str, &str)]| pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<Vec<_>>();
+    let (path, o) = parse_effect_item(" wipe.zip=progress=clip((t-1)/1.5,0,1):angle=45 ").unwrap();
+    assert_eq!(path, "wipe.zip");
+    assert_eq!(o, opts(&[("progress", "clip((t-1)/1.5,0,1)"), ("angle", "45")]));
+    assert_eq!(parse_effect_item("a.zip").unwrap(), ("a.zip".to_string(), Vec::new()));
+    // `\` escapes the separators, quotes keep them; a `\` before anything else stays (Windows paths).
+    let (path, o) = parse_effect_item(r"C:\fx\a\=b.zip=text=a\:b\|c\;d\[e\]f\=g:color='1:2|3'").unwrap();
+    assert_eq!(path, r"C:\fx\a=b.zip");
+    assert_eq!(o, opts(&[("text", "a:b|c;d[e]f=g"), ("color", "1:2|3")]));
+    assert_eq!(parse_effect_item(r"a.zip=k=\\\'").unwrap().1, opts(&[("k", r"\'")]));
+    let err = |item: &str| parse_effect_item(item).unwrap_err().to_string();
+    assert!(err("a.zip=k=1:k=2").contains("key `k` given twice"), "{}", err("a.zip=k=1:k=2"));
+    assert!(err("a.zip=enable=1:enable=0").contains("given twice"));
+    assert!(err("a.zip=1").contains("is not key=value"), "{}", err("a.zip=1"));
+    assert!(err("a.zip==1").contains("has no key"));
+    assert!(err("a.zip=k='1").contains("unclosed `'`"));
+}
+
+#[test]
+fn inline_options_set_parameters_and_keep_the_rest_for_the_caller() {
+    let Some(ctx) = gpu() else { return };
+    let g = graph(
+        &ctx,
+        r"[0]split[a][b]; [a]gaussian-blur.zip=radius=8[ba]; [b]grayscale.zip|vignette.zip=strength=0.25:radius=t/2[gb];
+          [ba][gb]crossfade.zip=progress=clip((t-1)/1.5,0,1):enable=between(t,1,3):bypass=auto[x]",
+    )
+    .unwrap();
+    let fx = g.effects();
+    assert_eq!(fx[0].params().get("radius").unwrap().0[0], 8.0);
+    assert_eq!(fx[2].params().get("strength").unwrap().0[0], 0.25);
+    let o = g.inline_options();
+    assert_eq!(o.len(), 4);
+    assert!(o[1].is_empty());
+    assert_eq!(o[2][1], ("radius".to_string(), "t/2".to_string()));
+    let keys: Vec<&str> = o[3].iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, ["progress", "enable", "bypass"]);
+    assert_eq!(o[3][0].1, "clip((t-1)/1.5,0,1)");
+
+    // A chain written as one string takes the same options.
+    let chain = EffectChain::parse("invert.zip | vignette.zip=strength=0.5:enable=gt(t,2)", |path| {
+        let name = path.strip_suffix(".zip").unwrap_or(path);
+        Ok((name.to_string(), effect(&ctx, name)))
+    })
+    .unwrap();
+    assert_eq!(chain.effects()[1].params().get("strength").unwrap().0[0], 0.5);
+    assert_eq!(chain.graph().inline_options()[1].len(), 2);
+    assert!(chain.graph().inline_options()[0].is_empty());
+}
+
+#[test]
+fn inline_option_mistakes_are_explained() {
+    let Some(ctx) = gpu() else { return };
+    let cases = [
+        ("[0]vignette.zip=amount=1[a]", "effect `vignette.zip` has no parameter `amount` (keys: strength, radius, color, enable, bypass)"),
+        ("[0]vignette.zip=strength=1:strength=2[a]", "key `strength` given twice"),
+        ("[0]vignette.zip=bypass=1[a]", "bypass is 0 or auto"),
+        ("[0]vignette.zip=0.5[a]", "is not key=value"),
+        // Names given to a node of several effects belong to one of them.
+        ("[0]invert.zip|vignette.zip=amount=1[a]", "has no parameter `amount`"),
+    ];
+    for (text, want) in cases {
+        let got = graph(&ctx, text).err().map(|e| e.to_string()).unwrap_or_default();
+        assert!(got.contains(want), "`{text}`: {got}");
+    }
+    let got = EffectChain::parse("invert.zip=strength=1", |path| Ok(("invert".into(), effect(&ctx, path.trim_end_matches(".zip")))))
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+    assert!(got.contains("effect `invert.zip` has no parameter `strength`"), "{got}");
 }

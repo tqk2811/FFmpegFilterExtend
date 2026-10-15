@@ -4,7 +4,7 @@ use std::path::Path;
 use std::process::ExitCode;
 
 use gpufx_core::manifest::SizeRule;
-use gpufx_core::{Backend, Effect, FrameInfo, GpuContext, Image, ImageMut, Package, StreamInfo};
+use gpufx_core::{parse_effect_item, Backend, Effect, FrameInfo, GpuContext, Image, ImageMut, Package, StreamInfo};
 
 const USAGE: &str = "\
 usage:
@@ -12,8 +12,10 @@ usage:
   gpufx check <package> [--backend ...]   compile every shader and report errors
   gpufx pack [--precompile] <dir> <out.zip>
              --precompile adds D3D12 shaders, used when GPUFX_TRUST_PRECOMPILED=1
-  gpufx run  <package> -i <in.png> [-i <in2.png>...] -o <out.png>
-             [-p name=value]... [--backend auto|vulkan|dx12|metal] [--time seconds]";
+  gpufx run  <package>[=name=value:name=value...] -i <in.png> [-i <in2.png>...] -o <out.png>
+             [--backend auto|vulkan|dx12|metal] [--time seconds]
+             parameters are written after the package, as in the FFmpeg filter:
+             gpufx run 'vignette.zip=strength=0.3:color=#ff8800' -i in.png -o out.png";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -125,10 +127,10 @@ fn pack(dir: &Path, out: &Path, precompile: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn run(path: &str, args: &[String]) -> Result<(), String> {
+fn run(item: &str, args: &[String]) -> Result<(), String> {
+    let (path, params) = parse_effect_item(item).map_err(|e| e.to_string())?;
     let mut inputs = Vec::new();
     let mut output = None;
-    let mut params = Vec::new();
     let mut backend = Backend::Auto;
     let mut time = 0.0;
     let mut it = args.iter();
@@ -137,7 +139,6 @@ fn run(path: &str, args: &[String]) -> Result<(), String> {
         match flag.as_str() {
             "-i" => inputs.push(value()?),
             "-o" => output = Some(value()?),
-            "-p" => params.push(value()?),
             "--backend" => backend = value()?.parse().map_err(|e: gpufx_core::Error| e.to_string())?,
             "--time" => time = value()?.parse().map_err(|_| "--time needs a number".to_string())?,
             _ => return Err(format!("unknown argument {flag}\n{USAGE}")),
@@ -145,13 +146,15 @@ fn run(path: &str, args: &[String]) -> Result<(), String> {
     }
     let output = output.ok_or_else(|| format!("missing -o\n{USAGE}"))?;
 
-    let pkg = Package::open(path).map_err(|e| e.to_string())?;
+    let pkg = Package::open(&path).map_err(|e| e.to_string())?;
     let ctx = GpuContext::new(backend).map_err(|e| e.to_string())?;
     eprintln!("device: {}", ctx.description());
     let mut fx = Effect::new(ctx, pkg).map_err(|e| e.to_string())?;
-    for p in &params {
-        let (k, v) = p.split_once('=').ok_or_else(|| format!("-p expects name=value, got `{p}`"))?;
-        fx.params_mut().set_str(k, v).map_err(|e| e.to_string())?;
+    for (k, v) in &params {
+        if k == "enable" || k == "bypass" {
+            return Err(format!("{k}= switches effects over time in a chain or graph of the FFmpeg filter; run renders one frame"));
+        }
+        fx.params_mut().set_str(k, v).map_err(|e| format!("{path}: {e}"))?;
     }
     let decoded: Vec<image::DynamicImage> =
         inputs.iter().map(|p| image::open(p).map_err(|e| format!("{p}: {e}"))).collect::<Result<_, _>>()?;

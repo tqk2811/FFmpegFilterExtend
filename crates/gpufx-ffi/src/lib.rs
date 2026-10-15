@@ -21,7 +21,7 @@ use gpufx_core::{
 };
 
 /// Bumped when the C ABI changes incompatibly. Must match `GPUFX_API_VERSION` in gpufx.h.
-const API_VERSION: u32 = 11;
+const API_VERSION: u32 = 12;
 
 thread_local! {
     static LAST_ERROR: RefCell<CString> = RefCell::new(CString::default());
@@ -117,6 +117,8 @@ fn program(path: &str, ctx: Arc<GpuContext>) -> Result<Arc<Program>, String> {
 /// What an effect was opened from, to open it again on another device.
 enum Spec {
     Chain(Vec<String>),
+    /// `a.zip=key=value|b.zip`: a chain with inline options.
+    Effects(String),
     Graph(String),
 }
 
@@ -134,6 +136,8 @@ pub struct GpufxEffect {
     outputs: Vec<CString>,
     output_formats: Vec<Vec<CString>>,
     params: Vec<CString>,
+    /// Inline options: (effect index, key, value).
+    options: Vec<(u32, CString, CString)>,
 }
 
 #[repr(C)]
@@ -346,6 +350,12 @@ fn wrap(graph: EffectGraph, spec: Spec, pending: Backend, name: String) -> *mut 
         outputs: strings(graph.output_names()),
         output_formats: (0..graph.output_count()).map(|k| strings(graph.output_formats(k))).collect(),
         params: strings(graph.param_names()),
+        options: graph
+            .inline_options()
+            .iter()
+            .enumerate()
+            .flat_map(|(k, list)| list.iter().map(move |(key, value)| (k as u32, cstring(key), cstring(value))))
+            .collect(),
         graph,
     };
     Box::into_raw(Box::new(out))
@@ -361,6 +371,18 @@ fn open_spec(spec: &Spec, ctx: &Arc<GpuContext>) -> Result<(EffectGraph, String)
                 effects.push((label(path), effect));
             }
             let graph = EffectChain::new(effects).map_err(|e| e.to_string())?.into_graph();
+            let names: Vec<&str> = graph.effects().iter().map(|fx| fx.package().manifest.name.as_str()).collect();
+            let name = names.join(" | ");
+            Ok((graph, name))
+        }
+        Spec::Effects(text) => {
+            let graph = EffectChain::parse(text, |path| {
+                let effect = Effect::from_program(program(path, ctx.clone()).map_err(gpufx_core::Error::Package)?)
+                    .map_err(|e| gpufx_core::Error::Package(format!("{path}: {e}")))?;
+                Ok((label(path), effect))
+            })
+            .map_err(|e| e.to_string())?
+            .into_graph();
             let names: Vec<&str> = graph.effects().iter().map(|fx| fx.package().manifest.name.as_str()).collect();
             let name = names.join(" | ");
             Ok((graph, name))
@@ -448,6 +470,40 @@ pub unsafe extern "C" fn gpufx_effect_open_chain(paths: *const *const c_char, co
 #[no_mangle]
 pub unsafe extern "C" fn gpufx_effect_open_graph(graph: *const c_char, backend: *const c_char) -> *mut GpufxEffect {
     guard(ptr::null_mut(), || open_graph(str_arg(graph, "graph")?, backend))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_open_effects(effects: *const c_char, backend: *const c_char) -> *mut GpufxEffect {
+    guard(ptr::null_mut(), || open(Spec::Effects(str_arg(effects, "effects")?.to_string()), backend))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_option_count(fx: *const GpufxEffect) -> u32 {
+    fx.as_ref().map_or(0, |fx| fx.options.len() as u32)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn gpufx_effect_option(
+    fx: *const GpufxEffect,
+    index: u32,
+    effect: *mut u32,
+    key: *mut *const c_char,
+    value: *mut *const c_char,
+) -> c_int {
+    guard(-1, || {
+        let fx = fx.as_ref().ok_or("effect is NULL")?;
+        let (k, name, text) = fx.options.get(index as usize).ok_or_else(|| format!("no option {index}"))?;
+        if !effect.is_null() {
+            *effect = *k;
+        }
+        if !key.is_null() {
+            *key = name.as_ptr();
+        }
+        if !value.is_null() {
+            *value = text.as_ptr();
+        }
+        Ok(0)
+    })
 }
 
 #[no_mangle]
@@ -1662,5 +1718,43 @@ mod tests {
         let bad = CString::new("[0]split[a]; [a]nothing.zip[b]").unwrap();
         assert!(unsafe { gpufx_effect_open_graph(bad.as_ptr(), ptr::null()) }.is_null());
         assert!(name(gpufx_last_error()).contains("nothing.zip"), "{}", name(gpufx_last_error()));
+    }
+
+    #[test]
+    fn a_chain_string_takes_inline_options() {
+        let _serial = serial();
+        if GpuContext::new(Backend::Auto).is_err() {
+            eprintln!("skipping: no GPU adapter");
+            return;
+        }
+        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects");
+        let path = |n: &str| examples.join(n).to_str().unwrap().to_string();
+        let text = CString::new(format!("{}|{}=strength=0:radius=t/2:enable=gt(t,1)", path("invert"), path("vignette"))).unwrap();
+        let fx = unsafe { gpufx_effect_open_effects(text.as_ptr(), ptr::null()) };
+        assert!(!fx.is_null(), "{:?}", unsafe { CStr::from_ptr(gpufx_last_error()) });
+        assert_eq!(unsafe { gpufx_effect_option_count(fx) }, 3);
+        let option = |i| {
+            let (mut k, mut key, mut value) = (9u32, ptr::null(), ptr::null());
+            assert_eq!(unsafe { gpufx_effect_option(fx, i, &mut k, &mut key, &mut value) }, 0);
+            let s = |p| unsafe { CStr::from_ptr(p) }.to_str().unwrap().to_string();
+            (k, s(key), s(value))
+        };
+        assert_eq!(option(1), (1, "radius".into(), "t/2".into()));
+        assert_eq!(option(2), (1, "enable".into(), "gt(t,1)".into()));
+        assert!(unsafe { gpufx_effect_option(fx, 3, ptr::null_mut(), ptr::null_mut(), ptr::null_mut()) } < 0);
+        // The constant is set: vignette at strength 0 leaves the inverted frame.
+        let src = [200u8; 4 * 4 * 4];
+        let mut out = vec![0u8; src.len()];
+        let input = GpufxImage { data: src.as_ptr(), width: 4, height: 4, stride: 16 };
+        let target = GpufxOutput { data: out.as_mut_ptr(), width: 4, height: 4, stride: 16 };
+        let info = GpufxFrameInfo { time: 0.0, frame: 0, pixel_aspect: 1.0 };
+        assert_eq!(unsafe { gpufx_effect_process(fx, &input, 1, &target, &info) }, 0);
+        assert_eq!(out[..4], [55, 55, 55, 200]);
+        unsafe { gpufx_effect_free(fx) };
+
+        let bad = CString::new(format!("{}=strength=1", path("invert"))).unwrap();
+        assert!(unsafe { gpufx_effect_open_effects(bad.as_ptr(), ptr::null()) }.is_null());
+        let msg = unsafe { CStr::from_ptr(gpufx_last_error()) }.to_str().unwrap().to_string();
+        assert!(msg.contains("has no parameter `strength`"), "{msg}");
     }
 }

@@ -19,12 +19,12 @@ Tiếng Việt: [DESIGN-vi.md](DESIGN-vi.md)
 ## 2. Architecture overview
 
 ```
- ffmpeg -vf "gpufx=effect=vignette.zip:params='strength=0.8'"
+ ffmpeg -vf "gpufx=effect='vignette.zip=strength=0.8'"
             │
             ▼
  ┌────────────────────────────┐   C ABI (gpufx.h)    ┌──────────────────────────────────┐
  │ libavfilter/vf_gpufx.c     │ ───────────────────▶ │ libgpufx (Rust, crates/gpufx-ffi) │
- │  - option effect/params    │                      │  gpufx-core:                      │
+ │  - option effect/graph     │                      │  gpufx-core:                      │
  │  - dynamic input pads from │                      │   package  : read zip / directory │
  │    the manifest (1..N      │                      │   manifest : schema, validation   │
  │    inputs)                 │                      │   params   : uniform layout       │
@@ -137,8 +137,8 @@ initialize the graph instead of running incorrectly.
 ## 5. The `gpufx` FFmpeg filter
 
 ```
-gpufx=effect=<zip|directory>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)'][:backend=auto|vulkan|dx12][:shortest=0|1][:out_format=<pix_fmt>][:passthrough=auto|off]
-gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backend=...][:shortest=0|1][:out_format=<pix_fmt>][:passthrough=auto|off]
+gpufx=effect='<zip|directory>[=k=v[:k=v...]][|<zip>[=k=v...]...]'[:backend=auto|vulkan|dx12][:shortest=0|1][:out_format=<pix_fmt>][:passthrough=auto|off]
+gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip=k=v[out]'[:backend=...][:shortest=0|1][:out_format=<pix_fmt>][:passthrough=auto|off]
 ```
 
 - **effect**: path to the package. The filter's number of inputs comes from the manifest.
@@ -148,9 +148,8 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   follows the rules of the last effect. The rules of the later effects are checked as when chaining filters:
   the format is the first one in the previous effect's `output.formats` that the next effect accepts,
   and the size is the size of the first input. The frame stays RGBA on the GPU and is not converted to that format.
-  Parameters are set as `package.name` (the file name without `.zip`, for example `vignette.strength`), `index.name`
-  (counted from 0, required when two packages share a name or a package name is a number), or the bare name if only one
-  effect has it. Spaces around `|` are ignored.
+  Each effect takes its own inline parameters (`effect='gaussian-blur.zip=radius=8|vignette.zip=strength=0.6'`, see
+  "Inline parameters" below). Spaces around `|` are ignored.
 - **graph**: a whole effect graph with several inputs and outputs, in place of `effect`; see
   "GPU graph inside one filter" in section 6.
 - **GPU frames out only**, like the `*_cuda` filters: every output is a Vulkan, D3D12, D3D11 or VideoToolbox frame, so
@@ -193,42 +192,48 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   ended on: `[a][b]gpufx=effect=xfade.zip:enable='between(t,2,3)':bypass=auto`. After the first
   window it keeps the last input, also before later windows. The chosen pad must have the size of
   the output, else the event fails with an error (`EINVAL`), never another input.
-- **params**: `name=value` separated by `|`. A value is a literal (`0.5`, `1,0,0`, `#ff8800`)
-  or an **FFmpeg expression** in `t`, `n`, `w`, `h`, `a` (`w/h`), `sar`, `dar` (`a*sar`),
-  re-evaluated for every frame. This is how you do keyframes/transitions without external tools.
-- **`<node>.enable=<expr>`** in `params` switches effects of a chain or graph per frame (on while
-  the expression is not 0; a constant is an expression too): `params='0.enable=lt(t\,2)'`. The node
-  is named like a parameter prefix: the package label when only one effect has it, the 0-based index
-  (always valid), or a graph statement's output label (`[x]` → `x.enable`, every effect of that
-  statement). A bare `enable` inside `params` is allowed only for a single effect; it is not the
-  filter's own timeline option `enable=`, which stays outside `params`. No package may declare a
-  parameter named `enable`. An effect switched off copies its first input into its output texture
+- **Inline parameters**: written right after the package name, like the options of a native FFmpeg filter:
+  `pkg.zip=key=value:key2=value2`, in `effect=` (also in a chain: `effect='a.zip=k=1|b.zip'`) and in every node of
+  `graph=` (`[b]grayscale.zip|vignette.zip=strength=0.6[gb]`). Keys are named (no positional values). A value is
+  a literal (`0.5`, `1,0,0`, `#ff8800`) or an **FFmpeg expression** in `t`, `n`, `w`, `h`, `a` (`w/h`), `sar`,
+  `dar` (`a*sar`), re-evaluated for every frame. This is how you do keyframes/transitions without external tools.
+  An unknown key is an error naming the effect and the key; so is a key given twice. The filter has no
+  `params` option; to change values while the stream runs use the `sendcmd` command below.
+  - **Escaping.** Put the whole `effect=`/`graph=` value in `'...'`. FFmpeg's own option parser splits the filter
+    options at `:` *after* it removes those quotes, so in an ffmpeg command line the `:` between inline keys is
+    written `\:` (a single key needs none), and commas in expressions keep the usual `\,`:
+    `-vf "gpufx=effect='wipe.zip=progress=clip(t/2\,0\,1)\:angle=45'"`,
+    `effect='vignette.zip=strength=0.7'`. Inside the effect/graph string itself (after FFmpeg's unescaping),
+    `\` escapes one of `\ ' : ; | = [ ]` (before any other character the `\` stays literal, so Windows paths
+    work) and `'...'` quotes a value; commas need no escaping at this level.
+- **Inline `enable=<expr>`** on an effect switches that effect per frame (on while the expression is not 0; a
+  constant is an expression too): `effect='a.zip|b.zip=enable=lt(t\,2)'`. In a graph node of several effects
+  (`grayscale.zip|vignette.zip`) put `enable` on each effect that should switch. It is not the filter's own
+  timeline option `enable=`, which stays outside the effect string. No package may declare a parameter named
+  `enable`. An effect switched off copies its first input into its output texture
   (every effect has its first input's size), so the plan, the pooled textures and the bindings of the
   rest of the graph stay as they are and toggling allocates nothing. Switching an effect off saves
   its shader work but not all of it: the copy is still one compute pass, and the effect keeps its
   output texture. With every effect off, the event is handled as a disabled filter (relabel when
-  `passthrough` allows, else the GPU bypass), and `n` still counts. Names that give the same
-  effects (`invert.enable` and `0.enable`) are one entry, so `.enable` and `.bypass` may come from
-  different spellings, but each may be given once only (else "node given twice"); names giving
-  overlapping but unequal lists (a graph label of two effects and an index of one) stay separate
-  entries; a bare `.enable` (no effect name) is an error. Via `sendcmd`,
-  `params 0.enable=1` switches an effect back on: an `.enable` entry cannot be removed, only
-  replaced, by naming the same spelling of the node again.
-- **`<node>.bypass=0|auto`** in `params` (nodes named as for `.enable`; a bare `bypass` for a single
-  effect): the input an effect switched off copies. `0` (default) its first input; `auto` its first
-  input until its `.enable` expression has been true once, then its last input (an effect of one
-  input keeps it). Any input may be copied, so the plan keeps every input of an effect alive until
-  the effect's last pass. An input of another size than the effect's output makes the frame fail.
-  With every effect off, the outputs are the input pads the chosen inputs lead to. No package may
-  declare a parameter named `bypass`. A bare `bypass` inside `params` is the node bypass of the single
-  effect, not the filter option `bypass=` (which sets the input a filter disabled by `enable=` passes).
+  `passthrough` allows, else the GPU bypass), and `n` still counts.
+- **Inline `bypass=0|auto`** on an effect: the input an effect switched off copies. `0` (default) its first
+  input; `auto` its first input until its `enable` expression has been true once, then its last input (an effect
+  of one input keeps it); any other value is an error. Any input may be copied, so the plan keeps every input of
+  an effect alive until the effect's last pass. An input of another size than the effect's output makes the
+  frame fail. With every effect off, the outputs are the input pads the chosen inputs lead to. No package may
+  declare a parameter named `bypass`. This is not the filter option `bypass=` (which sets the input a filter
+  disabled by `enable=` passes).
   `auto` rests on the history of the frames processed: an `enable` window shorter than one frame
   interval, or a stream whose first frame is already past the window (trim, seek), never sets it and
   stays on input 0; it is not reset on a seek; after the first window it is always the last input.
   FFI (API 11, also `gpufx_effect_node_effects`): `gpufx_effect_set_node_bypass`,
   `gpufx_effect_set_bypass`, `gpufx_effect_bypass_pad`.
-- **sendcmd / zmq**: the `params` command changes values at run time, for example
-  `sendcmd=c='2.0 gpufx@fx params strength=0.2'`.
+- **sendcmd / zmq**: `params` is a runtime command (not a filter option) that changes values while the stream
+  runs, for example `sendcmd=c='2.0 gpufx@fx params strength=0.2'`. It takes `node.name=value` pairs separated
+  by `|`; a node is the package label, the 0-based index, a graph output label or the bare name, as in a chain
+  or graph. It also accepts `<node>.enable=<expr>` and `<node>.bypass=0|auto`, which set every effect the node
+  names and replace any inline value. These two keys exist only in this `params` runtime command (sendcmd/zmq);
+  they are not filter options.
 - **timeline** (`enable='between(t,1,3)'`) is supported.
 - Multiple inputs use `framesync`: the first input decides the length and frame rate (an input with a
   different fps has its frames repeated or dropped). Another input that has not started yet is a black GPU frame (opaque for formats with alpha); one that has
@@ -249,17 +254,17 @@ Examples:
 VK="-init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk"   # or d3d12va=dx ... dx
 
 # 1 input, parameter animated over time (gpufx uploads the frame, hwdownload brings it back)
-ffmpeg $VK -i in.mp4 -vf "gpufx=effect=vignette.zip:params='strength=clip(t/2\,0\,1)|color=#200040',hwdownload,format=yuv420p" out.mp4
+ffmpeg $VK -i in.mp4 -vf "gpufx=effect='vignette.zip=strength=clip(t/2\,0\,1)\:color=#200040',hwdownload,format=yuv420p" out.mp4
 
 # 2-input transition
 ffmpeg $VK -i a.mp4 -i b.mp4 -filter_complex \
-  "[0][1]gpufx=effect=wipe-transition.zip:params='progress=clip((t-1)/1.5\,0\,1)|angle=45',hwdownload,format=yuv420p" out.mp4
+  "[0][1]gpufx=effect='wipe-transition.zip=progress=clip((t-1)/1.5\,0\,1)\:angle=45',hwdownload,format=yuv420p" out.mp4
 
 # chaining several effects: two filters, the frame stays on the GPU between them
-ffmpeg $VK -i in.mp4 -vf "gpufx=effect=gaussian-blur.zip,gpufx=effect=gradient-map.zip:params='intensity=0.6',hwdownload,format=yuv420p" out.mp4
+ffmpeg $VK -i in.mp4 -vf "gpufx=effect=gaussian-blur.zip,gpufx=effect='gradient-map.zip=intensity=0.6',hwdownload,format=yuv420p" out.mp4
 
 # same result in one filter: one GPU submission
-ffmpeg $VK -i in.mp4 -vf "gpufx=effect='gaussian-blur.zip|gradient-map.zip':params='gradient-map.intensity=0.6',hwdownload,format=yuv420p" out.mp4
+ffmpeg $VK -i in.mp4 -vf "gpufx=effect='gaussian-blur.zip|gradient-map.zip=intensity=0.6',hwdownload,format=yuv420p" out.mp4
 ```
 
 ## 6. Frame path and performance
@@ -344,9 +349,12 @@ The single quotes protect `;` and `[]` from the outer filter graph. Rules:
   frames of one event are sent together.
 - `effect='a.zip|b.zip'` is the linear graph: `EffectChain` is a wrapper around `EffectGraph`, and a single
   `Effect` runs through the same code. `effect` and `graph` are mutually exclusive.
-- Parameters are named as in chains over all packages of the graph in statement order (`label.name`,
-  `index.name`, bare name); `node.name` with a node's output label also works (`ba.radius`, `gb.strength`
-  finds the one effect of `grayscale|vignette` that has `strength`). `sendcmd` keeps working.
+- Parameters are written inline after each package of a node (`[b]grayscale.zip|vignette.zip=strength=0.6[gb]`, see
+  "Inline parameters" in section 5), so a graph example with values reads
+  `graph='[0]split[a][b]; [a]gaussian-blur.zip=radius=8[ba]; [b]grayscale.zip|vignette.zip=strength=0.6[gb]; [ba][gb]crossfade.zip=progress=clip((t-1)/1.5\,0\,1)\:enable=between(t\,1\,3)\:bypass=auto[x]'`.
+  `sendcmd` addresses values at run time as `node.name=value` over all packages of the graph in statement order
+  (package label, 0-based index, bare name, or a node's output label: `ba.radius`, `gb.strength` finds the one
+  effect of `grayscale|vignette` that has `strength`).
 - Checked when the filter is created: cycles, labels read but never written, written twice or read twice,
   unread input pads, label counts against a node's inputs, numeric output labels. Checked at configuration:
   the manifest size and format rules of every node (an edge carries its producer's size and the format
@@ -358,6 +366,10 @@ The single quotes protect `;` and `[]` from the outer filter graph. Rules:
 C API (v5, additive): `gpufx_effect_open_graph`, `gpufx_effect_output_count`, `gpufx_effect_output_name`,
 `gpufx_effect_output_source`, `gpufx_effect_output_pad_format[_count]`, `gpufx_effect_process_graph`,
 `gpufx_effect_convert_graph`; see `gpufx.h`.
+Inline parameters (API 12, `GPUFX_API_VERSION` 12): `gpufx_effect_open_effects(effects, backend)` opens a chain
+string with inline options, `gpufx_effect_open_graph` accepts them in every node, and `gpufx_effect_option_count` /
+`gpufx_effect_option` read them back (constants are already applied; the caller evaluates expressions, `enable` and
+`bypass`).
 
 ### Vulkan frames (done, C API v6)
 

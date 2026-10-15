@@ -19,12 +19,12 @@ English: [DESIGN.md](DESIGN.md)
 ## 2. Tổng quan kiến trúc
 
 ```
- ffmpeg -vf "gpufx=effect=vignette.zip:params='strength=0.8'"
+ ffmpeg -vf "gpufx=effect='vignette.zip=strength=0.8'"
             │
             ▼
  ┌────────────────────────────┐   C ABI (gpufx.h)    ┌──────────────────────────────────┐
  │ libavfilter/vf_gpufx.c     │ ───────────────────▶ │ libgpufx (Rust, crates/gpufx-ffi) │
- │  - option effect/params    │                      │  gpufx-core:                      │
+ │  - option effect/graph     │                      │  gpufx-core:                      │
  │  - pad input động theo     │                      │   package  : đọc zip / thư mục    │
  │    manifest (1..N input)   │                      │   manifest : schema, kiểm tra     │
  │  - framesync nhiều input   │                      │   params   : layout uniform       │
@@ -136,8 +136,8 @@ tạo graph thay vì chạy sai.
 ## 5. Filter FFmpeg `gpufx`
 
 ```
-gpufx=effect=<zip|thư mục>[|<zip>...][:params='a=1|b=#ff0000|c=clip(t/2\,0\,1)'][:backend=auto|vulkan|dx12][:shortest=0|1][:out_format=<pix_fmt>][:passthrough=auto|off]
-gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backend=...][:shortest=0|1][:out_format=<pix_fmt>][:passthrough=auto|off]
+gpufx=effect='<zip|thư mục>[=k=v[:k=v...]][|<zip>[=k=v...]...]'[:backend=auto|vulkan|dx12][:shortest=0|1][:out_format=<pix_fmt>][:passthrough=auto|off]
+gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip=k=v[out]'[:backend=...][:shortest=0|1][:out_format=<pix_fmt>][:passthrough=auto|off]
 ```
 
 - **effect**: đường dẫn gói. Số input của filter lấy từ manifest.
@@ -147,9 +147,8 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   theo quy tắc của hiệu ứng cuối. Quy tắc của hiệu ứng sau được kiểm như khi nối filter:
   format là format đầu tiên trong `output.formats` của hiệu ứng trước mà hiệu ứng sau nhận,
   kích thước là kích thước input đầu. Frame vẫn là RGBA trên GPU, không chuyển sang format đó.
-  Tham số đặt theo `gói.tên` (tên file bỏ `.zip`, ví dụ `vignette.strength`), `chỉ_số.tên`
-  (đếm từ 0, bắt buộc khi hai gói trùng tên hoặc tên gói là số), hoặc tên trơn nếu chỉ một
-  hiệu ứng có nó. Dấu cách quanh `|` được bỏ qua.
+  Mỗi hiệu ứng có tham số inline riêng (`effect='gaussian-blur.zip=radius=8|vignette.zip=strength=0.6'`, xem
+  "Tham số inline" bên dưới). Dấu cách quanh `|` được bỏ qua.
 - **graph**: cả đồ thị hiệu ứng với nhiều input và output, thay cho `effect`; xem "Đồ thị GPU trong
   một filter" ở mục 6.
 - **Chỉ trả ra frame GPU**, giống các filter `*_cuda`: mọi output là frame Vulkan, D3D12, D3D11 hoặc VideoToolbox, nên trước
@@ -191,40 +190,46 @@ gpufx=graph='[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'[:params=...][:backen
   `[a][b]gpufx=effect=xfade.zip:enable='between(t,2,3)':bypass=auto`. Sau cửa sổ bật đầu tiên nó
   giữ input cuối, kể cả trước các cửa sổ sau. Pad được chọn phải cùng kích thước với output, nếu
   không frame đó báo lỗi (`EINVAL`), không bao giờ lặng lẽ lấy input khác.
-- **params**: `tên=giá trị` cách nhau bởi `|`. Giá trị là literal (`0.5`, `1,0,0`, `#ff8800`)
-  hoặc **biểu thức FFmpeg** theo `t`, `n`, `w`, `h`, `a` (`w/h`), `sar`, `dar` (`a*sar`),
-  tính lại mỗi frame. Đây là cách làm keyframe/transition không cần tool ngoài.
-- **`<node>.enable=<expr>`** trong `params` bật/tắt từng effect của chain hoặc graph theo từng frame
-  (bật khi biểu thức khác 0; hằng số cũng là biểu thức): `params='0.enable=lt(t\,2)'`. Node được gọi
-  như tiền tố của tên param: label của package khi chỉ một effect mang nó, chỉ số tính từ 0 (luôn
-  dùng được), hoặc nhãn đầu ra của một câu lệnh graph (`[x]` → `x.enable`, mọi effect của câu lệnh
-  đó). `enable` trần trong `params` chỉ dùng được khi có một effect; nó không phải option timeline
-  `enable=` của filter, vốn nằm ngoài `params`. Package không được khai báo param tên `enable`.
+- **Tham số inline**: viết ngay sau tên package, giống option của một filter FFmpeg gốc:
+  `pkg.zip=key=value:key2=value2`, trong `effect=` (kể cả chain: `effect='a.zip=k=1|b.zip'`) và trong mọi node của
+  `graph=` (`[b]grayscale.zip|vignette.zip=strength=0.6[gb]`). Key phải có tên (không có giá trị theo vị trí). Giá
+  trị là literal (`0.5`, `1,0,0`, `#ff8800`) hoặc **biểu thức FFmpeg** theo `t`, `n`, `w`, `h`, `a` (`w/h`), `sar`,
+  `dar` (`a*sar`), tính lại mỗi frame. Đây là cách làm keyframe/transition không cần tool ngoài.
+  Key lạ là lỗi có nêu tên effect và key; key cho hai lần cũng vậy. Filter không có option `params`; muốn đổi
+  giá trị trong lúc stream chạy thì dùng lệnh `sendcmd` bên dưới.
+  - **Escape.** Bọc cả giá trị `effect=`/`graph=` trong `'...'`. Bộ parse option của FFmpeg tách option của filter
+    tại `:` *sau khi* đã bỏ các dấu nháy đó, nên trên dòng lệnh ffmpeg dấu `:` giữa các key inline phải viết là
+    `\:` (chỉ một key thì không cần), còn dấu phẩy trong biểu thức giữ `\,` như thường lệ:
+    `-vf "gpufx=effect='wipe.zip=progress=clip(t/2\,0\,1)\:angle=45'"`,
+    `effect='vignette.zip=strength=0.7'`. Bên trong chính chuỗi effect/graph (sau khi FFmpeg đã bỏ escape),
+    `\` escape một ký tự trong `\ ' : ; | = [ ]` (đứng trước ký tự khác thì `\` giữ nguyên, nên đường dẫn
+    Windows vẫn dùng được) và `'...'` bọc một giá trị; ở tầng này dấu phẩy không cần escape.
+- **`enable=<expr>` inline** trên một effect bật/tắt effect đó theo từng frame (bật khi biểu thức khác 0; hằng
+  số cũng là biểu thức): `effect='a.zip|b.zip=enable=lt(t\,2)'`. Node graph gồm nhiều effect
+  (`grayscale.zip|vignette.zip`) thì đặt `enable` trên từng effect cần bật/tắt. Nó không phải option timeline
+  `enable=` của filter, vốn nằm ngoài chuỗi effect. Package không được khai báo param tên `enable`.
   Effect bị tắt copy input đầu của nó vào texture output của nó (effect nào cũng có kích thước của
   input đầu), nên plan, các texture trong pool và binding của phần còn lại giữ nguyên, bật/tắt không
   cấp phát gì. Tắt một effect chỉ tiết kiệm phần shader, không tiết kiệm hết: bước copy vẫn là một
   compute pass và effect vẫn giữ texture output. Khi mọi effect đều tắt, frame được xử lý như
   filter bị disable (relabel nếu `passthrough` cho phép, nếu không thì bypass trên GPU), và `n`
-  vẫn đếm tiếp. Các tên cho cùng danh sách effect (`invert.enable` và `0.enable`) là một mục, nên
-  `.enable` và `.bypass` có thể đến từ hai cách viết khác nhau, nhưng mỗi thứ chỉ được cho một lần
-  (nếu không: "node given twice"); tên cho danh sách chồng nhau nhưng không bằng nhau (nhãn graph của
-  hai effect và chỉ số của một effect) vẫn là các mục riêng; `.enable` trần (không có tên effect) là
-  lỗi. Qua `sendcmd`, `params 0.enable=1` bật lại effect: một mục `.enable` không xoá
-  được, chỉ thay được, bằng cách gọi lại đúng cách viết node đó.
-- **`<node>.bypass=0|auto`** trong `params` (node gọi như với `.enable`; `bypass` trần khi chỉ có một
-  effect): input mà effect bị tắt copy ra. `0` (mặc định) là input đầu; `auto` là input đầu cho tới
-  khi biểu thức `.enable` của nó đã đúng một lần, sau đó là input cuối (effect một input thì giữ
-  input đó). Input nào cũng có thể được copy, nên plan giữ mọi input của một effect sống tới pass
-  cuối của effect đó. Input khác kích thước output của effect thì frame đó báo lỗi. Khi mọi effect
+  vẫn đếm tiếp.
+- **`bypass=0|auto` inline** trên một effect: input mà effect bị tắt copy ra. `0` (mặc định) là input đầu; `auto`
+  là input đầu cho tới khi biểu thức `enable` của nó đã đúng một lần, sau đó là input cuối (effect một input thì
+  giữ input đó); giá trị khác là lỗi. Input nào cũng có thể được copy, nên plan giữ mọi input của một effect sống
+  tới pass cuối của effect đó. Input khác kích thước output của effect thì frame đó báo lỗi. Khi mọi effect
   đều tắt, output là input pad mà các input được chọn dẫn tới. Package không được khai báo param
-  tên `bypass`. `bypass` trần trong `params` là bypass node của effect duy nhất, khác với option
-  `bypass=` của filter (input mà filter bị tắt bởi `enable=` cho qua). `auto` dựa trên lịch sử các
+  tên `bypass`. Nó khác option `bypass=` của filter (input mà filter bị tắt bởi `enable=` cho qua).
+  `auto` dựa trên lịch sử các
   frame đã xử lý: cửa sổ `enable` ngắn hơn một khoảng frame, hoặc luồng mà frame đầu đã nằm sau cửa
   sổ (trim, seek), thì không bao giờ được đặt và ở lại input 0; không reset khi seek; sau cửa sổ đầu
   tiên luôn là input cuối. FFI (API 11, thêm `gpufx_effect_node_effects`): `gpufx_effect_set_node_bypass`, `gpufx_effect_set_bypass`,
   `gpufx_effect_bypass_pad`.
-- **sendcmd / zmq**: lệnh `params` đổi giá trị lúc chạy, ví dụ
-  `sendcmd=c='2.0 gpufx@fx params strength=0.2'`.
+- **sendcmd / zmq**: `params` là lệnh lúc chạy (không phải option của filter), đổi giá trị trong khi stream
+  chạy, ví dụ `sendcmd=c='2.0 gpufx@fx params strength=0.2'`. Lệnh nhận các cặp `node.name=value` cách nhau
+  bởi `|`; node là label package, chỉ số từ 0, nhãn output của graph hoặc tên trơn, như trong chain hoặc graph.
+  Nó cũng nhận `<node>.enable=<expr>` và `<node>.bypass=0|auto`, đặt cho mọi effect mà node gọi tên và thay mọi
+  giá trị inline. Hai key này chỉ có trong lệnh runtime `params` (sendcmd/zmq), không phải option của filter.
 - **timeline** (`enable='between(t,1,3)'`) được hỗ trợ.
 - Nhiều input dùng `framesync`: input đầu quyết định độ dài và frame rate (input khác lệch
   fps thì frame của nó được lặp hoặc bỏ). Input khác chưa bắt đầu thì là frame GPU đen (đục với format có alpha); đã
@@ -245,17 +250,17 @@ Ví dụ:
 VK="-init_hw_device vulkan=vk:0,disable_multiplane=1 -filter_hw_device vk"   # hoặc d3d12va=dx ... dx
 
 # 1 input, tham số động theo thời gian (gpufx tự upload frame, hwdownload đưa về)
-ffmpeg $VK -i in.mp4 -vf "gpufx=effect=vignette.zip:params='strength=clip(t/2\,0\,1)|color=#200040',hwdownload,format=yuv420p" out.mp4
+ffmpeg $VK -i in.mp4 -vf "gpufx=effect='vignette.zip=strength=clip(t/2\,0\,1)\:color=#200040',hwdownload,format=yuv420p" out.mp4
 
 # transition 2 input
 ffmpeg $VK -i a.mp4 -i b.mp4 -filter_complex \
-  "[0][1]gpufx=effect=wipe-transition.zip:params='progress=clip((t-1)/1.5\,0\,1)|angle=45',hwdownload,format=yuv420p" out.mp4
+  "[0][1]gpufx=effect='wipe-transition.zip=progress=clip((t-1)/1.5\,0\,1)\:angle=45',hwdownload,format=yuv420p" out.mp4
 
 # xâu chuỗi nhiều hiệu ứng: hai filter, frame nằm trên GPU giữa hai filter
-ffmpeg $VK -i in.mp4 -vf "gpufx=effect=gaussian-blur.zip,gpufx=effect=gradient-map.zip:params='intensity=0.6',hwdownload,format=yuv420p" out.mp4
+ffmpeg $VK -i in.mp4 -vf "gpufx=effect=gaussian-blur.zip,gpufx=effect='gradient-map.zip=intensity=0.6',hwdownload,format=yuv420p" out.mp4
 
 # cùng kết quả trong một filter: một lần submit GPU
-ffmpeg $VK -i in.mp4 -vf "gpufx=effect='gaussian-blur.zip|gradient-map.zip':params='gradient-map.intensity=0.6',hwdownload,format=yuv420p" out.mp4
+ffmpeg $VK -i in.mp4 -vf "gpufx=effect='gaussian-blur.zip|gradient-map.zip=intensity=0.6',hwdownload,format=yuv420p" out.mp4
 ```
 
 ## 6. Đường đi của frame và hiệu năng
@@ -338,9 +343,12 @@ Dấu nháy đơn che `;` và `[]` khỏi filter graph bên ngoài. Quy tắc:
   một sự kiện được gửi cùng nhau.
 - `effect='a.zip|b.zip'` là đồ thị thẳng: `EffectChain` bọc `EffectGraph`, và `Effect` đơn cũng chạy
   qua cùng đoạn mã. `effect` và `graph` không dùng cùng lúc.
-- Tham số đặt tên như chuỗi, trên mọi gói của đồ thị theo thứ tự câu (`nhãn.tên`, `chỉ_số.tên`, tên
-  trơn); `nút.tên` với nhãn output của nút cũng được (`ba.radius`; `gb.strength` tìm hiệu ứng duy nhất
-  trong `grayscale|vignette` có `strength`). `sendcmd` vẫn dùng được.
+- Tham số viết inline sau từng gói của một nút (`[b]grayscale.zip|vignette.zip=strength=0.6[gb]`, xem "Tham số
+  inline" ở mục 5), nên ví dụ graph có giá trị là
+  `graph='[0]split[a][b]; [a]gaussian-blur.zip=radius=8[ba]; [b]grayscale.zip|vignette.zip=strength=0.6[gb]; [ba][gb]crossfade.zip=progress=clip((t-1)/1.5\,0\,1)\:enable=between(t\,1\,3)\:bypass=auto[x]'`.
+  `sendcmd` gọi giá trị lúc chạy bằng `nút.tên=value` trên mọi gói của đồ thị theo thứ tự câu (label gói, chỉ số
+  từ 0, tên trơn, hoặc nhãn output của nút: `ba.radius`; `gb.strength` tìm hiệu ứng duy nhất trong
+  `grayscale|vignette` có `strength`).
 - Kiểm lúc tạo filter: vòng lặp, nhãn đọc mà chưa ghi, ghi hai lần hoặc đọc hai lần, input pad không
   được đọc, số nhãn so với số input của nút, nhãn output là số. Kiểm lúc configure: quy tắc kích
   thước và format trong manifest của mọi nút (một cạnh mang kích thước của hiệu ứng ghi nó và format
@@ -352,6 +360,9 @@ Dấu nháy đơn che `;` và `[]` khỏi filter graph bên ngoài. Quy tắc:
 C API (v5, chỉ thêm): `gpufx_effect_open_graph`, `gpufx_effect_output_count`, `gpufx_effect_output_name`,
 `gpufx_effect_output_source`, `gpufx_effect_output_pad_format[_count]`, `gpufx_effect_process_graph`,
 `gpufx_effect_convert_graph`; xem `gpufx.h`.
+Tham số inline (API 12, `GPUFX_API_VERSION` 12): `gpufx_effect_open_effects(effects, backend)` mở một chuỗi chain
+có option inline, `gpufx_effect_open_graph` nhận chúng ở mọi nút, còn `gpufx_effect_option_count` /
+`gpufx_effect_option` đọc lại chúng (hằng số đã được áp; biểu thức, `enable` và `bypass` do bên gọi tự tính).
 
 ### Frame Vulkan (xong, C API v6)
 

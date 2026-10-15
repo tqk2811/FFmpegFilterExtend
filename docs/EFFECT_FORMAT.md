@@ -18,7 +18,7 @@ Package and check:
 
 ```sh
 gpufx check my-effect            # compile every shader, report errors with positions
-gpufx run my-effect -i in.png -o out.png -p strength=0.8
+gpufx run 'my-effect=strength=0.8' -i in.png -o out.png
 gpufx pack my-effect my-effect.zip
 ```
 
@@ -128,7 +128,7 @@ Each element of `passes`:
 
 The output has the same size as the first input. Input/texture/param names must be valid identifiers,
 must not collide with each other, must not start with `gpufx`, and must not use `globals`, `params`, `out_tex`, `smp`.
-A param must not be named `enable` or `bypass`: `<effect>.enable` and `<effect>.bypass` switch an effect of a chain or graph.
+A param must not be named `enable` or `bypass`: the inline keys `enable=` and `bypass=` of an effect (`effect='my-effect.zip=enable=lt(t\,2)'`) switch an effect of a chain or graph.
 
 ## Writing WGSL shaders
 
@@ -295,8 +295,8 @@ effect shrinks a picture a lot (a 4000 px photo in a small box).
 
 ## Expression parameters
 
-An `expr` parameter (api 2) holds a math expression, given as text like any parameter (`params=` of the
-filter, `sendcmd`, `gpufx run -p`), and evaluated on the GPU wherever the shader calls it, for example
+An `expr` parameter (api 2) holds a math expression, given as text like any parameter (inline after the package name in `effect=`/`graph=` of the
+filter, `sendcmd`, inline in `gpufx run`), and evaluated on the GPU wherever the shader calls it, for example
 once per particle:
 
 ```json
@@ -319,8 +319,8 @@ let x = gpufx_expr_path_x(u, p, x0);   // the arguments in the order of `vars`, 
   (`sendcmd`), not every frame. It is compiled when it is set, so a text that does not parse or compile
   is an error there (`sendcmd` reports it) and the last good expression stays; the stream goes on.
   The default expressions use the pipelines shared by every effect opened from the package.
-- On the FFmpeg command line, commas inside `params='...'` are escaped as for any filter option:
-  `angle=max(90*u\,0)`.
+- On the FFmpeg command line, commas inside the quoted `effect='...'`/`graph='...'` are escaped as for any filter option, and
+  the `:` between inline keys is written `\:`: `effect='x.zip=angle=max(90*u\,0)\:speed=2'`.
 
 ## Included examples
 

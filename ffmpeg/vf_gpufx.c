@@ -88,19 +88,17 @@ typedef struct ParamExpr {
     AVExpr *expr;
 } ParamExpr;
 
-/* bypass option and <node>.bypass: which input a disabled filter or effect passes. */
+/* bypass option and the inline bypass= of an effect: which input a disabled filter or effect passes. */
 enum BypassMode {
     BYPASS_FIRST, /* input 0 (for the filter: the input each output has the size of) */
     BYPASS_AUTO,  /* input 0 until enabled once, then the last input (a transition after its end) */
 };
 
-/* "<node>.enable=<expr>" and "<node>.bypass=0|auto" in params: an effect of a chain or graph switched per frame. */
+/* Inline "enable=<expr>" and "bypass=0|auto" of one effect of a chain or graph: switched per frame. */
 typedef struct NodeExpr {
-    char *node;   /* the prefix before ".enable", "" for a bare "enable" (first spelling) */
-    int *idx;     /* indices of the effects the node names: entries with equal lists are one */
-    int nidx;
-    char *enable_name, *bypass_name; /* spellings that gave expr and bypass, NULL if not given */
-    AVExpr *expr; /* NULL: only .bypass given, the effect stays on */
+    int effect;   /* index of the effect */
+    char node[16]; /* the index as a node name for libgpufx */
+    AVExpr *expr; /* NULL: only bypass given, the effect stays on */
     int state;    /* last value given to libgpufx, -1 before the first frame */
     int bypass;   /* BYPASS_* */
     int seen_on;  /* the expression was true once: auto passes the last input */
@@ -112,7 +110,6 @@ typedef struct GpufxContext {
 
     char *effect_path;
     char *graph_str;
-    char *params_str;
     char *backend;
     int shortest;
 
@@ -216,134 +213,185 @@ static void drop_expr(GpufxContext *s, const char *name)
 
 static void free_node_expr(NodeExpr *e)
 {
-    av_freep(&e->node);
-    av_freep(&e->idx);
-    av_freep(&e->enable_name);
-    av_freep(&e->bypass_name);
     av_expr_free(e->expr);
     e->expr = NULL;
 }
 
 /*
- * "<node>.enable=<expr>": switches the effects node names (package label, index or graph
- * output label, as in "<node>.<param>"; a bare "enable" for a single effect) on while the
- * expression is not 0, evaluated for every frame like parameter expressions. Not the
- * filter's own timeline option enable=, which is outside params. Names that give the
- * same effects ("invert.enable" and "0.enable") are one entry: enable and bypass may come
- * from different spellings, but each only once (else "node given twice"). Names giving
- * overlapping but unequal lists (a graph label of two effects and an index of one) stay
- * separate entries.
- * "<node>.bypass=0|auto": the input those effects pass while off. 0 (default) passes
- * their first input; auto passes it until the enable expression was true once, then
- * their last input: a transition (input 0 fading into the last one) switched off after
- * its end goes on showing where it ended.
+ * "enable=<expr>" of effect k: switches it on while the expression is not 0, evaluated for
+ * every frame like parameter expressions. Not the filter's own timeline option enable=.
+ * "bypass=0|auto": the input it passes while off. 0 (default) passes its first input;
+ * auto passes it until the enable expression was true once, then its last input: a
+ * transition (input 0 fading into the last one) switched off after its end goes on
+ * showing where it ended. Given again (sendcmd), the new value replaces the old one.
  */
-static int add_node_expr(AVFilterContext *ctx, const char *name, const char *value, const char *key)
+static int set_node_key(AVFilterContext *ctx, int k, const char *key, const char *value)
 {
     GpufxContext *s = ctx->priv;
-    size_t len = strlen(name) - strlen(key);
-    char *node = av_strndup(name, len ? len - 1 : 0);
+    const int is_bypass = !strcmp(key, "bypass");
     AVExpr *expr = NULL;
     NodeExpr *e = NULL, *tmp;
-    int *idx = NULL;
-    int ret, nidx, bypass = BYPASS_FIRST;
-    const int is_bypass = !strcmp(key, "bypass");
+    int ret, bypass = BYPASS_FIRST;
 
-    if (!node)
-        return AVERROR(ENOMEM);
-    if (name[0] == '.') {
-        av_log(ctx, AV_LOG_ERROR, "Invalid '%s': missing effect name before .%s.\n", name, key);
-        ret = AVERROR(EINVAL);
-        goto fail;
-    }
-    /* The effects the name gives: entries naming the same ones are merged into one. */
-    if ((nidx = gpufx_effect_node_effects(s->fx, node, NULL, 0)) < 0) {
-        av_log(ctx, AV_LOG_ERROR, "Effect '%s': %s\n", gpufx_effect_name(s->fx), gpufx_last_error());
-        ret = AVERROR(EINVAL);
-        goto fail;
-    }
-    if (!(idx = av_malloc_array(nidx ? nidx : 1, sizeof(*idx)))) {
-        ret = AVERROR(ENOMEM);
-        goto fail;
-    }
-    if (gpufx_effect_node_effects(s->fx, node, idx, nidx) != nidx) {
-        av_log(ctx, AV_LOG_ERROR, "Effect '%s': %s\n", gpufx_effect_name(s->fx), gpufx_last_error());
-        ret = AVERROR(EINVAL);
-        goto fail;
-    }
     if (is_bypass) {
         if (!strcmp(value, "auto")) {
             bypass = BYPASS_AUTO;
         } else if (strcmp(value, "0")) {
-            av_log(ctx, AV_LOG_ERROR, "Invalid '%s=%s': bypass is 0 or auto.\n", name, value);
-            ret = AVERROR(EINVAL);
-            goto fail;
+            av_log(ctx, AV_LOG_ERROR, "Invalid 'bypass=%s' for effect %d: bypass is 0 or auto.\n", value, k);
+            return AVERROR(EINVAL);
         }
     } else if ((ret = av_expr_parse(&expr, value, var_names, NULL, NULL, NULL, NULL, 0, ctx)) < 0) {
-        av_log(ctx, AV_LOG_ERROR, "Invalid expression for '%s': '%s'.\n", name, value);
-        goto fail;
+        av_log(ctx, AV_LOG_ERROR, "Invalid enable expression for effect %d: '%s'.\n", k, value);
+        return ret;
     }
-    for (int i = 0; i < s->nb_node_exprs; i++) {
-        NodeExpr *o = &s->node_exprs[i];
-        if (o->nidx == nidx && !memcmp(o->idx, idx, nidx * sizeof(*idx))) {
-            e = o;
-            break;
-        }
-    }
+    for (int i = 0; i < s->nb_node_exprs && !e; i++)
+        if (s->node_exprs[i].effect == k)
+            e = &s->node_exprs[i];
     if (!e) {
         if (!(tmp = av_realloc_array(s->node_exprs, s->nb_node_exprs + 1, sizeof(*s->node_exprs)))) {
-            ret = AVERROR(ENOMEM);
-            goto fail;
+            av_expr_free(expr);
+            return AVERROR(ENOMEM);
         }
         s->node_exprs = tmp;
-        e = &s->node_exprs[s->nb_node_exprs];
-        *e = (NodeExpr){ .node = node, .idx = idx, .nidx = nidx, .state = -1 };
-        s->nb_node_exprs++;
-        node = NULL;
-        idx = NULL;
-    }
-    {
-        char **given = is_bypass ? &e->bypass_name : &e->enable_name;
-        /* Two spellings of one effect each setting enable (or bypass) are ambiguous. */
-        if (*given && strcmp(*given, name)) {
-            av_log(ctx, AV_LOG_ERROR, "Invalid '%s': node '%.*s' given twice (also as '%s').\n",
-                   name, (int)len, name, *given);
-            ret = AVERROR(EINVAL);
-            goto fail;
-        }
-        if (!*given && !(*given = av_strdup(name))) {
-            ret = AVERROR(ENOMEM);
-            goto fail;
-        }
+        e = &s->node_exprs[s->nb_node_exprs++];
+        *e = (NodeExpr){ .effect = k, .state = -1 };
+        snprintf(e->node, sizeof(e->node), "%d", k);
     }
     if (is_bypass) {
         e->bypass = bypass;
     } else {
         av_expr_free(e->expr);
         e->expr = expr;
-        expr = NULL;
+        e->state = -1;
     }
-    av_free(node);
-    av_free(idx);
     return 0;
-fail:
-    av_expr_free(expr);
+}
+
+/*
+ * sendcmd "<node>.enable" / "<node>.bypass" (a bare "enable" for a single effect): node
+ * names effects as the prefix of a parameter does (package label, index or graph output
+ * label); each of them gets the value.
+ */
+static int set_node_keys(AVFilterContext *ctx, const char *name, const char *value, const char *key)
+{
+    GpufxContext *s = ctx->priv;
+    size_t len = strlen(name) - strlen(key);
+    char *node = av_strndup(name, len ? len - 1 : 0);
+    int *idx = NULL;
+    int ret = 0, nidx;
+
+    if (!node)
+        return AVERROR(ENOMEM);
+    if (name[0] == '.') {
+        av_log(ctx, AV_LOG_ERROR, "Invalid '%s': missing effect name before .%s.\n", name, key);
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+    if ((nidx = gpufx_effect_node_effects(s->fx, node, NULL, 0)) >= 0) {
+        if (!(idx = av_malloc_array(nidx ? nidx : 1, sizeof(*idx)))) {
+            ret = AVERROR(ENOMEM);
+            goto end;
+        }
+        nidx = gpufx_effect_node_effects(s->fx, node, idx, nidx);
+    }
+    if (nidx < 0) {
+        av_log(ctx, AV_LOG_ERROR, "Effect '%s': %s\n", gpufx_effect_name(s->fx), gpufx_last_error());
+        ret = AVERROR(EINVAL);
+        goto end;
+    }
+    for (int i = 0; i < nidx && ret >= 0; i++)
+        ret = set_node_key(ctx, idx[i], key, value);
+end:
     av_free(node);
     av_free(idx);
     return ret;
 }
 
 /*
- * Parses "name=value|name=value". A value is either a literal the package
- * understands ("0.5", "1,0,0", "#ff8800") or, for scalar parameters, an
+ * Sets parameter name (a name gpufx_effect_find_param() takes) to value: either a literal
+ * the package understands ("0.5", "1,0,0", "#ff8800") or, for scalar parameters, an
  * expression of t, n, w, h, a (w/h), sar and dar evaluated for every frame
- * ("clip((t-2)/1.5,0,1)"). In a chain, names are "package.name", "index.name"
- * or a bare name only one effect has; they are stored by their full name.
- * "<node>.enable" (or a bare "enable") switches effects: see add_node_expr().
+ * ("clip((t-2)/1.5,0,1)"). Expressions are stored by the full parameter name.
+ */
+static int set_param(AVFilterContext *ctx, const char *item, const char *value)
+{
+    GpufxContext *s = ctx->priv;
+    AVExpr *expr = NULL;
+    ParamExpr *tmp;
+    const char *name;
+    int index, ret;
+
+    if ((index = gpufx_effect_find_param(s->fx, item)) < 0) {
+        av_log(ctx, AV_LOG_ERROR, "Effect '%s': %s\n", gpufx_effect_name(s->fx), gpufx_last_error());
+        return AVERROR(EINVAL);
+    }
+    name = gpufx_effect_param_name(s->fx, index);
+
+    drop_expr(s, name);
+    if (gpufx_effect_set_param(s->fx, name, value) == 0)
+        return 0;
+
+    ret = av_expr_parse(&expr, value, var_names, NULL, NULL, NULL, NULL, 0, ctx);
+    if (ret < 0) {
+        av_log(ctx, AV_LOG_ERROR, "Invalid value for '%s': %s\n", name, gpufx_last_error());
+        return ret;
+    }
+    if (!(tmp = av_realloc_array(s->exprs, s->nb_exprs + 1, sizeof(*s->exprs)))) {
+        av_expr_free(expr);
+        return AVERROR(ENOMEM);
+    }
+    s->exprs = tmp;
+    s->exprs[s->nb_exprs].name = av_strdup(name);
+    s->exprs[s->nb_exprs].expr = expr;
+    if (!s->exprs[s->nb_exprs].name) {
+        av_expr_free(expr);
+        return AVERROR(ENOMEM);
+    }
+    s->nb_exprs++;
+    return 0;
+}
+
+/*
+ * Inline options written after each package: "wipe.zip=progress=t/2:angle=45:enable=...".
+ * libgpufx parsed them and checked the keys; constants are already set.
+ */
+static int apply_inline(AVFilterContext *ctx)
+{
+    GpufxContext *s = ctx->priv;
+    const uint32_t count = gpufx_effect_option_count(s->fx);
+    int ret;
+
+    for (uint32_t i = 0; i < count; i++) {
+        const char *key, *value;
+        uint32_t k;
+        char name[256];
+
+        if (gpufx_effect_option(s->fx, i, &k, &key, &value) < 0)
+            return gpufx_error(ctx, "Inline option");
+        if (!strcmp(key, "enable") || !strcmp(key, "bypass")) {
+            ret = set_node_key(ctx, k, key, value);
+        } else {
+            /* "index.name": digits are always an index. */
+            if (snprintf(name, sizeof(name), "%u.%s", k, key) >= (int)sizeof(name)) {
+                av_log(ctx, AV_LOG_ERROR, "Inline option key '%s' is too long\n", key);
+                return AVERROR(EINVAL);
+            }
+            ret = set_param(ctx, name, value);
+        }
+        if (ret < 0)
+            return ret;
+    }
+    return 0;
+}
+
+/*
+ * sendcmd 'params name=value|name=value': merges into the current values. Names are
+ * those of gpufx_effect_find_param(): "package.name", "index.name", "node.name" or a bare
+ * name only one effect has. "<node>.enable" and "<node>.bypass" (or a bare "enable") switch
+ * effects: see set_node_key().
  */
 static int apply_params(AVFilterContext *ctx, const char *str)
 {
-    GpufxContext *s = ctx->priv;
     char *dup, *item, *saveptr = NULL;
     int ret = 0;
 
@@ -354,10 +402,6 @@ static int apply_params(AVFilterContext *ctx, const char *str)
 
     for (item = av_strtok(dup, "|", &saveptr); item; item = av_strtok(NULL, "|", &saveptr)) {
         char *value = strchr(item, '='), *dot;
-        const char *name;
-        AVExpr *expr = NULL;
-        ParamExpr *tmp;
-        int index;
 
         if (!value) {
             av_log(ctx, AV_LOG_ERROR, "Expected name=value in params, got '%s'.\n", item);
@@ -368,92 +412,18 @@ static int apply_params(AVFilterContext *ctx, const char *str)
         /* No package has a parameter named enable or bypass: the names are reserved for this. */
         dot = strrchr(item, '.');
         if (!strcmp(item, "enable") || (dot && !strcmp(dot + 1, "enable")) ||
-            !strcmp(item, "bypass") || (dot && !strcmp(dot + 1, "bypass"))) {
-            if ((ret = add_node_expr(ctx, item, value, dot ? dot + 1 : item)) < 0)
-                break;
-            continue;
-        }
-        if ((index = gpufx_effect_find_param(s->fx, item)) < 0) {
-            av_log(ctx, AV_LOG_ERROR, "Effect '%s': %s\n", gpufx_effect_name(s->fx),
-                   gpufx_last_error());
-            ret = AVERROR(EINVAL);
+            !strcmp(item, "bypass") || (dot && !strcmp(dot + 1, "bypass")))
+            ret = set_node_keys(ctx, item, value, dot ? dot + 1 : item);
+        else
+            ret = set_param(ctx, item, value);
+        if (ret < 0)
             break;
-        }
-        name = gpufx_effect_param_name(s->fx, index);
-
-        drop_expr(s, name);
-        if (gpufx_effect_set_param(s->fx, name, value) == 0)
-            continue;
-
-        ret = av_expr_parse(&expr, value, var_names, NULL, NULL, NULL, NULL, 0, ctx);
-        if (ret < 0) {
-            av_log(ctx, AV_LOG_ERROR, "Invalid value for '%s': %s\n", name, gpufx_last_error());
-            break;
-        }
-        tmp = av_realloc_array(s->exprs, s->nb_exprs + 1, sizeof(*s->exprs));
-        if (!tmp) {
-            av_expr_free(expr);
-            ret = AVERROR(ENOMEM);
-            break;
-        }
-        s->exprs = tmp;
-        s->exprs[s->nb_exprs].name = av_strdup(name);
-        s->exprs[s->nb_exprs].expr = expr;
-        if (!s->exprs[s->nb_exprs].name) {
-            av_expr_free(expr);
-            ret = AVERROR(ENOMEM);
-            break;
-        }
-        s->nb_exprs++;
     }
     av_free(dup);
     return ret;
 }
 
 static int config_output(AVFilterLink *outlink);
-
-/* "a.zip|b.zip" opens a chain: every effect on the GPU in one submission. */
-static av_cold int open_effects(AVFilterContext *ctx)
-{
-    GpufxContext *s = ctx->priv;
-    char *dup, *item, *saveptr = NULL;
-    const char **paths = NULL;
-    unsigned nb_paths = 0;
-    int ret = 0;
-
-    if (!(dup = av_strdup(s->effect_path)))
-        return AVERROR(ENOMEM);
-    for (item = av_strtok(dup, "|", &saveptr); item; item = av_strtok(NULL, "|", &saveptr)) {
-        const char **tmp;
-        char *end = item + strlen(item);
-
-        /* 'a.zip | b.zip': spaces around the separator are not part of the paths. */
-        while (*item == ' ')
-            item++;
-        while (end > item && end[-1] == ' ')
-            *--end = 0;
-        if (!*item)
-            continue;
-        if (!(tmp = av_realloc_array(paths, nb_paths + 1, sizeof(*paths)))) {
-            ret = AVERROR(ENOMEM);
-            goto end;
-        }
-        paths = tmp;
-        paths[nb_paths++] = item;
-    }
-    if (!nb_paths) {
-        av_log(ctx, AV_LOG_ERROR, "The 'effect' option names no package.\n");
-        ret = AVERROR(EINVAL);
-        goto end;
-    }
-    s->fx = gpufx_effect_open_chain(paths, nb_paths, s->backend);
-    if (!s->fx)
-        ret = gpufx_error(ctx, "Cannot load effect");
-end:
-    av_free(paths);
-    av_free(dup);
-    return ret;
-}
 
 static av_cold int init(AVFilterContext *ctx)
 {
@@ -487,8 +457,8 @@ static av_cold int init(AVFilterContext *ctx)
     if (s->graph_str) {
         if (!(s->fx = gpufx_effect_open_graph(s->graph_str, s->backend)))
             return gpufx_error(ctx, "Cannot load graph");
-    } else if ((ret = open_effects(ctx)) < 0) {
-        return ret;
+    } else if (!(s->fx = gpufx_effect_open_effects(s->effect_path, s->backend))) {
+        return gpufx_error(ctx, "Cannot load effect");
     }
     /* The device is chosen in config_inputs(): FFmpeg's, of the GPU inputs or -filter_hw_device. */
     av_log(ctx, AV_LOG_VERBOSE, "Loaded '%s'\n", gpufx_effect_name(s->fx));
@@ -572,7 +542,7 @@ static av_cold int init(AVFilterContext *ctx)
         }
     }
 
-    return apply_params(ctx, s->params_str);
+    return apply_inline(ctx);
 }
 
 static av_cold void uninit(AVFilterContext *ctx)
@@ -2209,7 +2179,7 @@ static int process_frame(FFFrameSync *fs)
     vars[VAR_A]   = (double)outlink->w / outlink->h;
     vars[VAR_SAR] = outlink->sample_aspect_ratio.num ? av_q2d(outlink->sample_aspect_ratio) : 1.0;
     vars[VAR_DAR] = vars[VAR_A] * vars[VAR_SAR];
-    /* Effects switched by <node>.enable; with every one off the event is a disabled one. */
+    /* Effects switched by their inline enable=; with every one off the event is a disabled one. */
     disabled = ctx->is_disabled;
     if (!disabled && s->nb_node_exprs) {
         for (int i = 0; i < s->nb_node_exprs; i++) {
@@ -2622,9 +2592,8 @@ static int process_command(AVFilterContext *ctx, const char *cmd, const char *ar
 #define FLAGS (AV_OPT_FLAG_FILTERING_PARAM | AV_OPT_FLAG_VIDEO_PARAM)
 
 static const AVOption gpufx_options[] = {
-    { "effect",   "effect package (.zip or directory), or packages chained as a.zip|b.zip", OFFSET(effect_path), AV_OPT_TYPE_STRING, { .str = NULL },   0, 0, FLAGS },
-    { "graph",    "effect graph: '[0]split[a][b]; [a]x.zip[c]; [c][b]y.zip[out]'", OFFSET(graph_str),   AV_OPT_TYPE_STRING, { .str = NULL },   0, 0, FLAGS },
-    { "params",   "effect parameters as name=value|name=value (package.name in a chain or graph)", OFFSET(params_str),  AV_OPT_TYPE_STRING, { .str = NULL },   0, 0, FLAGS },
+    { "effect",   "effect package (.zip or directory) with inline parameters, or a chain: 'a.zip=k=v:k2=v2|b.zip'", OFFSET(effect_path), AV_OPT_TYPE_STRING, { .str = NULL },   0, 0, FLAGS },
+    { "graph",    "effect graph: '[0]split[a][b]; [a]x.zip=k=v[c]; [c][b]y.zip[out]'", OFFSET(graph_str),   AV_OPT_TYPE_STRING, { .str = NULL },   0, 0, FLAGS },
     { "backend",  "GPU API (testing only, auto follows the frames): auto, vulkan, dx12", OFFSET(backend),    AV_OPT_TYPE_STRING, { .str = "auto" }, 0, 0, FLAGS },
     { "shortest", "end when the shortest input ends",                OFFSET(shortest),    AV_OPT_TYPE_BOOL,   { .i64 = 0 },      0, 1, FLAGS },
     { "out_format", "output pixel format (also the sw_format of GPU frames), e.g. rgba between chained gpufx; default: chosen from the input", OFFSET(out_format), AV_OPT_TYPE_PIXEL_FMT, { .i64 = AV_PIX_FMT_NONE }, -1, INT_MAX, FLAGS },
