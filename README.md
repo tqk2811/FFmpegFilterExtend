@@ -6,7 +6,9 @@ Video effects powered by **GPU shaders** for FFmpeg, loaded from external **`.zi
 (CapCut style). FFmpeg is built once with the `gpufx` filter; a new effect is just a new zip package.
 
 - **WGSL** or **GLSL** shaders, multiple passes, multiple inputs, bundled textures, auto-generated parameters.
-- Runs on **Vulkan, DirectX 12, Metal, OpenGL** (via [wgpu](https://wgpu.rs)), on Windows/Linux/macOS.
+- The FFmpeg filter runs on **Vulkan, Direct3D 12, Direct3D 11** and **Metal** (macOS) frames (via
+  [wgpu](https://wgpu.rs)), on Windows/Linux/macOS. OpenGL is only available through the library and the
+  `gpufx` CLI, and is untested.
 - Parameters are literals or time-based expressions; change them at run time with `sendcmd`.
 - Several effects in one filter (`effect='blur.zip|vignette.zip'`): the whole chain runs in one GPU
   submission, without intermediate frames.

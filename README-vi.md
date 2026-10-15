@@ -4,7 +4,9 @@ Hiệu ứng video chạy bằng **shader trên GPU** cho FFmpeg, nạp từ **g
 (kiểu CapCut). FFmpeg chỉ cần build một lần với filter `gpufx`; hiệu ứng mới là gói zip mới.
 
 - Shader **WGSL** hoặc **GLSL**, nhiều pass, nhiều input, texture đi kèm, tham số tự sinh.
-- Chạy trên **Vulkan, DirectX 12, Metal, OpenGL** (qua [wgpu](https://wgpu.rs)), Windows/Linux/macOS.
+- Filter FFmpeg chạy trên frame **Vulkan, Direct3D 12, Direct3D 11** và **Metal** (macOS) (qua
+  [wgpu](https://wgpu.rs)), Windows/Linux/macOS. OpenGL chỉ dùng được qua thư viện và CLI `gpufx`, chưa
+  có test.
 - Tham số là literal hoặc biểu thức theo thời gian; đổi lúc chạy bằng `sendcmd`.
 - Nhiều hiệu ứng trong một filter (`effect='blur.zip|vignette.zip'`): cả chuỗi chạy trong một lần
   submit GPU, không qua frame trung gian.

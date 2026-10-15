@@ -12,7 +12,7 @@ English: [DESIGN.md](DESIGN.md)
 |---|---------|--------------|
 | R1 | **Shader là ưu tiên số 1** (lý do dùng GPU) | Mỗi hiệu ứng *là* một chuỗi compute shader. Hỗ trợ WGSL và GLSL ngay từ bản đầu, kiểm tra lỗi shader có số dòng, nhiều pass, texture đi kèm, tham số tự sinh thành `uniform` |
 | R2 | Đa hệ điều hành | Windows, Linux, macOS (Android/iOS về sau) |
-| R3 | Đa phần cứng / API | Vulkan, DirectX 12, Metal, OpenGL qua **wgpu**; CUDA/D3D11/VAAPI qua interop (giai đoạn 2) |
+| R3 | Đa phần cứng / API | Vulkan, DirectX 12, Metal, OpenGL qua **wgpu**; CUDA/D3D11/VAAPI qua interop (giai đoạn 2). Hiện filter FFmpeg nhận frame Vulkan, D3D12, D3D11 và Metal (macOS), từ chối OpenGL; OpenGL chỉ còn trong thư viện và CLI |
 | R4 | Hiệu ứng nạp ngoài, không build lại FFmpeg | Một filter duy nhất `gpufx` build **một lần**; hiệu ứng là gói zip |
 | R5 | Dùng Rust hoặc C/C++ | Engine viết bằng **Rust**; phần nối vào FFmpeg là một file C nhỏ |
 

@@ -12,7 +12,7 @@ Tiếng Việt: [DESIGN-vi.md](DESIGN-vi.md)
 |---|-------------|---------------|
 | R1 | **Shaders come first** (the reason to use a GPU) | Each effect *is* a chain of compute shaders. WGSL and GLSL are supported from the first version, with shader error checking that reports line numbers, multiple passes, bundled textures, and parameters generated automatically as `uniform`s |
 | R2 | Multiple operating systems | Windows, Linux, macOS (Android/iOS later) |
-| R3 | Multiple hardware / APIs | Vulkan, DirectX 12, Metal, OpenGL through **wgpu**; CUDA/D3D11/VAAPI through interop (phase 2) |
+| R3 | Multiple hardware / APIs | Vulkan, DirectX 12, Metal, OpenGL through **wgpu**; CUDA/D3D11/VAAPI through interop (phase 2). Today the FFmpeg filter takes Vulkan, D3D12, D3D11 and (macOS) Metal frames and rejects OpenGL; OpenGL stays only in the library and CLI |
 | R4 | Effects loaded externally, no FFmpeg rebuild | A single `gpufx` filter built **once**; effects are zip packages |
 | R5 | Use Rust or C/C++ | The engine is written in **Rust**; the glue into FFmpeg is one small C file |
 
