@@ -3,7 +3,7 @@
   "id": "io.github.tqk2811.slide-transition",
   "name": "Slide",
   "version": "1.0.0",
-  "description": "The second clip pushes the first out of the frame. Drive `progress` from 0 to 1.",
+  "description": "The second clip slides into the frame: it pushes the first out, covers it, uncovers it or follows it in after a gap (`mode`). Drive `progress` from 0 to 1.",
   "inputs": [
     {
       "name": "first",
@@ -31,6 +31,20 @@
       "min": 0,
       "max": 3,
       "description": "0 = left, 1 = right, 2 = up, 3 = down"
+    },
+    {
+      "name": "mode",
+      "type": "int",
+      "default": 0,
+      "min": 0,
+      "max": 3,
+      "description": "0 = push (the second clip pushes the first out), 1 = cover (the second slides in over the still first), 2 = uncover (the first slides out over the still second), 3 = box in (the first leaves, then the second comes in; `color` shows in between)"
+    },
+    {
+      "name": "color",
+      "type": "color",
+      "default": "#000000",
+      "description": "Background between the clips in mode 3"
     }
   ],
   "passes": [

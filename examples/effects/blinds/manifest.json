@@ -45,6 +45,14 @@
       "min": 0,
       "max": 0.5,
       "description": "Edge width, relative to a stripe"
+    },
+    {
+      "name": "origin",
+      "type": "int",
+      "default": 0,
+      "min": 0,
+      "max": 1,
+      "description": "0 = each stripe opens from one edge, 1 = from its center towards both edges"
     }
   ],
   "passes": [

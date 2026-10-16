@@ -102,6 +102,76 @@ fn transitions_start_on_the_first_clip_and_end_on_the_second() {
     assert!(checked >= 17, "only {checked} transitions found");
 }
 
+/// The modes that the endpoint test above does not reach (it runs the defaults only):
+/// each still starts on the first clip and ends on the second, and its midpoint looks
+/// like that mode.
+#[test]
+fn transition_modes_have_clean_endpoints_and_their_own_midpoint() {
+    let Some(ctx) = gpu() else { return };
+    let (w, h) = (67, 41);
+    let first = gradient(w, h);
+    let second: Vec<u8> = first.chunks(4).flat_map(|p| [255 - p[0], p[2], 255 - p[1], 255]).collect();
+    let inputs = [Image { data: &first, width: w, height: h, stride: w * 4 }, Image { data: &second, width: w, height: h, stride: w * 4 }];
+    let px = |img: &[u8], x: u32, y: u32| img[((y * w + x) * 4) as usize..][..4].to_vec();
+    type Check = fn(&dyn Fn(u32, u32) -> Vec<u8>, &dyn Fn(&[u8], u32, u32) -> Vec<u8>, &[u8], &[u8], u32, u32);
+    type Case = (&'static str, &'static [(&'static str, &'static str)], Check);
+    let cases: [Case; 7] = [
+        // Cover: the left half still shows the first clip, the right half the second.
+        ("slide-transition", &[("mode", "1")], |out, px, a, b, w, h| {
+            assert_eq!(out(2, h / 2), px(a, 2, h / 2));
+            assert_ne!(out(w - 3, h / 2), px(a, w - 3, h / 2));
+            let _ = b;
+        }),
+        // Uncover: the right half already shows the still second clip.
+        ("slide-transition", &[("mode", "2")], |out, px, _a, b, w, h| {
+            assert_eq!(out(w - 3, h / 2), px(b, w - 3, h / 2));
+        }),
+        // Box in: halfway the whole frame is the background color.
+        ("slide-transition", &[("mode", "3"), ("color", "#ff0000")], |out, _px, _a, _b, w, h| {
+            for (x, y) in [(0, 0), (w / 2, h / 2), (w - 1, h - 1)] {
+                assert_eq!(out(x, y), [255, 0, 0, 255], "pixel ({x}, {y})");
+            }
+        }),
+        ("slide-transition", &[("mode", "3"), ("direction", "3")], |out, _px, _a, _b, w, h| {
+            assert_eq!(out(w / 2, h / 2), [0, 0, 0, 255]);
+        }),
+        // One stripe opening from its center: the middle row is open, the edges are not.
+        ("blinds", &[("origin", "1"), ("count", "1"), ("softness", "0")], |out, px, a, b, w, h| {
+            assert_eq!(out(w / 2, h / 2), px(b, w / 2, h / 2));
+            assert_eq!(out(w / 2, 0), px(a, w / 2, 0));
+            assert_eq!(out(w / 2, h - 1), px(a, w / 2, h - 1));
+        }),
+        // Two bars, one after the other: the top one has landed, the bottom one not started.
+        ("sliding-bars", &[("count", "2")], |out, px, a, b, w, h| {
+            assert_eq!(out(w / 2, 2), px(b, w / 2, 2));
+            assert_eq!(out(w / 2, h - 3), px(a, w / 2, h - 3));
+        }),
+        // The clips shrink to nothing halfway: only the background is left.
+        ("spin-transition", &[], |out, _px, _a, _b, w, h| {
+            for (x, y) in [(0, 0), (w / 2, h / 2), (w - 1, h - 1)] {
+                assert_eq!(out(x, y), [0, 0, 0, 255], "pixel ({x}, {y})");
+            }
+        }),
+    ];
+    for (name, settings, check) in cases {
+        let (_, mut fx) = open(&ctx, name);
+        for (k, v) in settings {
+            fx.params_mut().set_str(k, v).unwrap();
+        }
+        let mut run = |progress: &str| {
+            fx.params_mut().set_str("progress", progress).unwrap();
+            let mut out = vec![0u8; first.len()];
+            fx.process(&inputs, target(&mut out, w, h, w * 4), &FrameInfo::new(0.0, 0)).unwrap();
+            out
+        };
+        assert!(run("0") == first, "{name} {settings:?} at progress 0 is not the first clip");
+        assert!(run("1") == second, "{name} {settings:?} at progress 1 is not the second clip");
+        let mid = run("0.5");
+        let out = |x: u32, y: u32| px(&mid, x, y);
+        check(&out, &px, &first, &second, w, h);
+    }
+}
+
 #[test]
 fn zero_strength_vignette_is_identity() {
     let Some(ctx) = gpu() else { return };

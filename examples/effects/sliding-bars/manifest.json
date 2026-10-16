@@ -1,0 +1,63 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.sliding-bars",
+  "name": "Sliding Bars",
+  "version": "1.0.0",
+  "description": "Bars of the second clip slide in over the first one after another. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    },
+    {
+      "name": "count",
+      "type": "int",
+      "default": 5,
+      "min": 1,
+      "max": 100,
+      "description": "Number of bars"
+    },
+    {
+      "name": "vertical",
+      "type": "bool",
+      "default": false,
+      "description": "Vertical bars sliding down/up instead of horizontal bars sliding right/left"
+    },
+    {
+      "name": "direction",
+      "type": "int",
+      "default": 0,
+      "min": 0,
+      "max": 1,
+      "description": "0 = bars come in from the left (top when vertical), 1 = from the right (bottom)"
+    },
+    {
+      "name": "stagger",
+      "type": "float",
+      "default": 1,
+      "min": 0,
+      "max": 1,
+      "description": "1 = each bar starts when the previous one lands, 0 = all bars move together"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/sliding_bars.wgsl"
+    }
+  ]
+}

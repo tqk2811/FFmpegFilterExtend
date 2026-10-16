@@ -18,7 +18,7 @@ Video effects powered by **GPU shaders** for FFmpeg, loaded from external **`.zi
   a stream that does not match gets a clear error instead of a silent conversion.
 - 36 sample effects: color adjustment, grayscale, sepia, sharpen, pixelate, chroma key,
   picture-in-picture, fitting a picture over a blurred background, falling maple / ginkgo leaves (texture arrays with mipmaps, custom paths from expressions), transitions (crossfade, slide, wipe, circle, clock, collapse, expand,
-  dip to black, dissolve, pixelize, zoom, blinds, checkerboard, push box, film strip, photo collection...)
+  dip to black, dissolve, pixelize, zoom, blinds, checkerboard, push box, film strip, photo collection, sliding bars, spin...)
 
 - **Vulkan frames without copies**: `hwupload` frames (`AV_PIX_FMT_VULKAN`, one image per plane) are processed
   in place on FFmpeg's own Vulkan device, synchronised with its timeline semaphores; frames never go back

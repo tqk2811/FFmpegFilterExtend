@@ -1,0 +1,63 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.spin-transition",
+  "name": "Spin",
+  "version": "1.0.0",
+  "description": "The first clip spins out shrinking, then the second spins in growing, with motion blur. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    },
+    {
+      "name": "turns",
+      "type": "float",
+      "default": 1,
+      "min": 0,
+      "max": 10,
+      "description": "Turns made by each clip during its half of the transition"
+    },
+    {
+      "name": "zoom",
+      "type": "float",
+      "default": 1,
+      "min": 0,
+      "max": 1,
+      "description": "How much the clips shrink at the middle: 1 = to nothing, 0 = not at all"
+    },
+    {
+      "name": "blur",
+      "type": "int",
+      "default": 8,
+      "min": 1,
+      "max": 32,
+      "description": "Motion-blur samples along the rotation (1 = no blur)"
+    },
+    {
+      "name": "color",
+      "type": "color",
+      "default": "#000000",
+      "description": "Background around the spinning clip"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/spin_transition.wgsl"
+    }
+  ]
+}
