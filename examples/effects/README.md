@@ -36,6 +36,7 @@ Equivalents of FFmpeg built-in filters and `xfade` transitions.
 Transitions and helpers ported from [tanersener/ffmpeg-video-slideshow-scripts](https://github.com/tanersener/ffmpeg-video-slideshow-scripts).
 
 - [blinds](slideshow/blinds/README.md)
+- [box-in](slideshow/box-in/README.md)
 - [checkerboard](slideshow/checkerboard/README.md)
 - [collapse](slideshow/collapse/README.md)
 - [expand](slideshow/expand/README.md)

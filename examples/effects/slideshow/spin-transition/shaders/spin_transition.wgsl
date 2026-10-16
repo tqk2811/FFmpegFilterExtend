@@ -25,16 +25,20 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     // turning the same way. q runs 0 -> 1 -> 0 over the transition.
     let use_second = p >= 0.5;
     let q = select(p * 2.0, (1.0 - p) * 2.0, use_second);
-    let turn = q * params.turns * 2.0 * PI;
+    // Whole half turns only: the first clip ends at +turns and the second starts at -turns,
+    // the same angle only when 2 * turns is a whole number (and then p = 0 and 1 stay at 0).
+    let turns = round(max(params.turns, 0.0) * 2.0) * 0.5;
+    let turn = q * turns * 2.0 * PI;
     let angle = select(turn, -turn, use_second);
     let scale = 1.0 - clamp(params.zoom, 0.0, 1.0) * q;
     // Motion blur: average samples spread along the angle; the spread grows with the speed
     // of the phase and vanishes at both ends so they show the clips exactly.
-    let span = q * params.turns * PI * 0.25;
+    let span = q * turns * PI * 0.25;
     let n = select(max(params.blur, 1), 1, span <= 0.0);
+    let steps = f32(max(n - 1, 1));
     var sum = vec4f(0.0);
     for (var k = 0; k < n; k++) {
-        let off = select(0.0, span * (f32(k) / f32(n - 1) - 0.5), n > 1);
+        let off = select(0.0, span * (f32(k) / steps - 0.5), n > 1);
         sum += spun(use_second, uv, angle + off, scale);
     }
     gpufx_write(id, sum / f32(n));

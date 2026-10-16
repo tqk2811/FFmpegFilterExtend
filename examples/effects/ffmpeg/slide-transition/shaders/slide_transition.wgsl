@@ -27,7 +27,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
             gpufx_write(id, select(b, textureSampleLevel(first, smp, a_uv, 0.0), inside(a_uv)));
         }
         case 3: {
-            // Box in: the first clip leaves the frame, then the second one comes in;
+            // Push through color: the first clip is pushed out of the frame, then the second one in;
             // the background color shows in between.
             if (t < 0.5) {
                 let a_uv = uv - dir * (t * 2.0);

@@ -130,46 +130,117 @@ fn transition_modes_have_clean_endpoints_and_their_own_midpoint() {
     let inputs = [Image { data: &first, width: w, height: h, stride: w * 4 }, Image { data: &second, width: w, height: h, stride: w * 4 }];
     let px = |img: &[u8], x: u32, y: u32| img[((y * w + x) * 4) as usize..][..4].to_vec();
     type Check = fn(&dyn Fn(u32, u32) -> Vec<u8>, &dyn Fn(&[u8], u32, u32) -> Vec<u8>, &[u8], &[u8], u32, u32);
-    type Case = (&'static str, &'static [(&'static str, &'static str)], Check);
-    let cases: [Case; 7] = [
+    type Case = (&'static str, &'static [(&'static str, &'static str)], &'static str, Check);
+    let cases: Vec<Case> = vec![
         // Cover: the left half still shows the first clip, the right half the second.
-        ("slide-transition", &[("mode", "1")], |out, px, a, b, w, h| {
+        ("slide-transition", &[("mode", "1")], "0.5", |out, px, a, b, w, h| {
             assert_eq!(out(2, h / 2), px(a, 2, h / 2));
             assert_ne!(out(w - 3, h / 2), px(a, w - 3, h / 2));
             let _ = b;
         }),
         // Uncover: the right half already shows the still second clip.
-        ("slide-transition", &[("mode", "2")], |out, px, _a, b, w, h| {
+        ("slide-transition", &[("mode", "2")], "0.5", |out, px, _a, b, w, h| {
             assert_eq!(out(w - 3, h / 2), px(b, w - 3, h / 2));
         }),
         // Box in: halfway the whole frame is the background color.
-        ("slide-transition", &[("mode", "3"), ("color", "#ff0000")], |out, _px, _a, _b, w, h| {
+        ("slide-transition", &[("mode", "3"), ("color", "#ff0000")], "0.5", |out, _px, _a, _b, w, h| {
             for (x, y) in [(0, 0), (w / 2, h / 2), (w - 1, h - 1)] {
                 assert_eq!(out(x, y), [255, 0, 0, 255], "pixel ({x}, {y})");
             }
         }),
-        ("slide-transition", &[("mode", "3"), ("direction", "3")], |out, _px, _a, _b, w, h| {
+        ("slide-transition", &[("mode", "3"), ("direction", "3")], "0.5", |out, _px, _a, _b, w, h| {
             assert_eq!(out(w / 2, h / 2), [0, 0, 0, 255]);
         }),
         // One stripe opening from its center: the middle row is open, the edges are not.
-        ("blinds", &[("origin", "1"), ("count", "1"), ("softness", "0")], |out, px, a, b, w, h| {
+        ("blinds", &[("origin", "1"), ("count", "1"), ("softness", "0")], "0.5", |out, px, a, b, w, h| {
             assert_eq!(out(w / 2, h / 2), px(b, w / 2, h / 2));
             assert_eq!(out(w / 2, 0), px(a, w / 2, 0));
             assert_eq!(out(w / 2, h - 1), px(a, w / 2, h - 1));
         }),
         // Two bars, one after the other: the top one has landed, the bottom one not started.
-        ("sliding-bars", &[("count", "2")], |out, px, a, b, w, h| {
+        ("sliding-bars", &[("count", "2")], "0.5", |out, px, a, b, w, h| {
             assert_eq!(out(w / 2, 2), px(b, w / 2, 2));
             assert_eq!(out(w / 2, h - 3), px(a, w / 2, h - 3));
         }),
         // The clips shrink to nothing halfway: only the background is left.
-        ("spin-transition", &[], |out, _px, _a, _b, w, h| {
+        ("spin-transition", &[], "0.5", |out, _px, _a, _b, w, h| {
             for (x, y) in [(0, 0), (w / 2, h / 2), (w - 1, h - 1)] {
                 assert_eq!(out(x, y), [0, 0, 0, 255], "pixel ({x}, {y})");
             }
         }),
+        // Off-centre progress, so a flipped direction lands on the wrong side.
+        // Cover from the left: a strip of the second clip on the left, the first elsewhere.
+        ("slide-transition", &[("mode", "1"), ("direction", "1")], "0.25", |out, px, a, _b, w, h| {
+            assert_ne!(out(1, h / 2), px(a, 1, h / 2));
+            assert_eq!(out(w - 3, h / 2), px(a, w - 3, h / 2));
+        }),
+        // Uncover to the right: the still second clip shows on the left.
+        ("slide-transition", &[("mode", "2"), ("direction", "1")], "0.25", |out, px, _a, b, w, h| {
+            assert_eq!(out(1, h / 2), px(b, 1, h / 2));
+            assert_ne!(out(w - 3, h / 2), px(b, w - 3, h / 2));
+        }),
+        // Push through color to the right: the gap opens on the left, then closes on the right.
+        ("slide-transition", &[("mode", "3"), ("direction", "1"), ("color", "#ff0000")], "0.25", |out, _px, _a, _b, w, h| {
+            assert_eq!(out(1, h / 2), [255, 0, 0, 255]);
+            assert_ne!(out(w - 2, h / 2), [255, 0, 0, 255]);
+        }),
+        ("slide-transition", &[("mode", "3"), ("direction", "1"), ("color", "#ff0000")], "0.75", |out, _px, _a, _b, w, h| {
+            assert_ne!(out(1, h / 2), [255, 0, 0, 255]);
+            assert_eq!(out(w - 2, h / 2), [255, 0, 0, 255]);
+        }),
+        // Vertical bars all together, coming up from the bottom: a quarter in, the bottom
+        // rows show the top of the second clip, the top rows still the first.
+        ("sliding-bars", &[("direction", "1"), ("vertical", "1"), ("stagger", "0")], "0.25", |out, px, a, b, w, h| {
+            assert_eq!(out(w / 2, 2), px(a, w / 2, 2));
+            // Row h - 2 samples the second clip at texel 39.5 - 0.75 * 41 = 8.75, near row 8.
+            assert!(near(&out(w / 2, h - 2), &px(b, w / 2, 8)), "{:?} vs {:?}", out(w / 2, h - 2), px(b, w / 2, 8));
+        }),
+        // A quarter turn without zoom: the centre stays put and the frame is rotated
+        // counterclockwise on screen: the pixel right of the centre comes from above it.
+        ("spin-transition", &[("zoom", "0"), ("turns", "0.5"), ("blur", "1")], "0.25", |out, px, a, _b, w, h| {
+            assert_eq!(out(w / 2, h / 2), px(a, w / 2, h / 2));
+            assert!(near(&out(w / 2 + 10, h / 2), &px(a, w / 2, h / 2 - 10)), "{:?}", out(w / 2 + 10, h / 2));
+            assert_eq!(out(0, 0), [0, 0, 0, 255]);
+        }),
+        // turns rounds to whole half turns, so 0.3 spins like 0.5 (and both halves meet).
+        ("spin-transition", &[("zoom", "0"), ("turns", "0.3"), ("blur", "1")], "0.25", |out, px, a, _b, w, h| {
+            assert!(near(&out(w / 2 + 10, h / 2), &px(a, w / 2, h / 2 - 10)), "{:?}", out(w / 2 + 10, h / 2));
+        }),
+        // Box in: zoomed out, a centred box of the first clip on the background.
+        ("box-in", &[("color", "#ff0000")], "0.25", |out, px, a, _b, w, h| {
+            assert_eq!(out(w / 2, h / 2), px(a, w / 2, h / 2));
+            assert_eq!(out(0, 0), [255, 0, 0, 255]);
+            assert_eq!(out(2, h / 2), [255, 0, 0, 255]);
+            assert_eq!(out(w - 3, h / 2), [255, 0, 0, 255]);
+        }),
+        // Halfway out: the first box leaves to the right (the side the second comes from).
+        ("box-in", &[("color", "#ff0000")], "0.375", |out, _px, _a, _b, w, h| {
+            assert_eq!(out(3, h / 2), [255, 0, 0, 255]);
+            assert_eq!(out(w / 2, h / 2), [255, 0, 0, 255]);
+            assert_ne!(out(w - 3, h / 2), [255, 0, 0, 255]);
+        }),
+        ("box-in", &[("color", "#ff0000")], "0.5", |out, _px, _a, _b, w, h| {
+            for (x, y) in [(0, 0), (w / 2, h / 2), (w - 1, h - 1)] {
+                assert_eq!(out(x, y), [255, 0, 0, 255], "pixel ({x}, {y})");
+            }
+        }),
+        // Halfway in: the second box comes from the right; its left part shows there.
+        ("box-in", &[("color", "#ff0000")], "0.625", |out, px, _a, b, w, h| {
+            assert_eq!(out(3, h / 2), [255, 0, 0, 255]);
+            assert!(near(&out(w - 3, h / 2), &px(b, 28, h / 2)), "{:?}", out(w - 3, h / 2));
+        }),
+        // Vertical, moving up: the first box leaves downwards.
+        ("box-in", &[("color", "#ff0000"), ("direction", "2")], "0.375", |out, _px, _a, _b, w, h| {
+            assert_eq!(out(w / 2, 2), [255, 0, 0, 255]);
+            assert_ne!(out(w / 2, h - 3), [255, 0, 0, 255]);
+        }),
+        // Zooming in: a bigger centred box of the second clip.
+        ("box-in", &[("color", "#ff0000")], "0.875", |out, px, _a, b, w, h| {
+            assert_eq!(out(w / 2, h / 2), px(b, w / 2, h / 2));
+            assert_eq!(out(0, 0), [255, 0, 0, 255]);
+        }),
     ];
-    for (name, settings, check) in cases {
+    for (name, settings, at, check) in cases {
         let (_, mut fx) = open(&ctx, name);
         for (k, v) in settings {
             fx.params_mut().set_str(k, v).unwrap();
@@ -182,7 +253,7 @@ fn transition_modes_have_clean_endpoints_and_their_own_midpoint() {
         };
         assert!(run("0") == first, "{name} {settings:?} at progress 0 is not the first clip");
         assert!(run("1") == second, "{name} {settings:?} at progress 1 is not the second clip");
-        let mid = run("0.5");
+        let mid = run(at);
         let out = |x: u32, y: u32| px(&mid, x, y);
         check(&out, &px, &first, &second, w, h);
     }
@@ -619,4 +690,9 @@ fn pack_skips_compiled_folder_and_its_own_output() {
     assert_eq!(pkg.file("assets/compiled/keep.txt").unwrap(), b"keep");
     assert!(pkg.file("out.zip").is_err());
     let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Two pixels equal within the rounding of a filtered sample between neighbours.
+fn near(a: &[u8], b: &[u8]) -> bool {
+    a.iter().zip(b).all(|(x, y)| x.abs_diff(*y) <= 3)
 }

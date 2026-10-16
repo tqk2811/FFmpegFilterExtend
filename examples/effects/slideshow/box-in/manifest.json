@@ -1,0 +1,55 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.box-in",
+  "name": "Box In",
+  "version": "1.0.0",
+  "description": "The first clip zooms out into a box, the box slides out of the frame, a box of the second clip slides in from the same side and zooms in to fill the frame. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    },
+    {
+      "name": "direction",
+      "type": "int",
+      "default": 0,
+      "min": 0,
+      "max": 3,
+      "description": "Where the second box moves as it comes in: 0 left, 1 right, 2 up, 3 down (the first box leaves the opposite way, towards the side the second comes from)"
+    },
+    {
+      "name": "box",
+      "type": "float",
+      "default": 0.5,
+      "min": 0.1,
+      "max": 1,
+      "description": "Box size relative to the frame"
+    },
+    {
+      "name": "color",
+      "type": "color",
+      "default": "#000000",
+      "description": "Background around the boxes"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/box_in.wgsl"
+    }
+  ]
+}

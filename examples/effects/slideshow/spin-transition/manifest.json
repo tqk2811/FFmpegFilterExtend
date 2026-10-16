@@ -30,7 +30,7 @@
       "default": 1,
       "min": 0,
       "max": 10,
-      "description": "Turns made by each clip during its half of the transition"
+      "description": "Turns made by each clip during its half of the transition, rounded to the nearest half turn (below 0.25 rounds to 0: no spin)"
     },
     {
       "name": "zoom",
