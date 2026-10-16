@@ -221,6 +221,13 @@ if [ "$TARGET" = win64 ]; then
     [ -z "$MISSING" ] || { echo "new $DLL lacks prebuilt exports: $MISSING" >&2; exit 1; }
     cp "libavfilter/$DLL" "$OUT/bin/$DLL"
     cp "$WORK/prefix/bin/gpufx.dll" "$OUT/bin/"
+    # Import libraries for other projects linking gpufx.dll, like the prebuilt FFmpeg's:
+    # libgpufx.dll.a for MinGW, gpufx.lib (+ .def) for MSVC.
+    mkdir -p "$OUT/lib"
+    cp "$WORK/prefix/lib/libgpufx.dll.a" "$OUT/lib/"
+    { echo EXPORTS; exports "$OUT/bin/gpufx.dll"; } > "$OUT/lib/gpufx.def"
+    x86_64-w64-mingw32-dlltool -m i386:x86-64 -D gpufx.dll -d "$OUT/lib/gpufx.def" \
+        -l "$OUT/lib/gpufx.lib"
     # DXC next to ffmpeg.exe: wgpu would fall back to the slow FXC without it.
     "$ROOT/scripts/fetch-dxc.sh" "$OUT/bin"
 else

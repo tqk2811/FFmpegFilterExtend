@@ -20,6 +20,12 @@ extern "C" {
 
 #define GPUFX_API_VERSION 12
 
+/* Names of the FFmpeg filters this project adds to libavfilter, for
+ * avfilter_get_by_name() or a filter graph string. */
+#define GPUFX_FILTER_NAME          "gpufx"
+#define GPUFX_UPLOAD_FILTER_NAME   "gpufx_upload"
+#define GPUFX_DOWNLOAD_FILTER_NAME "gpufx_download"
+
 typedef struct GpufxEffect GpufxEffect;
 
 /* An RGBA8 image in CPU memory. stride is bytes per row, >= width * 4. */
