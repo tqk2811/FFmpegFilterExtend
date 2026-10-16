@@ -18,7 +18,7 @@ Written inline after the package name: `dip-to-color.zip=name=value`. Several op
 | Name | Type | Default | Range | Description |
 |------|------|---------|-------|-------------|
 | `progress` | float | `0.5` | 0 to 1 | 0 = first clip, 1 = second clip |
-| `color` | color | `#000000` | - | Color in the middle of the transition |
+| `color` | color | `#000000` | RGB | Color in the middle of the transition; alpha is ignored |
 
 A `color` is `#rrggbb`.
 

@@ -57,6 +57,9 @@ nêu tên effect và key.
   phân tách. Dấu phẩy trong biểu thức vẫn escape `\,` như mọi option của filter.
 - Bên trong chuỗi effect, `\` escape một ký tự trong `\ ' : & ; | = [ ]` (`\&` là `&` nguyên văn trong giá trị; đứng trước ký tự khác thì `\` giữ
   nguyên, nên đường dẫn Windows vẫn dùng được) và `'...'` bọc một giá trị.
+- Giá trị `color` là `#RRGGBB` hoặc `#RRGGBBAA` (alpha mặc định `ff`), hoặc 3 hay 4 số từ 0 tới 1. Alpha có được dùng
+  hay không là tuỳ effect: README của từng effect ghi rõ với mỗi tham số là alpha bị bỏ qua, dùng làm độ đậm, hay
+  được ghi ra đầu ra.
 - `sendcmd` là lệnh lúc chạy, không phải option của filter: `sendcmd=c='0.5 gpufx@g params gb.strength=0.2'` đặt
   các cặp `node.name=value` (cách nhau bởi `|`) trong khi stream đang chạy; xem [design](docs/DESIGN-vi.md).
 

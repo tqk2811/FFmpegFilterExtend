@@ -20,7 +20,7 @@ Written inline after the package name: `slide-transition.zip=name=value`. Severa
 | `progress` | float | `0.5` | 0 to 1 | 0 = first clip, 1 = second clip |
 | `direction` | int | `0` | 0 to 3 | 0 = left, 1 = right, 2 = up, 3 = down |
 | `mode` | int | `0` | 0 to 3 | 0 = push (the second clip pushes the first out), 1 = cover (the second slides in over the still first), 2 = uncover (the first slides out over the still second), 3 = push through color (the first is pushed out, a gap of `color`, then the second is pushed in) |
-| `color` | color | `#000000` | RGB | Background between the clips in mode 3 |
+| `color` | color | `#000000` | RGB | Background between the clips in mode 3; alpha is ignored |
 
 ## Example
 

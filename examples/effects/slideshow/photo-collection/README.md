@@ -23,7 +23,7 @@ Written inline after the package name: `photo-collection.zip=name=value`. Severa
 | `spins` | float | `3` | -20 to 20 | Turns during the flight (negative: the other way) |
 | `size` | float | `0.8` | 0.05 to 1 | Photo size, border included: it fits inside this part of the frame |
 | `border` | float | `0` | 0 to 0.2 | Photo border, relative to the frame height |
-| `border_color` | color | `#ffffff` | - | Border colour |
+| `border_color` | color | `#ffffff` | RGBA | Border colour; alpha is its opacity over the first clip |
 
 A `color` is `#rrggbb`.
 

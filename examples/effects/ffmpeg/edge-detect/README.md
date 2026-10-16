@@ -20,7 +20,7 @@ Written inline after the package name: `edge-detect.zip=name=value`. Several opt
 |------|------|---------|-------|-------------|
 | `strength` | float | `1` | 0 to 10 | Edge gain |
 | `blend` | float | `1` | 0 to 1 | 0 = original, 1 = edges only |
-| `color` | color | `#ffffff` | - | Edge color |
+| `color` | color | `#ffffff` | RGB | Edge color; alpha is ignored |
 
 A `color` is `#rrggbb`.
 

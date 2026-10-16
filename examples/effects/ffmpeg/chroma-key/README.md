@@ -16,7 +16,7 @@ Written inline after the package name: `chroma-key.zip=name=value`. Several opti
 
 | Name | Type | Default | Range | Description |
 |------|------|---------|-------|-------------|
-| `key` | color | `#00ff00` | - | Color to remove |
+| `key` | color | `#00ff00` | RGB | Color to remove; alpha is ignored |
 | `similarity` | float | `0.25` | 0 to 1 | How close to the key a color must be to become transparent |
 | `smoothness` | float | `0.08` | 0 to 1 | Width of the soft edge |
 | `spill` | float | `0.5` | 0 to 1 | Removes the key tint from the remaining edges |

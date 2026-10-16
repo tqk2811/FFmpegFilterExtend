@@ -21,7 +21,7 @@ Written inline after the package name: `spin-transition.zip=name=value`. Several
 | `turns` | float | `1` | 0 to 10 | Turns made by each clip during its half of the transition, rounded to the nearest half turn (below 0.25 rounds to 0: no spin) |
 | `zoom` | float | `1` | 0 to 1 | How much the clips shrink at the middle: 1 = to nothing, 0 = not at all |
 | `blur` | int | `8` | 1 to 32 | Motion-blur samples along the rotation (1 = no blur) |
-| `color` | color | `#000000` | RGB | Background around the spinning clip |
+| `color` | color | `#000000` | RGB | Background around the spinning clip; alpha is ignored |
 
 ## Example
 

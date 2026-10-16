@@ -21,7 +21,7 @@ Written inline after the package name: `transform.zip=name=value`. Several optio
 | `zoom` | float | `1` | 0.01 to 100 | 1 = unchanged, 2 = twice as big |
 | `angle` | float | `0` | - | Rotation in degrees, clockwise |
 | `center` | vec2 | `0.5, 0.5` | - | Point of the source shown at the frame center (0..1) |
-| `background` | color | `#000000` | - | Fill outside the source |
+| `background` | color | `#000000` | RGBA | Fill outside the source; its alpha is written as the output alpha, kept only with an alpha `out_format` (`rgba`, `yuva420p`, `yuva444p`), not blended with the clips |
 
 A `vec2` is two comma-separated numbers (`center=0.3,0.6`; write `0.3\,0.6` in an FFmpeg command line).
 

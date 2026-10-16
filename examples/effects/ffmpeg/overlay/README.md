@@ -24,7 +24,7 @@ Written inline after the package name: `overlay.zip=name=value`. Several options
 | `scale` | float | `0.3` | 0.01 to 1 | Overlay width relative to the frame width |
 | `opacity` | float | `1` | 0 to 1 | Overlay opacity |
 | `border` | float | `0` | 0 to 50 | Border width in pixels |
-| `border_color` | color | `#ffffff` | - | Border color |
+| `border_color` | color | `#ffffff` | RGBA | Border color; alpha is its opacity over the bottom input, like the picture's own alpha |
 
 A `color` is `#rrggbb`.
 

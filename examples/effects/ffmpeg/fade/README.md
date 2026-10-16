@@ -19,7 +19,7 @@ Written inline after the package name: `fade.zip=name=value`. Several options ar
 | Name | Type | Default | Range | Description |
 |------|------|---------|-------|-------------|
 | `progress` | float | `0` | 0 to 1 | 0 = video, 1 = color |
-| `color` | color | `#000000` | - | Target color |
+| `color` | color | `#000000` | RGBA | Target color; alpha scales how far it fades (`#00000080` fades to half) |
 
 A `color` is `#rrggbb`.
 

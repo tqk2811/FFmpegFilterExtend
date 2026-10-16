@@ -20,7 +20,7 @@ Written inline after the package name: `box-in.zip=name=value`. Several options 
 | `progress` | float | `0.5` | 0 to 1 | 0 = first clip, 1 = second clip |
 | `direction` | int | `0` | 0 to 3 | Where the second box moves as it comes in: 0 left, 1 right, 2 up, 3 down (the first box leaves the opposite way, towards the side the second comes from) |
 | `box` | float | `0.5` | 0.1 to 1 | Box size relative to the frame |
-| `color` | color | `#000000` | RGB | Background around the boxes |
+| `color` | color | `#000000` | RGBA | Background around the boxes; its alpha is written as the output alpha, kept only with an alpha `out_format` (`rgba`, `yuva420p`, `yuva444p`), not blended with the clips |
 
 A `color` is `#rrggbb`.
 

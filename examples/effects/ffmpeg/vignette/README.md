@@ -20,7 +20,7 @@ Written inline after the package name: `vignette.zip=name=value`. Several option
 |------|------|---------|-------|-------------|
 | `strength` | float | `0.6` | 0 to 1 | How strong the vignette is |
 | `radius` | float | `0.75` | 0 to 1.5 | Where the darkening starts |
-| `color` | color | `#000000` | - | Vignette color |
+| `color` | color | `#000000` | RGBA | Vignette color; alpha scales the strength |
 
 A `color` is `#rrggbb`.
 

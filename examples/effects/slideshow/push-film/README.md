@@ -22,8 +22,8 @@ Written inline after the package name: `push-film.zip=name=value`. Several optio
 | `strip` | float | `0.1` | 0 to 0.3 | Width of the perforated band on each side, relative to the frame |
 | `gap` | float | `0.03` | 0 to 0.2 | Gap between two pictures of the strip, relative to the frame |
 | `holes` | int | `8` | 1 to 64 | Perforations per picture on each side |
-| `film_color` | color | `#141414` | - | Colour of the film |
-| `hole_color` | color | `#f2f2f2` | - | Colour seen through the perforations |
+| `film_color` | color | `#141414` | RGBA | Colour of the film; its alpha is written as the output alpha, kept only with an alpha `out_format` (`rgba`, `yuva420p`, `yuva444p`), not blended with the clips |
+| `hole_color` | color | `#f2f2f2` | RGBA | Colour seen through the perforations; its alpha is written as the output alpha, kept only with an alpha `out_format` (`rgba`, `yuva420p`, `yuva444p`), not blended with the clips |
 
 A `color` is `#rrggbb`.
 

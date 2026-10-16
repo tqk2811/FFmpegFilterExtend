@@ -60,6 +60,9 @@ frame and `bypass=0|auto` picks the input it copies while off. They are separate
   key needs no separator. Commas in expressions are escaped `\,` as for any filter option.
 - Inside the effect string, `\` escapes one of `\ ' : & ; | = [ ]` (`\&` is a literal `&` in a value; before any other character it stays literal, so
   Windows paths work) and `'...'` quotes a value.
+- A `color` value is `#RRGGBB` or `#RRGGBBAA` (alpha defaults to `ff`), or 3 or 4 numbers from 0 to 1. Whether the
+  alpha is used depends on the effect: its README says, per parameter, if alpha is ignored, sets a strength, or is
+  written to the output.
 - `sendcmd` is a runtime command, not a filter option: `sendcmd=c='0.5 gpufx@g params gb.strength=0.2'` sets
   `node.name=value` pairs (separated by `|`) while the stream runs; see [design](docs/DESIGN.md).
 

@@ -20,7 +20,7 @@ Written inline after the package name: `push-box.zip=name=value`. Several option
 | `progress` | float | `0.5` | 0 to 1 | 0 = first clip, 1 = second clip |
 | `direction` | int | `0` | 0 to 3 | Where the clips move: 0 left, 1 right, 2 up, 3 down |
 | `box` | float | `0.5` | 0.1 to 1 | Box size relative to the frame |
-| `color` | color | `#000000` | - | Background around the boxes |
+| `color` | color | `#000000` | RGBA | Background around the boxes; its alpha is written as the output alpha, kept only with an alpha `out_format` (`rgba`, `yuva420p`, `yuva444p`), not blended with the clips |
 
 A `color` is `#rrggbb`.
 

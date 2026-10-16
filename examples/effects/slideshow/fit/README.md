@@ -22,7 +22,7 @@ Written inline after the package name: `fit.zip=name=value`. Several options are
 | `mode` | int | `3` | 0 to 3 | 0 center, 1 crop to fill, 2 stretch, 3 center over a blurred stretched copy |
 | `upscale` | bool | `false` | - | Let center and blur modes enlarge pictures smaller than the frame |
 | `blur` | float | `0.14` | 0 to 0.5 | Blur radius of the background in mode 3, relative to the frame height |
-| `color` | color | `#000000` | - | Background behind the picture in modes 0 to 2 (transparent shows the first input); mode 3 uses the blurred copy |
+| `color` | color | `#000000` | RGBA | Background behind the picture in modes 0 to 2 (transparent shows the first input); mode 3 uses the blurred copy |
 
 A `color` is `#rrggbb`.
 
