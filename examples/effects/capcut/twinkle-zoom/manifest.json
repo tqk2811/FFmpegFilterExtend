@@ -1,0 +1,54 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.twinkle-zoom",
+  "name": "Twinkle Zoom",
+  "version": "1.0.0",
+  "description": "Dissolve to the second clip while the picture melts into a hexagonal bokeh blur whose highlights flare into sparkles, then sharpens again. Recreation of the CapCut \"Twinkle Zoom\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/blend.wgsl",
+      "inputs": ["first", "second"],
+      "output": "blended"
+    },
+    {
+      "shader": "shaders/blur-v.wgsl",
+      "inputs": ["blended"],
+      "output": "soft_v"
+    },
+    {
+      "shader": "shaders/blur-h.wgsl",
+      "inputs": ["soft_v"],
+      "output": "soft"
+    },
+    {
+      "shader": "shaders/bokeh.wgsl",
+      "inputs": ["soft"],
+      "output": "bokeh"
+    },
+    {
+      "shader": "shaders/finish.wgsl",
+      "inputs": ["first", "second", "bokeh"]
+    }
+  ]
+}

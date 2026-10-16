@@ -1,0 +1,53 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.ripple-vibe",
+  "name": "Ripple Vibe",
+  "version": "1.0.0",
+  "description": "The picture shakes, flares bright and ripples sideways in noisy waves while cutting to the second clip at the midpoint. Recreation of the CapCut \"Ripple Vibe\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    },
+    {
+      "name": "duration",
+      "type": "float",
+      "default": 0.8,
+      "min": 0.01,
+      "max": 10,
+      "description": "Real transition length in seconds; sets the speed of the shake and of the ripples"
+    },
+    {
+      "name": "animate",
+      "type": "bool",
+      "default": true,
+      "description": "true (default) = the shake and the ripples move in real time over `duration`. false = like CapCut's export: both stay frozen at their t = 0 position while only the amplitude and the flash change"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/ripple.wgsl",
+      "inputs": ["first", "second"],
+      "output": "rippled"
+    },
+    {
+      "shader": "shaders/shake.wgsl",
+      "inputs": ["first", "second", "rippled"]
+    }
+  ]
+}

@@ -1,0 +1,41 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.fade-up",
+  "name": "Fade Up",
+  "version": "1.0.0",
+  "description": "The first clip rises, grows and fades out over the second through a zoom blur and a gentle wave, with a short exposure flash at the start. Recreation of the CapCut \"Fade Up\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    },
+    {
+      "name": "duration",
+      "type": "float",
+      "default": 0.8,
+      "min": 0.01,
+      "max": 10,
+      "description": "Real transition length in seconds; sets how far the wave travels"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/fade-up.wgsl"
+    }
+  ]
+}

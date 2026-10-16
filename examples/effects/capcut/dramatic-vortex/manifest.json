@@ -1,0 +1,58 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.dramatic-vortex",
+  "name": "Dramatic Vortex",
+  "version": "1.0.0",
+  "description": "The first clip grows and whirls away in a twisting, colour-split blur with an exposure flash, and the second clip spins back in from 170 degrees. Recreation of the CapCut \"Dramatic Vortex\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/spin.wgsl",
+      "inputs": [
+        "first",
+        "second"
+      ],
+      "output": "spun"
+    },
+    {
+      "shader": "shaders/prism.wgsl",
+      "inputs": [
+        "spun"
+      ],
+      "output": "prismed"
+    },
+    {
+      "shader": "shaders/blur_x.wgsl",
+      "inputs": [
+        "prismed"
+      ],
+      "output": "blur_x"
+    },
+    {
+      "shader": "shaders/final.wgsl",
+      "inputs": [
+        "blur_x"
+      ]
+    }
+  ]
+}

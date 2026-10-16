@@ -1,0 +1,33 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.wipers",
+  "name": "Wipers",
+  "version": "1.0.0",
+  "description": "A wiper blade hinged at the top-left corner sweeps the first clip away to a greyscale second clip, then a second blade hinged at the top-right corner sweeps the colour back in. Recreation of the CapCut \"Wipers\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/wipers.wgsl"
+    }
+  ]
+}

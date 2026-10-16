@@ -1,0 +1,49 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.hot-shimmers",
+  "name": "Hot Shimmers",
+  "version": "1.0.0",
+  "description": "Dissolve to the second clip through a heat-haze warp with a bright glow on the highlights and a zoom blur streaming up from the bottom edge. Recreation of the CapCut \"Hot Shimmers\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/warp.wgsl",
+      "inputs": ["first", "second"],
+      "output": "warped"
+    },
+    {
+      "shader": "shaders/glow-h.wgsl",
+      "inputs": ["warped"],
+      "output": "glow_h"
+    },
+    {
+      "shader": "shaders/glow-v.wgsl",
+      "inputs": ["glow_h"],
+      "output": "glow"
+    },
+    {
+      "shader": "shaders/finish.wgsl",
+      "inputs": ["warped", "glow"]
+    }
+  ]
+}

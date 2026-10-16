@@ -1,0 +1,54 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.elastic-glowing",
+  "name": "Elastic & Glowing",
+  "version": "1.0.0",
+  "description": "Squash and stretch the first input into a glowing fisheye zoom flash, then spring the second one back out of it. Recreation of the CapCut \"Elastic & Glowing\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/scene.wgsl",
+      "inputs": ["first", "second"],
+      "output": "streaks"
+    },
+    {
+      "shader": "shaders/soften-h.wgsl",
+      "inputs": ["streaks"],
+      "output": "soft_h"
+    },
+    {
+      "shader": "shaders/soften-v.wgsl",
+      "inputs": ["soft_h"],
+      "output": "soft"
+    },
+    {
+      "shader": "shaders/glow-h.wgsl",
+      "inputs": ["soft"],
+      "output": "glow_h"
+    },
+    {
+      "shader": "shaders/glow-v.wgsl",
+      "inputs": ["soft", "glow_h"]
+    }
+  ]
+}

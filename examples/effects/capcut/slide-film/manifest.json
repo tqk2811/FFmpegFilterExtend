@@ -1,0 +1,51 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.slide-film",
+  "name": "Slide Film",
+  "version": "1.0.0",
+  "description": "The first clip shrinks into a rounded frame and squashes into a blurred, glowing strip of film frames, then the second clip drops in as a strip and springs back to full size through a lens bulge. Recreation of the CapCut \"Slide Film\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/strip.wgsl",
+      "inputs": [
+        "first",
+        "second"
+      ],
+      "output": "layered"
+    },
+    {
+      "shader": "shaders/blur.wgsl",
+      "inputs": [
+        "layered"
+      ],
+      "output": "blurred"
+    },
+    {
+      "shader": "shaders/lens.wgsl",
+      "inputs": [
+        "blurred"
+      ]
+    }
+  ]
+}
