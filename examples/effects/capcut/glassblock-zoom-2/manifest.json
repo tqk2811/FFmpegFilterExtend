@@ -1,0 +1,44 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.glassblock-zoom-2",
+  "name": "Glassblock Zoom 2",
+  "version": "1.0.0",
+  "description": "Cut to the second clip inside a 5x mirrored zoom blur with chromatic fringes, while a curved mesh warp stretches the picture into four glass-block panes. Recreation of the CapCut \"Glassblock Zoom 2\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/fringe.wgsl",
+      "inputs": ["first", "second"],
+      "output": "fringed"
+    },
+    {
+      "shader": "shaders/zoom.wgsl",
+      "inputs": ["fringed"],
+      "output": "zoomed"
+    },
+    {
+      "shader": "shaders/panes.wgsl",
+      "inputs": ["first", "second", "zoomed"]
+    }
+  ]
+}

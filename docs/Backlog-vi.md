@@ -9,6 +9,15 @@
 - **Vì sao**: sửa thì đẹp hơn ở độ phân giải cao và đỡ tốn GPU. Mỗi chỗ sửa phải chấm lại bằng `scripts/capcut-compare.py` để không tụt điểm so với demo.
 - **Ngày ghi**: 2026-10-16
 
+### [Thấp] Hiệu ứng CapCut đợt 5: các finding review để sau
+- **Vấn đề**:
+  - glassblock-zoom-2 giải ngược mesh bằng Newton (4 ô × 16 seed × tối đa 10 bước, khoảng 1900 lần tính Coons mỗi pixel) trong suốt khoảng bend 0.67–1.33 s: nặng ALU ở 4K; pixel không hội tụ ra đen (có thể lẫn chấm đen trong ô kính). Hướng sửa: bake ánh xạ ngược thành texture theo vài lát `m`, hoặc bỏ ô sớm theo bounding box điểm điều khiển, đạo hàm sai phân trung tâm.
+  - varnish-wash tính lại 99 blob (seed chain, vị trí, vận tốc) ở mọi pixel dù tham số blob giống nhau cho cả khung; nên tách pass "bảng blob" 99x1 rồi pass field chỉ đọc bảng. Vị trí blob lệch CapCut (khung 28–30 chỉ 11–16 dB) do chuỗi hash nhạy sai số float GPU.
+  - twist-flip khung 28–29 (khoảng 20 dB): mép thùy lệch demo, nghi CapCut nội suy texcoord trên lưới tam giác 32x32.
+- **Vị trí**: [panes.wgsl](../examples/effects/capcut/glassblock-zoom-2/shaders/panes.wgsl), [blobs.wgsl](../examples/effects/capcut/varnish-wash/shaders/blobs.wgsl), [twist.wgsl](../examples/effects/capcut/twist-flip/shaders/twist.wgsl).
+- **Vì sao**: đỡ tốn GPU ở độ phân giải cao và giống demo hơn. Sửa xong chấm lại bằng `scripts/capcut-compare.py`.
+- **Ngày ghi**: 2026-10-17
+
 ### [Thấp] Lỗi `out_format` trên D3D liệt kê `rgba` dù FFmpeg không làm được frame đó
 - **Vấn đề**: `out_format=rgba` trên D3D12/D3D11 hỏng với `Unsupported pixel format: rgba` từ FFmpeg, nhưng thông báo của gpufx vẫn liệt kê `nv12, p010le, rgba, rgba64le` là ghi được. Bộ frame D3D12 của FFmpeg chỉ có `nv12`/`p010` ([hwcontext_d3d12va.c:71](../external/FFmpeg/libavutil/hwcontext_d3d12va.c#L71)); D3D11 có `bgra` chứ không có `rgba`.
 - **Vị trí**: `sw_format_list` ở [vf_gpufx.c:1166](../ffmpeg/vf_gpufx.c#L1166), dùng ở các thông báo dòng 1216, 1356, 1361.
