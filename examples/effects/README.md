@@ -1,6 +1,6 @@
 # Example effects
 
-Each folder is one effect package (see [EFFECT_FORMAT](../../docs/EFFECT_FORMAT.md)), grouped by origin. A package is referred to by its folder name, wherever the group folder is: `scripts/pack-effects.sh` zips every one to `dist/effects/<name>.zip`.
+Each folder is one effect package (see [EFFECT_FORMAT](../../docs/EFFECT_FORMAT.md)), grouped by origin. `scripts/pack-effects.sh` zips every one to `dist/effects/<group>/<name>.zip`, keeping this layout; the release bundles ship the same `effects/<group>/` folders.
 
 ## ffmpeg
 

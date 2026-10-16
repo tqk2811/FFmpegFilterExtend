@@ -127,7 +127,7 @@ You need Rust (stable) and a GPU driver (on Linux without a GPU you can use `mes
 cargo build --release
 cargo test --release                       # run the sample effects on the available GPU
 ./target/release/gpufx run 'examples/effects/ffmpeg/vignette=strength=0.9' -i in.png -o out.png
-scripts/pack-effects.sh                    # only package the effects: examples/effects -> dist/effects/*.zip
+scripts/pack-effects.sh                    # only package the effects: examples/effects -> dist/effects/<group>/<name>.zip
 ```
 
 Adding or editing effects **does not require rebuilding FFmpeg**: run `scripts/pack-effects.sh`
@@ -222,7 +222,7 @@ The result is in `dist/<target>/`:
 
 ```
 bin/      ffmpeg, ffprobe, libgpufx.so | gpufx.dll, gpufx-cli
-effects/  the sample effects packaged as .zip
+effects/  the sample effects packaged as .zip (ffmpeg/, slideshow/, standalone/ as in examples/effects)
 include/  gpufx.h
 ```
 

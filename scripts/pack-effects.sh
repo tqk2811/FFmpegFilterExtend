@@ -1,8 +1,8 @@
 #!/bin/sh
 # Packs effect folders into .zip packages only: no FFmpeg, no Docker.
 # Every package is validated first (manifest, rules, file references) by `gpufx pack`.
-#   scripts/pack-effects.sh                       all of examples/effects -> dist/effects
-#   scripts/pack-effects.sh -o out my-fx other-fx  chosen folders -> out/
+#   scripts/pack-effects.sh                       all of examples/effects -> dist/effects/<group>/<name>.zip
+#   scripts/pack-effects.sh -o out my-fx other-fx  chosen folders -> out/ (group kept for examples/effects)
 #   scripts/pack-effects.sh --check               also compile every shader on the GPU
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -29,5 +29,13 @@ for dir in "$@"; do
     dir=${dir%/}
     [ -f "$dir/manifest.json" ] || { echo "$dir: no manifest.json" >&2; exit 1; }
     [ "$CHECK" = 1 ] && "$GPUFX" check "$dir"
-    "$GPUFX" pack "$dir" "$OUT/$(basename "$dir").zip"
+    # Effects of examples/effects keep their group folder (out/<group>/<name>.zip);
+    # other folders are packed flat (out/<name>.zip).
+    dir=$(cd "$dir" && pwd)
+    case "$dir" in
+        "$ROOT"/examples/effects/*) rel=${dir#"$ROOT"/examples/effects/} ;;
+        *) rel=$(basename "$dir") ;;
+    esac
+    mkdir -p "$OUT/$(dirname "$rel")"
+    "$GPUFX" pack "$dir" "$OUT/$rel.zip"
 done

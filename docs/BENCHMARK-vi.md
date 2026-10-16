@@ -98,11 +98,11 @@ Bản build `c62d150` (bundle win64), đo ngày 2026-10-15, cùng máy như trê
 - **Ba cách** (script filter đầy đủ truyền bằng `-/filter_complex <file>`):
   1. CPU: FFmpeg 8.0.1, chuỗi 5 `xfade=transition=fade:duration=1:offset=9|18|27|36|45`, rồi `format=yuv420p`.
   2. Năm `gpufx` riêng, mỗi chỗ nối một filter, chỉ bật trong lúc chuyển cảnh của nó:
-     `[x1][u2]gpufx=effect='effects/crossfade.zip=progress=clip(t-18\,0\,1)':enable='between(t,18,19)':bypass=auto[x2]`.
+     `[x1][u2]gpufx=effect='effects/ffmpeg/crossfade.zip=progress=clip(t-18\,0\,1)':enable='between(t,18,19)':bypass=auto[x2]`.
      Ngoài cửa sổ, filter chuyền texture input đi dưới nhãn mới (`passthrough=auto`, không copy): input 0 trước
      chuyển cảnh và clip mới sau chuyển cảnh (`bypass=auto`).
   3. Một `gpufx` với graph gồm 5 crossfade, bật tắt từng effect bằng key inline `enable` / `bypass`:
-     `[u0]...[u5]gpufx=graph='[0][1]effects/crossfade.zip=progress=clip(t-9\,0\,1)&enable=between(t\,9\,10)&bypass=auto[x1]; [x1][2]effects/crossfade.zip=progress=clip(t-18\,0\,1)&enable=between(t\,18\,19)&bypass=auto[x2]; ...[out]'`.
+     `[u0]...[u5]gpufx=graph='[0][1]effects/ffmpeg/crossfade.zip=progress=clip(t-9\,0\,1)&enable=between(t\,9\,10)&bypass=auto[x1]; [x1][2]effects/ffmpeg/crossfade.zip=progress=clip(t-18\,0\,1)&enable=between(t\,18\,19)&bypass=auto[x2]; ...[out]'`.
 - **Input của hai cách gpufx**: mỗi clip upload một lần (`gpufx_upload`, device Vulkan
   `vulkan=vk:0,disable_multiplane=1`) rồi dời tới chỗ nối của nó (`setpts=PTS+9*k/TB`). Clip A giữ frame cuối bằng
   `tpad=stop_mode=clone:stop_duration=45` (frame GPU, không upload lại), vì input đầu quyết định độ dài của gpufx;

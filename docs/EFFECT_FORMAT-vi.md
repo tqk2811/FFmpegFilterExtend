@@ -25,7 +25,7 @@ gpufx pack my-effect my-effect.zip
 Đóng gói nhiều hiệu ứng một lúc (không cần build FFmpeg hay Docker):
 
 ```sh
-scripts/pack-effects.sh                         # mọi thư mục trong examples/effects -> dist/effects/*.zip
+scripts/pack-effects.sh                         # mọi thư mục trong examples/effects -> dist/effects/<group>/<name>.zip
 scripts/pack-effects.sh --check -o out my-fx    # biên dịch shader trên GPU trước, ghi vào out/
 .\scripts\pack-effects.ps1 -Check                # Windows
 ```

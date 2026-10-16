@@ -1,6 +1,6 @@
 # Packs effect folders into .zip packages only: no FFmpeg, no Docker.
 # Every package is validated first (manifest, rules, file references) by `gpufx pack`.
-#   .\scripts\pack-effects.ps1                          all of examples\effects -> dist\effects
+#   .\scripts\pack-effects.ps1                          all of examples\effects -> dist\effects\<group>\<name>.zip
 #   .\scripts\pack-effects.ps1 -Out out my-fx other-fx   chosen folders -> out\
 #   .\scripts\pack-effects.ps1 -Check                   also compile every shader on the GPU
 param(
@@ -24,6 +24,16 @@ foreach ($dir in $Dirs) {
         & $gpufx check $dir
         if ($LASTEXITCODE -ne 0) { throw "check failed: $dir" }
     }
-    & $gpufx pack $dir (Join-Path $Out ((Split-Path -Leaf $dir) + ".zip"))
+    # Effects of examples\effects keep their group folder (out\<group>\<name>.zip);
+    # other folders are packed flat (out\<name>.zip).
+    $full = (Resolve-Path $dir).Path.TrimEnd('\', '/')
+    $examples = (Resolve-Path (Join-Path $root "examples/effects")).Path
+    $rel = Split-Path -Leaf $full
+    if ($full.StartsWith($examples + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) {
+        $rel = $full.Substring($examples.Length + 1)
+    }
+    $zip = Join-Path $Out ($rel + ".zip")
+    New-Item -ItemType Directory -Force (Split-Path -Parent $zip) | Out-Null
+    & $gpufx pack $full $zip
     if ($LASTEXITCODE -ne 0) { throw "pack failed: $dir" }
 }

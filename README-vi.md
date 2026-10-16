@@ -126,7 +126,7 @@ Cần Rust (stable) và một driver GPU (Linux không có GPU có thể dùng `
 cargo build --release
 cargo test --release                       # chạy các hiệu ứng mẫu trên GPU hiện có
 ./target/release/gpufx run 'examples/effects/ffmpeg/vignette=strength=0.9' -i in.png -o out.png
-scripts/pack-effects.sh                    # chỉ đóng gói hiệu ứng: examples/effects -> dist/effects/*.zip
+scripts/pack-effects.sh                    # chỉ đóng gói hiệu ứng: examples/effects -> dist/effects/<group>/<name>.zip
 ```
 
 Thêm hoặc sửa hiệu ứng **không cần build lại FFmpeg**: chạy `scripts/pack-effects.sh`
@@ -220,7 +220,7 @@ Kết quả nằm trong `dist/<target>/`:
 
 ```
 bin/      ffmpeg, ffprobe, libgpufx.so | gpufx.dll, gpufx-cli
-effects/  các hiệu ứng mẫu đã đóng gói .zip
+effects/  các hiệu ứng mẫu đã đóng gói .zip (ffmpeg/, slideshow/, standalone/ như examples/effects)
 include/  gpufx.h
 ```
 

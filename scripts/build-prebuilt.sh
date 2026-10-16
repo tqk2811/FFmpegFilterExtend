@@ -23,7 +23,7 @@
 #   REQUIRE_D3D      win64: 1 makes building without D3D12/D3D11 frames an error (CI).
 #   REQUIRE_LICENSES 1 makes a missing cargo-about an error (CI); without it the bundle
 #                    has no THIRD-PARTY-LICENSES-gpufx.txt (the Rust crate licenses).
-# Output: dist/<target>/ (bin, lib on Linux, effects/*.zip, include/gpufx.h)
+# Output: dist/<target>/ (bin, lib on Linux, effects/<group>/<name>.zip, include/gpufx.h)
 # Needs: cargo (cargo-about for the crate licenses), a C compiler, make, pkg-config, curl, patchelf (linux64), nasm (optional,
 # for SIMD); win64 also mingw-w64, binutils (strings), the x86_64-pc-windows-gnu Rust target and unzip.
 set -eu

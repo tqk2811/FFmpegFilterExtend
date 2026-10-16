@@ -102,11 +102,11 @@ Build `c62d150` (win64 bundle), measured on 2026-10-15, same machine as above.
   1. CPU: FFmpeg 8.0.1, chain of 5 `xfade=transition=fade:duration=1:offset=9|18|27|36|45`, then
      `format=yuv420p`.
   2. Five separate `gpufx`, one per join, each on only while its transition runs:
-     `[x1][u2]gpufx=effect='effects/crossfade.zip=progress=clip(t-18\,0\,1)':enable='between(t,18,19)':bypass=auto[x2]`.
+     `[x1][u2]gpufx=effect='effects/ffmpeg/crossfade.zip=progress=clip(t-18\,0\,1)':enable='between(t,18,19)':bypass=auto[x2]`.
      Outside its window a filter hands on its input texture relabelled (`passthrough=auto`): input 0 before
      the transition and the incoming clip after it (`bypass=auto`).
   3. One `gpufx` with a graph of 5 crossfades, each switched by the inline `enable` / `bypass` keys:
-     `[u0]...[u5]gpufx=graph='[0][1]effects/crossfade.zip=progress=clip(t-9\,0\,1)&enable=between(t\,9\,10)&bypass=auto[x1]; [x1][2]effects/crossfade.zip=progress=clip(t-18\,0\,1)&enable=between(t\,18\,19)&bypass=auto[x2]; ...[out]'`.
+     `[u0]...[u5]gpufx=graph='[0][1]effects/ffmpeg/crossfade.zip=progress=clip(t-9\,0\,1)&enable=between(t\,9\,10)&bypass=auto[x1]; [x1][2]effects/ffmpeg/crossfade.zip=progress=clip(t-18\,0\,1)&enable=between(t\,18\,19)&bypass=auto[x2]; ...[out]'`.
 - **Inputs of the gpufx ways**: each clip is uploaded once (`gpufx_upload`, Vulkan device
   `vulkan=vk:0,disable_multiplane=1`) and shifted to its join (`setpts=PTS+9*k/TB`). Clip A is held on its last
   frame with `tpad=stop_mode=clone:stop_duration=45` (GPU frames, nothing uploaded again), because the first input

@@ -25,7 +25,7 @@ gpufx pack my-effect my-effect.zip
 Package several effects at once (no FFmpeg build or Docker needed):
 
 ```sh
-scripts/pack-effects.sh                         # every directory in examples/effects -> dist/effects/*.zip
+scripts/pack-effects.sh                         # every directory in examples/effects -> dist/effects/<group>/<name>.zip
 scripts/pack-effects.sh --check -o out my-fx    # compile the shaders on the GPU first, write to out/
 .\scripts\pack-effects.ps1 -Check                # Windows
 ```

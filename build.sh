@@ -3,7 +3,7 @@
 #   ./build.sh            linux64
 #   ./build.sh win64
 #   ./build.sh all
-# Output: dist/<target>/bin (ffmpeg, ffprobe, libgpufx, gpufx-cli) and dist/<target>/effects/*.zip
+# Output: dist/<target>/bin (ffmpeg, ffprobe, libgpufx, gpufx-cli) and dist/<target>/effects/<group>/<name>.zip
 set -eu
 cd "$(dirname "$0")"
 TARGETS=${1:-linux64}

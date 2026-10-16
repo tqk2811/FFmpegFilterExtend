@@ -112,8 +112,11 @@ else
 fi
 cp -r "$PREFIX/include" "$OUT/"
 for dir in "$SRC"/examples/effects/*/*/; do
+    # Same layout as examples/effects: effects/<group>/<name>.zip.
+    group=$(basename "$(dirname "$dir")")
     name=$(basename "$dir")
-    (cd "$dir" && zip -qr "$OUT/effects/$name.zip" .)
+    mkdir -p "$OUT/effects/$group"
+    (cd "$dir" && zip -qr "$OUT/effects/$group/$name.zip" .)
 done
 cp "$SRC/README.md" "$SRC/README-vi.md" "$OUT/"
 cp "$SRC/LICENSE" "$OUT/LICENSE-gpufx.txt"
