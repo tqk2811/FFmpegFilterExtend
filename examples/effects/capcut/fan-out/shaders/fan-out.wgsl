@@ -191,6 +191,8 @@ fn swirled_clip(which: u32, p: vec2f, spin: f32, warp: f32, arc: f32) -> vec3f {
 
 // Coverage of a wedge that opens from the start angle as `open` falls from 1 to 0.
 fn wedge(d: vec2f, start_deg: f32, open: f32) -> f32 {
+    // Closed: the feathered edges would still cover pixels right on the start angle.
+    if (open >= 1.0) { return 0.0; }
     let a = rot2(d, 270.0 - start_deg);
     let b = (atan2(a.y, a.x) + PI) / TAU;
     let s = sin(radians(90.0 - start_deg));

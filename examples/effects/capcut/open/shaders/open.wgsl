@@ -47,7 +47,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     // vertically more the closer they are to the inner (moving) edge.
     var door = vec2f(-1.0);
     let cover = 2.0 * abs(q.x - 0.5) - t;
-    if (cover > 0.0) {
+    if (cover >= 0.0) {
         let outward = select(1.0, -1.0, q.x > 0.5);
         door = q + vec2f(outward * 0.5 * t, 0.0);
         let squeeze = 1.0 / (1.0 + DOOR_TILT * t * (1.0 - cover));
