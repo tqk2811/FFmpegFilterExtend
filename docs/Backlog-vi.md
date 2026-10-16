@@ -1,11 +1,5 @@
 # Việc còn treo
 
-### [Thấp] Test `exprs` tràn stack với stack mặc định trên Windows
-- **Vấn đề**: `cargo test -p gpufx-core --test exprs` (bài `expressions_are_compiled_into_wgsl_and_glsl`) chết vì STATUS_STACK_OVERFLOW; chạy với `RUST_MIN_STACK=67108864` thì xanh. Chưa chạy trên master để chắc là lỗi có từ trước (đợt chia thư mục effect không đụng `src`).
-- **Vị trí**: [crates/gpufx-core/tests/exprs.rs](../crates/gpufx-core/tests/exprs.rs), bộ dịch biểu thức trong `crates/gpufx-core/src`.
-- **Vì sao**: đệ quy sâu có thể làm sập filter thật với biểu thức dài; `cargo test --workspace` đỏ nếu không đặt biến môi trường.
-- **Ngày ghi**: 2026-10-16
-
 ### [Thấp] Test box-in chưa phủ direction 1 và 3
 - **Vấn đề**: test chỉ thử `direction` 0 và 2; đảo dấu riêng ở nhánh 1/3 không bị bắt.
 - **Vị trí**: [crates/gpufx-core/tests/effects.rs](../crates/gpufx-core/tests/effects.rs) (`transition_modes_have_clean_endpoints_and_their_own_midpoint`), [box_in.wgsl](../examples/effects/slideshow/box-in/shaders/box_in.wgsl).
@@ -163,7 +157,7 @@
 ### Test `exprs` tràn stack ở bản debug trên Windows
 - **Vấn đề**: `expressions_are_compiled_into_wgsl_and_glsl` báo `has overflowed its stack` khi `cargo test` (debug) trên Windows có GPU, ở nhánh GLSL. Chạy với `RUST_MIN_STACK=16777216` thì xanh.
 - **Vị trí**: [crates/gpufx-core/tests/exprs.rs](../crates/gpufx-core/tests/exprs.rs); có thể do frontend GLSL của naga đệ quy sâu ở bản debug.
-- **Vì sao**: thread của filter FFmpeg cũng có stack giới hạn; cần biết bản release có an toàn không, rồi chạy phần biên dịch trên thread stack lớn hoặc đặt `RUST_MIN_STACK` cho test.
+- **Vì sao**: `.cargo/config.toml` đã đặt `RUST_MIN_STACK` nên `cargo test` xanh, nhưng thread của filter FFmpeg cũng có stack giới hạn; còn phải biết bản release có an toàn không, nếu không thì chạy phần biên dịch trên thread stack lớn.
 - **Ngày ghi**: 2026-10-13
 
 ### Frame Vulkan: bắt buộc họ queue có graphics, chưa có test cho nhánh từ chối

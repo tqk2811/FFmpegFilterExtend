@@ -1,0 +1,4 @@
+[env]
+# naga's GLSL frontend recurses deeply in debug builds; the exprs test overflows the
+# default 2 MiB test-thread stack on Windows (see docs/Backlog-vi.md).
+RUST_MIN_STACK = "16777216"
