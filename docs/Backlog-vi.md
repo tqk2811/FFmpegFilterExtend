@@ -1,5 +1,17 @@
 # Việc còn treo
 
+### [Thấp] Test `exprs` tràn stack với stack mặc định trên Windows
+- **Vấn đề**: `cargo test -p gpufx-core --test exprs` (bài `expressions_are_compiled_into_wgsl_and_glsl`) chết vì STATUS_STACK_OVERFLOW; chạy với `RUST_MIN_STACK=67108864` thì xanh. Chưa chạy trên master để chắc là lỗi có từ trước (đợt chia thư mục effect không đụng `src`).
+- **Vị trí**: [crates/gpufx-core/tests/exprs.rs](../crates/gpufx-core/tests/exprs.rs), bộ dịch biểu thức trong `crates/gpufx-core/src`.
+- **Vì sao**: đệ quy sâu có thể làm sập filter thật với biểu thức dài; `cargo test --workspace` đỏ nếu không đặt biến môi trường.
+- **Ngày ghi**: 2026-10-16
+
+### [Thấp] Test box-in chưa phủ direction 1 và 3
+- **Vấn đề**: test chỉ thử `direction` 0 và 2; đảo dấu riêng ở nhánh 1/3 không bị bắt.
+- **Vị trí**: [crates/gpufx-core/tests/effects.rs](../crates/gpufx-core/tests/effects.rs) (`transition_modes_have_clean_endpoints_and_their_own_midpoint`), [box_in.wgsl](../examples/effects/slideshow/box-in/shaders/box_in.wgsl).
+- **Vì sao**: rẻ để thêm, chặn hồi quy chiều chạy.
+- **Ngày ghi**: 2026-10-16
+
 ### [Thấp] Báo lỗi host_image_copy cho FFmpeg/Intel; gỡ phần né khi đã sửa
 - **Vấn đề**: FFmpeg 9 bật `VK_EXT_host_image_copy`; driver Intel Windows (101.7082) cấp phát hỏng ảnh optimal một plane (`VK_ERROR_OUT_OF_HOST_MEMORY`) và copy sai chroma của ảnh multi-planar. Đã báo FFmpeg: https://code.ffmpeg.org/FFmpeg/FFmpeg/issues/25063; đã báo Intel: https://github.com/IGCIT/Intel-GPU-Community-Issue-Tracker-IGCIT/issues/1587. gpufx đang né: bỏ cờ `VK_IMAGE_USAGE_HOST_TRANSFER_BIT_EXT` khỏi frames context của mình (dựa vào cách `hwcontext_vulkan.c` của FFmpeg 9.0 đọc `usage`: kiểm lại mỗi khi nâng FFmpeg; frame của filter Vulkan khác như `scale_vulkan` cũng bị từ chối dù có thể đúng) và từ chối frame `hwupload` trên driver đó; `test-bundle.sh` đổi sang `gpufx_upload` khi gặp driver này.
 - **Vị trí**: [ffmpeg/vf_gpufx_vk.h](../ffmpeg/vf_gpufx_vk.h) (`gpufx_hwframe_ctx_init`, `gpufx_vk_host_copy_broken`), [ffmpeg/vf_gpufx.c](../ffmpeg/vf_gpufx.c) (kiểm input Vulkan trong `config_vulkan`), [scripts/test-bundle.sh](../scripts/test-bundle.sh) (`INTEL_HIC`), [docs/INTEL_VULKAN-vi.md](INTEL_VULKAN-vi.md).
