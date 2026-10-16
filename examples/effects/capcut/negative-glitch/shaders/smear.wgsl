@@ -53,8 +53,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
     let t = clamp(params.progress, 0.0, 1.0) * SPAN;
     let short_side = min(globals.size.x, globals.size.y);
     let frame = globals.size / short_side; // frame size in short-side units
-    // With `animate` off the shake clock stays at 0, as in CapCut's export.
-    let clock = select(0.0, params.progress * params.duration, params.animate != 0u);
+    let clock = params.progress * params.duration;
     let scale = zoom_out(t);
     let origin = vec2f(0.0, -wobble(clock, speed_gain(t)) / DESIGN) * scale / frame;
     let dx = vec2f(STEP / frame.x, 0.0);

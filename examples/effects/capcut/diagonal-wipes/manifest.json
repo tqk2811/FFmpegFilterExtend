@@ -31,12 +31,6 @@
       "min": 0.01,
       "max": 10,
       "description": "Real transition length in seconds; sets the speed of the shake"
-    },
-    {
-      "name": "animate",
-      "type": "bool",
-      "default": true,
-      "description": "true (default) = the shake wobbles in real time over `duration`. false = like CapCut's export: the frame sits at one fixed shaken offset while only the shake amplitude and the zoom change"
     }
   ],
   "passes": [

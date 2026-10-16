@@ -6,7 +6,7 @@ Recreated from the CapCut transition of the same name; CapCut's default length f
 
 ## Animate mode
 
-CapCut keeps the shake clock at 0 while it renders this transition, so in its export the picture sits at one fixed vertical offset (only the zoom changes). `animate=false` reproduces that. `animate=true` (the default) lets the shake move in real time over `duration`, which looks livelier.
+CapCut keeps the shake clock at 0 while it renders this transition, so in its export the picture sits at one fixed vertical offset (only the zoom changes). gpufx instead lets the shake move in real time over `duration`, which looks livelier.
 
 ## Inputs
 
@@ -25,7 +25,6 @@ Written inline after the package name: `negative-glitch.zip=name=value`. Several
 |------|------|---------|-------|-------------|
 | `progress` | float | `0.5` | 0 to 1 | 0 = first clip, 1 = second clip |
 | `duration` | float | `0.8` | 0.01 to 10 | Real transition length in seconds; must match the `progress` span. Sets the speed of the shake |
-| `animate` | bool | `true` | | `true` = the shake moves over `duration`; `false` = frozen at t = 0 like CapCut's export |
 
 ## Example
 

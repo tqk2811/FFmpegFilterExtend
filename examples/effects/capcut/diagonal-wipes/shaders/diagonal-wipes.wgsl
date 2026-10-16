@@ -162,8 +162,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
         zoom = key(t, 0.533333, 0.933333, 0.9, 1.0, vec4f(0.166667, 0.4, 0.38, 1.0));
     }
     let px = size * (1080.0 / min(size.x, size.y));
-    // With `animate` off the wobble clock stays at 0, as in CapCut's export.
-    let clock = select(0.0, t * params.duration, params.animate != 0u);
+    let clock = t * params.duration;
     let shift = wobble(clock) * amp * vec2f(1.0, -1.0) / px;
     var q = vec2f(0.5) + (uv - vec2f(0.5)) * zoom + shift * zoom;
     // Horizontal wrap-around, vertical mirror.
