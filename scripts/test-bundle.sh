@@ -262,7 +262,7 @@ fi
 # Software inputs (uploaded by gpufx) and Vulkan frames; runs only with a Vulkan device.
 vulkan_tests() {
 # Two input transitions driven by `progress`.
-TRANSITIONS="wipe-transition crossfade slide-transition circle-reveal clock-wipe collapse expand dip-to-color dissolve pixelize-transition zoom-transition fade-grays blinds checkerboard push-box push-film photo-collection"
+TRANSITIONS="wipe-transition crossfade slide-transition circle-reveal clock-wipe collapse expand dip-to-color dissolve pixelize-transition zoom-transition fade-grays blinds checkerboard push-box push-film photo-collection box-in sliding-bars spin-transition"
 echo "single input effects (audio stream kept, GPU frames into the null muxer):"
 for e in "$FX"/*.zip; do
     case " $TRANSITIONS overlay fit " in *" $(basename "$e" .zip) "*) continue ;; esac
