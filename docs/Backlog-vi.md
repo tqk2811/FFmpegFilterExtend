@@ -1,5 +1,14 @@
 # Việc còn treo
 
+### [Thấp] Hiệu ứng CapCut đợt 4: các finding review để sau
+- **Vấn đề**:
+  - heat-flash lấy mẫu glow trên lưới cố định 240 texel nhưng đọc thẳng texture `bright` full-res, nên ở 1080p/4K các tap cách nhau 9–18 px, highlight nhỏ có thể nhấp nháy.
+  - screen-switch vẫn phóng `LAYER_ZOOM` (~0.6%) cho clip sau từ progress 0.967 tới 1, nên khung cuối có thể nhảy nhẹ.
+  - collage-shift (strip-top/strip-bottom) và screen-switch (card-first/card-second) vẫn chạy blur ở những khoảng thời gian pass cuối không đọc kết quả.
+- **Vị trí**: [glow-h.wgsl](../examples/effects/capcut/heat-flash/shaders/glow-h.wgsl), [glow-v.wgsl](../examples/effects/capcut/heat-flash/shaders/glow-v.wgsl), [screen-switch.wgsl](../examples/effects/capcut/screen-switch/shaders/screen-switch.wgsl), [compose.wgsl](../examples/effects/capcut/collage-shift/shaders/compose.wgsl).
+- **Vì sao**: sửa thì đẹp hơn ở độ phân giải cao và đỡ tốn GPU. Mỗi chỗ sửa phải chấm lại bằng `scripts/capcut-compare.py` để không tụt điểm so với demo.
+- **Ngày ghi**: 2026-10-16
+
 ### [Thấp] Lỗi `out_format` trên D3D liệt kê `rgba` dù FFmpeg không làm được frame đó
 - **Vấn đề**: `out_format=rgba` trên D3D12/D3D11 hỏng với `Unsupported pixel format: rgba` từ FFmpeg, nhưng thông báo của gpufx vẫn liệt kê `nv12, p010le, rgba, rgba64le` là ghi được. Bộ frame D3D12 của FFmpeg chỉ có `nv12`/`p010` ([hwcontext_d3d12va.c:71](../external/FFmpeg/libavutil/hwcontext_d3d12va.c#L71)); D3D11 có `bgra` chứ không có `rgba`.
 - **Vị trí**: `sw_format_list` ở [vf_gpufx.c:1166](../ffmpeg/vf_gpufx.c#L1166), dùng ở các thông báo dòng 1216, 1356, 1361.
