@@ -18,7 +18,7 @@ while [ $# -gt 0 ]; do
         *) break ;;
     esac
 done
-[ $# -gt 0 ] || set -- "$ROOT"/examples/effects/*/
+[ $# -gt 0 ] || set -- "$ROOT"/examples/effects/*/*/
 
 cargo build --release --quiet --manifest-path "$ROOT/Cargo.toml" -p gpufx-cli
 GPUFX=$ROOT/target/release/gpufx

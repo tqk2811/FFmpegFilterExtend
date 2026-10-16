@@ -1471,7 +1471,7 @@ mod tests {
             eprintln!("skipping: no GPU adapter");
             return;
         }
-        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects");
+        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects/ffmpeg");
         let opens = || CONTEXT_OPENS.load(Ordering::Relaxed);
         let start = opens();
         // Kept alive so the next effect would find it in the cache.
@@ -1505,7 +1505,7 @@ mod tests {
     #[test]
     fn host_frames_before_use_fail_clearly() {
         let _serial = serial();
-        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects");
+        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects/ffmpeg");
         let fx = open(&examples.join("invert"));
         assert!(!fx.is_null(), "{:?}", unsafe { CStr::from_ptr(gpufx_last_error()) });
         unsafe {
@@ -1525,10 +1525,10 @@ mod tests {
             eprintln!("skipping: no GPU adapter");
             return;
         }
-        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects");
+        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects/ffmpeg");
         let invert = examples.join("invert");
         // The same package through another spelling of its path.
-        let invert_again = examples.join("../effects/./invert");
+        let invert_again = examples.join("../ffmpeg/./invert");
         let loads = || PROGRAM_LOADS.load(Ordering::Relaxed);
 
         let start = loads();
@@ -1567,7 +1567,7 @@ mod tests {
             eprintln!("skipping: no GPU adapter");
             return;
         }
-        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects");
+        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects/ffmpeg");
         let paths: Vec<CString> =
             ["invert", "vignette"].iter().map(|n| CString::new(examples.join(n).to_str().unwrap()).unwrap()).collect();
         let ptrs: Vec<*const c_char> = paths.iter().map(|p| p.as_ptr()).collect();
@@ -1604,7 +1604,7 @@ mod tests {
             eprintln!("skipping: no GPU adapter");
             return;
         }
-        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects");
+        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects/ffmpeg");
         let fx = open(&examples.join("invert"));
         assert!(!fx.is_null());
         assert!(unsafe { gpufx_format_supported(c"p010le".as_ptr()) } == 1);
@@ -1664,7 +1664,7 @@ mod tests {
             eprintln!("skipping: no GPU adapter");
             return;
         }
-        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects");
+        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects/ffmpeg");
         let invert = examples.join("invert");
         let text = CString::new(format!("[0]split[a][keep]; [a]{}[inv]", invert.display())).unwrap();
         let fx = unsafe { gpufx_effect_open_graph(text.as_ptr(), ptr::null()) };
@@ -1727,7 +1727,7 @@ mod tests {
             eprintln!("skipping: no GPU adapter");
             return;
         }
-        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects");
+        let examples = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects/ffmpeg");
         let path = |n: &str| examples.join(n).to_str().unwrap().to_string();
         let text = CString::new(format!("{}|{}=strength=0:radius=t/2:enable=gt(t,1)", path("invert"), path("vignette"))).unwrap();
         let fx = unsafe { gpufx_effect_open_effects(text.as_ptr(), ptr::null()) };

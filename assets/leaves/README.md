@@ -2,7 +2,7 @@
 
 Source images of the falling-maple and falling-ginkgo example effects.
 `scripts/make-leaf-atlas.py` turns them into the 2x2 atlases in
-`examples/effects/falling-*/textures/leaves.png` (recoloured, shaded, resized).
+`examples/effects/standalone/falling-*/textures/leaves.png` (recoloured, shaded, resized).
 
 | File | Source | Author | License |
 |------|--------|--------|---------|

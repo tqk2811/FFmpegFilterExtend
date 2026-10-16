@@ -62,7 +62,7 @@
 
 ### Hiệu ứng thu nhỏ ảnh chưa dùng mipmap của input
 - **Vấn đề**: engine đã có `"mipmaps": true` cho input (api 2, chuỗi mip sinh trên GPU mỗi frame), nhưng `fit`, `push-box`, `photo-collection` vẫn lấy mẫu ở mức 0, nên ảnh lớn hơn khung nhiều (ảnh 4000 px trong `fit`, hộp nhỏ của `push-box`) vẫn răng cưa/nhấp nháy. Nền mờ của `fit` dùng 64 tap bilinear rải đều trên bán kính, bán kính lớn (trên khoảng 64 px) có thể lộ bóng lặp; đọc từ mức mip phù hợp sẽ hết.
-- **Vị trí**: `examples/effects/{fit,push-box,photo-collection}`, [crates/gpufx-core/src/mips.rs](../crates/gpufx-core/src/mips.rs).
+- **Vị trí**: `examples/effects/slideshow/{fit,push-box,photo-collection}`, [crates/gpufx-core/src/mips.rs](../crates/gpufx-core/src/mips.rs).
 - **Vì sao**: giữ output của các hiệu ứng cũ giống từng byte khi thêm tính năng; chuyển sang api 2 và tự tính `lod` theo tỉ lệ thu nhỏ là thay đổi output, cần làm và kiểm riêng. Mip của input tốn thêm khoảng 1/3 VRAM của texture đó và một pass mỗi mức mỗi frame.
 - **Ngày ghi**: 2026-10-13
 
@@ -73,7 +73,7 @@
   - Chưa có thư viện `#include` dùng chung (`gpufx_hash`...): hai gói lá chép cùng `leaves.wgsl` (có test giữ hai bản giống nhau).
   - Trường `colorspace` (`srgb`/`linear`) cho texture chưa có; khi pipeline chuyển sang linear thì phải linear hoá trước `premultiply` (hàm `premultiply` trong `texture.rs` là chỗ duy nhất đổi màu).
   - Mip của texture gói sinh trên CPU khi nạp (resize Triangle từ mức trên): ảnh lớn nhiều layer làm nạp gói chậm hơn; có thể chuyển sang GPU như mip của input.
-- **Vị trí**: [crates/gpufx-core/src/texture.rs](../crates/gpufx-core/src/texture.rs), `examples/effects/falling-*`.
+- **Vị trí**: [crates/gpufx-core/src/texture.rs](../crates/gpufx-core/src/texture.rs), `examples/effects/standalone/falling-*`.
 - **Vì sao**: ngoài phạm vi kế hoạch sprite (đã xong: texture mảng, mipmap, premultiply, quỹ đạo `expr`).
 - **Ngày ghi**: 2026-10-13
 

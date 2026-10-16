@@ -41,6 +41,24 @@ fn examples() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects")
 }
 
+/// Every example effect directory (inside the ffmpeg, slideshow and standalone groups), sorted.
+fn example_dirs() -> Vec<PathBuf> {
+    let mut all = Vec::new();
+    for group in std::fs::read_dir(examples()).unwrap() {
+        let group = group.unwrap().path();
+        if group.is_dir() {
+            all.extend(std::fs::read_dir(group).unwrap().map(|e| e.unwrap().path()).filter(|p| p.join("manifest.json").exists()));
+        }
+    }
+    all.sort();
+    all
+}
+
+/// The directory of the example effect `name`, whichever group folder it is in.
+fn example(name: &str) -> PathBuf {
+    example_dirs().into_iter().find(|d| d.file_name().is_some_and(|n| n == name)).unwrap_or_else(|| panic!("no example effect {name}"))
+}
+
 fn kr_kb(m: Matrix) -> (f64, f64) {
     match m {
         Matrix::Bt601 => (0.299, 0.114),
@@ -418,7 +436,7 @@ fn premultiplied_frames_reach_effects_straight() {
 #[test]
 fn convert_bypasses_the_effects() {
     let Some(ctx) = gpu() else { return };
-    let invert = Effect::new(ctx.clone(), Package::open(examples().join("invert")).unwrap()).unwrap();
+    let invert = Effect::new(ctx.clone(), Package::open(example("invert")).unwrap()).unwrap();
     let mut chain = EffectChain::new(vec![("invert".into(), invert)]).unwrap();
     let color = ColorInfo { matrix: Matrix::Bt709, ..Default::default() };
     let src = flat(PixelFormat::Nv12, 235, 128, 128);
@@ -452,7 +470,7 @@ fn toggling_the_effects_reuses_every_resource() {
         return;
     }
     let Ok(ctx) = GpuContext::new(common::backend()) else { return };
-    let crossfade = Effect::new(ctx.clone(), Package::open(examples().join("crossfade")).unwrap()).unwrap();
+    let crossfade = Effect::new(ctx.clone(), Package::open(example("crossfade")).unwrap()).unwrap();
     let mut chain = EffectChain::new(vec![("crossfade".into(), crossfade), ("b".into(), identity(&ctx, "toggle"))]).unwrap();
     let color = ColorInfo { matrix: Matrix::Bt709, ..Default::default() };
     let first = flat(PixelFormat::P010, 250, 409, 960);

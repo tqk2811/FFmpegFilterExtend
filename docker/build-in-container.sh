@@ -103,7 +103,7 @@ else
     patchelf --set-rpath '$ORIGIN' "$OUT/bin/ffmpeg" "$OUT/bin/ffprobe"
 fi
 cp -r "$PREFIX/include" "$OUT/"
-for dir in "$SRC"/examples/effects/*/; do
+for dir in "$SRC"/examples/effects/*/*/; do
     name=$(basename "$dir")
     (cd "$dir" && zip -qr "$OUT/effects/$name.zip" .)
 done

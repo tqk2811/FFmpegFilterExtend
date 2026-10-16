@@ -14,6 +14,24 @@ fn examples() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects")
 }
 
+/// Every example effect directory (inside the ffmpeg, slideshow and standalone groups), sorted.
+fn example_dirs() -> Vec<PathBuf> {
+    let mut all = Vec::new();
+    for group in std::fs::read_dir(examples()).unwrap() {
+        let group = group.unwrap().path();
+        if group.is_dir() {
+            all.extend(std::fs::read_dir(group).unwrap().map(|e| e.unwrap().path()).filter(|p| p.join("manifest.json").exists()));
+        }
+    }
+    all.sort();
+    all
+}
+
+/// The directory of the example effect `name`, whichever group folder it is in.
+fn example(name: &str) -> PathBuf {
+    example_dirs().into_iter().find(|d| d.file_name().is_some_and(|n| n == name)).unwrap_or_else(|| panic!("no example effect {name}"))
+}
+
 /// One device for every test, as in effects.rs.
 fn gpu() -> Option<Arc<GpuContext>> {
     static CTX: std::sync::OnceLock<Option<Arc<GpuContext>>> = std::sync::OnceLock::new();
@@ -36,7 +54,7 @@ fn own_gpu() -> Option<Arc<GpuContext>> {
 }
 
 fn effect(ctx: &Arc<GpuContext>, name: &str) -> Effect {
-    Effect::new(ctx.clone(), Package::open(examples().join(name)).unwrap()).unwrap()
+    Effect::new(ctx.clone(), Package::open(example(name)).unwrap()).unwrap()
 }
 
 /// Opens `name.zip` of a graph description from the example directories.
@@ -375,7 +393,7 @@ impl TwoInputPackage {
     fn graph(&self, ctx: &Arc<GpuContext>, text: &str) -> EffectGraph {
         EffectGraph::parse(text, |path| {
             let name = path.trim_end_matches(".zip");
-            let dir = if name == "mix" { self.0.clone() } else { examples().join(name) };
+            let dir = if name == "mix" { self.0.clone() } else { example(name) };
             Ok((name.to_string(), Effect::new(ctx.clone(), Package::open(dir)?)?))
         })
         .unwrap()

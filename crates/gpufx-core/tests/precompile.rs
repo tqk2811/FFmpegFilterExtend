@@ -35,7 +35,13 @@ fn precompiled_shaders_are_used_only_when_trusted() {
         return;
     }
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects");
-    let mut dirs: Vec<_> = std::fs::read_dir(root).unwrap().map(|e| e.unwrap().path()).collect();
+    let mut dirs: Vec<_> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|g| g.unwrap().path())
+        .filter(|g| g.is_dir())
+        .flat_map(|g| std::fs::read_dir(g).unwrap())
+        .map(|e| e.unwrap().path())
+        .collect();
     dirs.sort();
     let out = std::env::temp_dir().join(format!("gpufx-precompile-test-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&out);

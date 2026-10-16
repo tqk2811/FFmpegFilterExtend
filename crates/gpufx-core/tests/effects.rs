@@ -11,6 +11,24 @@ fn examples() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects")
 }
 
+/// Every example effect directory (inside the ffmpeg, slideshow and standalone groups), sorted.
+fn example_dirs() -> Vec<PathBuf> {
+    let mut all = Vec::new();
+    for group in std::fs::read_dir(examples()).unwrap() {
+        let group = group.unwrap().path();
+        if group.is_dir() {
+            all.extend(std::fs::read_dir(group).unwrap().map(|e| e.unwrap().path()).filter(|p| p.join("manifest.json").exists()));
+        }
+    }
+    all.sort();
+    all
+}
+
+/// The directory of the example effect `name`, whichever group folder it is in.
+fn example(name: &str) -> PathBuf {
+    example_dirs().into_iter().find(|d| d.file_name().is_some_and(|n| n == name)).unwrap_or_else(|| panic!("no example effect {name}"))
+}
+
 /// One device for every test, as in FFmpeg where all gpufx filters share one. Each test
 /// making its own D3D12 device on WARP, from parallel threads, is the suspect for the
 /// access violations of the test process on the Windows runner.
@@ -44,8 +62,7 @@ fn every_example_compiles_and_runs() {
     let Some(ctx) = gpu() else { return };
     let (w, h) = (67, 41); // not a multiple of the workgroup size on purpose
     let src = gradient(w, h);
-    for entry in std::fs::read_dir(examples()).unwrap() {
-        let dir = entry.unwrap().path();
+    for dir in example_dirs() {
         let mut fx = Effect::new(ctx.clone(), Package::open(&dir).unwrap()).unwrap_or_else(|e| panic!("{}: {e}", dir.display()));
         let inputs = vec![Image { data: &src, width: w, height: h, stride: w * 4 }; fx.input_count()];
         let mut out = vec![0u8; (w * h * 4) as usize];
@@ -62,8 +79,7 @@ fn transitions_start_on_the_first_clip_and_end_on_the_second() {
     let second: Vec<u8> = first.chunks(4).flat_map(|p| [255 - p[0], p[2], 255 - p[1], 255]).collect();
     let inputs = [Image { data: &first, width: w, height: h, stride: w * 4 }, Image { data: &second, width: w, height: h, stride: w * 4 }];
     let mut checked = 0;
-    for entry in std::fs::read_dir(examples()).unwrap() {
-        let dir = entry.unwrap().path();
+    for dir in example_dirs() {
         let mut fx = Effect::new(ctx.clone(), Package::open(&dir).unwrap()).unwrap();
         // Transitions: two inputs and a `progress` parameter. photo-collection ends with
         // the second clip lying on the first, so it only starts on the first.
@@ -175,7 +191,7 @@ fn transition_modes_have_clean_endpoints_and_their_own_midpoint() {
 #[test]
 fn zero_strength_vignette_is_identity() {
     let Some(ctx) = gpu() else { return };
-    let mut fx = Effect::new(ctx, Package::open(examples().join("vignette")).unwrap()).unwrap();
+    let mut fx = Effect::new(ctx, Package::open(example("vignette")).unwrap()).unwrap();
     fx.params_mut().set_str("strength", "0").unwrap();
     let (w, h) = (32, 16);
     let src = gradient(w, h);
@@ -225,7 +241,7 @@ fn falling_leaves_depend_only_on_time() {
             fx.process(&inputs, target(&mut out, w, h, w * 4), &FrameInfo::new(t, frame)).unwrap();
             out
         };
-        let open = || Effect::new(ctx.clone(), Package::open(examples().join(name)).unwrap()).unwrap();
+        let open = || Effect::new(ctx.clone(), Package::open(example(name)).unwrap()).unwrap();
         let mut played = open();
         let mut frames = Vec::new();
         for k in 0..=12u64 {
@@ -314,12 +330,12 @@ fn open_mode4(open: &dyn Fn() -> Effect) -> Effect {
 
 #[test]
 fn falling_leaves_packages_share_one_shader() {
-    let read = |name: &str| std::fs::read(examples().join(name).join("shaders/leaves.wgsl")).unwrap();
+    let read = |name: &str| std::fs::read(example(name).join("shaders/leaves.wgsl")).unwrap();
     assert!(read("falling-maple") == read("falling-ginkgo"), "keep the two copies of leaves.wgsl identical");
 }
 
 fn open(ctx: &std::sync::Arc<GpuContext>, name: &str) -> (String, Effect) {
-    (name.to_string(), Effect::new(ctx.clone(), Package::open(examples().join(name)).unwrap()).unwrap())
+    (name.to_string(), Effect::new(ctx.clone(), Package::open(example(name)).unwrap()).unwrap())
 }
 
 /// A package in a temporary directory with one pass `shader`; removed on drop.
@@ -558,13 +574,8 @@ fn pooled_pass_outputs_do_not_clobber_each_other() {
 #[test]
 fn every_example_opens_on_the_noop_device() {
     let ctx = GpuContext::noop().expect("the noop backend is built in");
-    let dir = examples();
     let mut opened = 0;
-    for entry in std::fs::read_dir(&dir).unwrap() {
-        let path = entry.unwrap().path();
-        if !path.join("manifest.json").exists() {
-            continue;
-        }
+    for path in example_dirs() {
         let package = Package::open(&path).unwrap();
         if let Err(e) = Effect::new(ctx.clone(), package) {
             panic!("{}: {e}", path.display());
@@ -591,7 +602,7 @@ fn pack_skips_compiled_folder_and_its_own_output() {
             }
         }
     }
-    copy(&examples().join("invert"), &dir);
+    copy(&example("invert"), &dir);
     // Stale blobs in a top-level `Compiled` folder (any case) never ship...
     std::fs::create_dir_all(dir.join("Compiled/dx12")).unwrap();
     std::fs::write(dir.join("Compiled/dx12/stale.dxil"), b"stale").unwrap();

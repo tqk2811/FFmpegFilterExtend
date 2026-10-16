@@ -10,7 +10,13 @@ use gpufx_core::{Effect, FrameInfo, GpuContext, Image, ImageMut, Package};
 
 fn example() -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects");
-    let mut all: Vec<_> = std::fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
+    let mut all: Vec<_> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|g| g.unwrap().path())
+        .filter(|g| g.is_dir())
+        .flat_map(|g| std::fs::read_dir(g).unwrap())
+        .map(|e| e.unwrap().path())
+        .collect();
     all.sort();
     all.into_iter().next().unwrap()
 }
@@ -146,7 +152,13 @@ fn run_all_d3d12(dir: Option<&Path>) -> Option<(Vec<Vec<u8>>, Option<gpufx_core:
     let start = std::time::Instant::now();
     let ctx = GpuContext::with_shader_cache(gpufx_core::Backend::Dx12, dir).map_err(|e| eprintln!("skipping: {e}")).ok()?;
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects");
-    let mut all: Vec<_> = std::fs::read_dir(root).unwrap().map(|e| e.unwrap().path()).collect();
+    let mut all: Vec<_> = std::fs::read_dir(root)
+        .unwrap()
+        .map(|g| g.unwrap().path())
+        .filter(|g| g.is_dir())
+        .flat_map(|g| std::fs::read_dir(g).unwrap())
+        .map(|e| e.unwrap().path())
+        .collect();
     all.sort();
     let effects: Vec<Effect> = all.into_iter().map(|p| Effect::new(ctx.clone(), Package::open(p).unwrap()).unwrap()).collect();
     let opened = start.elapsed();

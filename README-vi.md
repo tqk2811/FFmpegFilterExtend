@@ -115,7 +115,7 @@ Cần Rust (stable) và một driver GPU (Linux không có GPU có thể dùng `
 ```sh
 cargo build --release
 cargo test --release                       # chạy các hiệu ứng mẫu trên GPU hiện có
-./target/release/gpufx run 'examples/effects/vignette=strength=0.9' -i in.png -o out.png
+./target/release/gpufx run 'examples/effects/ffmpeg/vignette=strength=0.9' -i in.png -o out.png
 scripts/pack-effects.sh                    # chỉ đóng gói hiệu ứng: examples/effects -> dist/effects/*.zip
 ```
 
@@ -240,7 +240,7 @@ make -j"$(nproc)"
 | `ffmpeg/` | Filter `vf_gpufx.c` và script tích hợp |
 | `external/FFmpeg` | Submodule mã nguồn FFmpeg |
 | `docker/`, `build.sh`, `build.ps1` | Build FFmpeg + gpufx một lệnh trong Docker |
-| `examples/effects/` | 36 hiệu ứng mẫu |
+| `examples/effects/` | 38 hiệu ứng mẫu, chia nhóm `ffmpeg/`, `slideshow/`, `standalone/` |
 | `scripts/` | `build-prebuilt.sh` (build nhanh trên FFmpeg build sẵn), `test-bundle.sh`, `install-libgpufx.sh`, `pack-effects.sh`/`.ps1` (đóng gói zip) |
 
 ## Giấy phép

@@ -13,6 +13,24 @@ fn examples() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/effects")
 }
 
+/// Every example effect directory (inside the ffmpeg, slideshow and standalone groups), sorted.
+fn example_dirs() -> Vec<PathBuf> {
+    let mut all = Vec::new();
+    for group in std::fs::read_dir(examples()).unwrap() {
+        let group = group.unwrap().path();
+        if group.is_dir() {
+            all.extend(std::fs::read_dir(group).unwrap().map(|e| e.unwrap().path()).filter(|p| p.join("manifest.json").exists()));
+        }
+    }
+    all.sort();
+    all
+}
+
+/// The directory of the example effect `name`, whichever group folder it is in.
+fn example(name: &str) -> PathBuf {
+    example_dirs().into_iter().find(|d| d.file_name().is_some_and(|n| n == name)).unwrap_or_else(|| panic!("no example effect {name}"))
+}
+
 /// A device of its own, so the pool statistics see only this test's graphs.
 fn own_gpu() -> Option<Arc<GpuContext>> {
     match GpuContext::new(common::backend()) {
@@ -33,7 +51,7 @@ fn serial() -> std::sync::MutexGuard<'static, ()> {
 fn graph(ctx: &Arc<GpuContext>, text: &str) -> EffectGraph {
     EffectGraph::parse(text, |path| {
         let name = path.strip_suffix(".zip").unwrap_or(path);
-        Ok((name.to_string(), Effect::new(ctx.clone(), Package::open(examples().join(name))?)?))
+        Ok((name.to_string(), Effect::new(ctx.clone(), Package::open(example(name))?)?))
     })
     .unwrap()
 }

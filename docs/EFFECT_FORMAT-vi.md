@@ -321,30 +321,32 @@ let x = gpufx_expr_path_x(u, p, x0);   // tham số theo thứ tự `vars`, đ�
 
 ## Ví dụ có sẵn
 
+Các ví dụ nằm trong ba thư mục nhóm dưới `examples/effects/`: `ffmpeg/` (tương đương filter dựng sẵn và chuyển cảnh `xfade` của FFmpeg), `slideshow/` (viết lại từ [tanersener/ffmpeg-video-slideshow-scripts](https://github.com/tanersener/ffmpeg-video-slideshow-scripts)) và `standalone/` (hiệu ứng tự viết). Xem [examples/effects/README.md](../examples/effects/README.md). Nhóm chỉ là thư mục: gói vẫn được gọi bằng tên riêng của nó.
+
 | Gói | Minh hoạ |
 |-----|----------|
-| `examples/effects/vignette` | Tham số `float` + `color` |
-| `examples/effects/gaussian-blur` | 2 pass qua texture trung gian `tmp` |
-| `examples/effects/wipe-transition` | 2 input (`first`, `second`), tham số `progress` |
-| `examples/effects/gradient-map` | Texture PNG đi kèm làm LUT |
-| `examples/effects/rgb-split` | GLSL, dùng `globals.frame` làm nhiễu động |
-| `examples/effects/color-adjust` | Độ sáng, tương phản, bão hoà, gamma, hue, nhiệt độ màu |
-| `examples/effects/grayscale`, `sepia`, `invert` | Lọc màu cơ bản, tham số `amount` |
-| `examples/effects/sharpen` | Unsharp mask 3×3 bằng `textureLoad` |
-| `examples/effects/edge-detect` | Sobel |
-| `examples/effects/pixelate` | Khảm theo khối |
-| `examples/effects/mirror` | Lật ngang/dọc, tham số `int` |
-| `examples/effects/transform` | Zoom, xoay, pan (Ken Burns), tham số `vec2` |
-| `examples/effects/fade` | Fade về một màu |
-| `examples/effects/chroma-key` | Phông xanh → alpha; **quy tắc** `formats` input, output `rgba`/`yuva420p`/`yuva444p` |
-| `examples/effects/overlay` | Picture-in-picture 2 input, có viền |
-| `examples/effects/crossfade`, `slide-transition`, `circle-reveal` | Chuyển cảnh 2 input; **quy tắc** `same_size` |
-| `examples/effects/clock-wipe` | Chuyển cảnh kim đồng hồ, tham số `bool` `reverse` |
-| `examples/effects/collapse`, `expand` | Clip đầu thu vào giữa / clip sau nở ra từ giữa: theo chiều ngang, chiều dọc, hộp, hình tròn (`mode`) |
-| `examples/effects/dip-to-color` | Tối dần về một màu (mặc định đen) rồi hiện clip sau |
-| `examples/effects/dissolve` | Hạt ngẫu nhiên (hash số nguyên, giống nhau trên mọi GPU) |
-| `examples/effects/pixelize-transition`, `zoom-transition`, `fade-grays`, `blinds` | Chuyển cảnh kiểu `xfade`: vỡ điểm ảnh, zoom, qua ảnh xám, rèm |
-| `examples/effects/checkerboard`, `push-box`, `push-film`, `photo-collection` | Chuyển cảnh slideshow theo [tanersener/ffmpeg-video-slideshow-scripts](https://github.com/tanersener/ffmpeg-video-slideshow-scripts) (viết lại bằng shader): ô vuông lớn dần, hộp thu nhỏ - đẩy - phóng to, cuộn phim có lỗ vẽ bằng shader, ảnh bay vào vừa xoay vừa đáp nghiêng lên clip đầu (nối chuỗi để xếp chồng ảnh) |
-| `examples/effects/sliding-bars`, `spin-transition` | Cũng theo các script đó: các thanh của clip sau lần lượt trượt vào (`stagger`), clip đầu xoay thu nhỏ rồi clip sau xoay phóng to có motion blur (vòng lặp nhiều mẫu theo góc). `slide-transition` có thêm `mode` đẩy / phủ / lộ / box-in (nền `color`), `blinds` có `origin` mở từ giữa thanh |
-| `examples/effects/fit` | Các chế độ khung hình của các script đó (giữa, cắt, kéo giãn, nền mờ) cho ảnh kích thước bất kỳ: input đầu chỉ cho kích thước khung; **hai pass**, box blur tách trục với số tap bilinear cố định |
-| `examples/effects/falling-maple`, `falling-ginkgo` | Lá phong đỏ / lá rẻ quạt vàng rơi: (api 2): atlas 2×2 cắt thành **texture mảng** (`grid`) có **mipmap** và **alpha premultiplied**, mức mip tính cho từng lá, hạt không trạng thái (chỉ phụ thuộc `t`, seek đúng), `var<workgroup>` + `workgroupBarrier`, 4 kiểu chuyển động (`mode`) và quỹ đạo tùy chỉnh (`mode=4`, **tham số `expr`** `path_x`, `path_y`, `angle`). Ảnh gốc và giấy phép ở `assets/leaves/` |
+| `examples/effects/ffmpeg/vignette` | Tham số `float` + `color` |
+| `examples/effects/ffmpeg/gaussian-blur` | 2 pass qua texture trung gian `tmp` |
+| `examples/effects/ffmpeg/wipe-transition` | 2 input (`first`, `second`), tham số `progress` |
+| `examples/effects/standalone/gradient-map` | Texture PNG đi kèm làm LUT |
+| `examples/effects/standalone/rgb-split` | GLSL, dùng `globals.frame` làm nhiễu động |
+| `examples/effects/ffmpeg/color-adjust` | Độ sáng, tương phản, bão hoà, gamma, hue, nhiệt độ màu |
+| `examples/effects/ffmpeg/grayscale`, `examples/effects/ffmpeg/sepia`, `examples/effects/ffmpeg/invert` | Lọc màu cơ bản, tham số `amount` |
+| `examples/effects/ffmpeg/sharpen` | Unsharp mask 3×3 bằng `textureLoad` |
+| `examples/effects/ffmpeg/edge-detect` | Sobel |
+| `examples/effects/ffmpeg/pixelate` | Khảm theo khối |
+| `examples/effects/ffmpeg/mirror` | Lật ngang/dọc, tham số `int` |
+| `examples/effects/ffmpeg/transform` | Zoom, xoay, pan (Ken Burns), tham số `vec2` |
+| `examples/effects/ffmpeg/fade` | Fade về một màu |
+| `examples/effects/ffmpeg/chroma-key` | Phông xanh → alpha; **quy tắc** `formats` input, output `rgba`/`yuva420p`/`yuva444p` |
+| `examples/effects/ffmpeg/overlay` | Picture-in-picture 2 input, có viền |
+| `examples/effects/ffmpeg/crossfade`, `examples/effects/ffmpeg/slide-transition`, `examples/effects/ffmpeg/circle-reveal` | Chuyển cảnh 2 input; **quy tắc** `same_size` |
+| `examples/effects/ffmpeg/clock-wipe` | Chuyển cảnh kim đồng hồ, tham số `bool` `reverse` |
+| `examples/effects/slideshow/collapse`, `examples/effects/slideshow/expand` | Clip đầu thu vào giữa / clip sau nở ra từ giữa: theo chiều ngang, chiều dọc, hộp, hình tròn (`mode`) |
+| `examples/effects/ffmpeg/dip-to-color` | Tối dần về một màu (mặc định đen) rồi hiện clip sau |
+| `examples/effects/ffmpeg/dissolve` | Hạt ngẫu nhiên (hash số nguyên, giống nhau trên mọi GPU) |
+| `examples/effects/ffmpeg/pixelize-transition`, `examples/effects/ffmpeg/zoom-transition`, `examples/effects/ffmpeg/fade-grays`, `examples/effects/slideshow/blinds` | Chuyển cảnh kiểu `xfade`: vỡ điểm ảnh, zoom, qua ảnh xám, rèm |
+| `examples/effects/slideshow/checkerboard`, `examples/effects/slideshow/push-box`, `examples/effects/slideshow/push-film`, `examples/effects/slideshow/photo-collection` | Chuyển cảnh slideshow theo [tanersener/ffmpeg-video-slideshow-scripts](https://github.com/tanersener/ffmpeg-video-slideshow-scripts) (viết lại bằng shader): ô vuông lớn dần, hộp thu nhỏ - đẩy - phóng to, cuộn phim có lỗ vẽ bằng shader, ảnh bay vào vừa xoay vừa đáp nghiêng lên clip đầu (nối chuỗi để xếp chồng ảnh) |
+| `examples/effects/slideshow/sliding-bars`, `examples/effects/slideshow/spin-transition` | Cũng theo các script đó: các thanh của clip sau lần lượt trượt vào (`stagger`), clip đầu xoay thu nhỏ rồi clip sau xoay phóng to có motion blur (vòng lặp nhiều mẫu theo góc). `slide-transition` có thêm `mode` đẩy / phủ / lộ / box-in (nền `color`), `blinds` có `origin` mở từ giữa thanh |
+| `examples/effects/slideshow/fit` | Các chế độ khung hình của các script đó (giữa, cắt, kéo giãn, nền mờ) cho ảnh kích thước bất kỳ: input đầu chỉ cho kích thước khung; **hai pass**, box blur tách trục với số tap bilinear cố định |
+| `examples/effects/standalone/falling-maple`, `examples/effects/standalone/falling-ginkgo` | Lá phong đỏ / lá rẻ quạt vàng rơi: (api 2): atlas 2×2 cắt thành **texture mảng** (`grid`) có **mipmap** và **alpha premultiplied**, mức mip tính cho từng lá, hạt không trạng thái (chỉ phụ thuộc `t`, seek đúng), `var<workgroup>` + `workgroupBarrier`, 4 kiểu chuyển động (`mode`) và quỹ đạo tùy chỉnh (`mode=4`, **tham số `expr`** `path_x`, `path_y`, `angle`). Ảnh gốc và giấy phép ở `assets/leaves/` |

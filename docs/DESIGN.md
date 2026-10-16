@@ -698,7 +698,7 @@ crates/gpufx-cli    the `gpufx` command: info, check, pack, run (test effects wi
 ffmpeg/             vf_gpufx.c and integrate.sh (adds the filter to the FFmpeg source tree)
 external/FFmpeg     FFmpeg submodule, pinned to n9.0-2-g03d9533176 (release/9.0) = the prebuilt's commit
 docker/, build.sh   build FFmpeg + gpufx with one command in Docker (linux64, win64)
-examples/effects    36 effects: color adjustment, blur, sharpen, chroma key, overlay, transitions...
+examples/effects    38 effects (groups ffmpeg, slideshow, standalone): color adjustment, blur, sharpen, chroma key, overlay, transitions...
 scripts/            build-prebuilt.sh (builds only libavfilter, swaps it into the prebuilt FFmpeg),
                     test-bundle.sh (runs the effects through the package's ffmpeg),
                     install-libgpufx.sh (builds + installs the .pc for pkg-config),
