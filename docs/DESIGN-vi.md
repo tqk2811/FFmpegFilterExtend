@@ -498,7 +498,7 @@ FFmpeg 9 bị lỗi; các frames context do gpufx tạo bỏ cờ usage host-tra
   `vkGetDeviceQueue2` không trả queue nào. Filter lấy lại queue với `queue_flags` của device (validation layer
   vẫn báo một lần cho lần gọi đầu của pool, VUID-06225).
 - Build: `integrate.sh` thêm `vf_gpufx_transfer.o vulkan.o` (bản `libavutil/vulkan.c` của libavfilter) và
-  `gpufx_upload/download_filter_deps="vulkan"`; `docker/keep-filters.txt` giữ cả hai.
+  `gpufx_upload/download_filter_deps="vulkan"`; `docker/keep-filters.txt` (`FFMPEG_FILTERS=keep`) giữ cả hai.
 - Test (`scripts/test-bundle.sh`): vòng nv12, yuv420p, rgba khớp từng bit, multiplane lẫn
   `disable_multiplane=1`, trộn với `hwupload` / `hwdownload`; `gpufx` ở giữa khớp đường phần mềm; `latency=4`
   vẫn ra đủ frame. Kiểm tay thêm: p010, validation layer (bản copy không sinh VUID nào; `hwupload`/`hwdownload`
@@ -520,6 +520,9 @@ ffmpeg -init_hw_device d3d11va=dx -filter_hw_device dx -i a.mp4 \
   sw_format: thực tế là `nv12` và `p010le` (d3d12va của FFmpeg chỉ làm hai format này, và của d3d11va gpufx chỉ
   đọc hai format này); libgpufx cũng nhận resource RGBA8/RGBA16 (`rgba`, `rgba64le`) từ chương trình khác. Format
   khác bị từ chối lúc configure (BGRA của d3d11va cần đảo kênh: backlog). Texture có hơn một mip level bị từ chối.
+- **Không có alpha.** Không sw_format nào trong số này có alpha, nên output có alpha của effect mất alpha ở
+  `hwdownload`, còn `out_format` có alpha thì lỗi lúc FFmpeg tạo frame. Package `alpha-extract` đưa alpha thành ảnh
+  xám `nv12` qua một output của graph; `alphamerge` ghép lại trên CPU.
 - **D3D12, một device.** wgpu-hal 30 không có `device_from_raw` cho DX12, nhưng device D3D12 là singleton theo
   adapter trong một process: libgpufx mở adapter DX12 của wgpu có LUID trùng với device
   (`ID3D12Device::GetAdapterLuid`) rồi kiểm tra wgpu nhận đúng `ID3D12Device` đó (so COM identity); nếu không
@@ -689,22 +692,25 @@ scripts/            build-prebuilt.sh (chỉ build libavfilter, thay vào FFmpeg
 
 **Cách nhanh (CI dùng cách này):** `scripts/build-prebuilt.sh [linux64|win64]` tải bản FFmpeg
 9.0 shared build sẵn (tqk2811/FFmpegBuild), build `libgpufx` và **chỉ `libavfilter`** từ
-submodule với `--disable-everything` + `docker/keep-filters.txt` + gpufx, rồi thay
+submodule với `--disable-everything` + mọi filter (`FFMPEG_FILTERS=all`, mặc định; `keep` giới hạn còn
+`docker/keep-filters.txt`) + gpufx, rồi thay
 `libavfilter.so.12` / `avfilter-12.dll` trong gói. Điều kiện để dùng chung ABI:
 
 - cùng commit FFmpeg với bản build sẵn (submodule ghim `03d9533176`, script kiểm tra);
 - cùng tên major (`libavfilter.so.12`, `avfilter-12.dll`); script dừng nếu bản build sẵn
   không có file trùng tên;
 - ffmpeg CLI chỉ dùng API công khai và tìm filter theo tên lúc chạy, nên bớt filter không
-  làm hỏng việc nạp thư viện. Danh sách giữ lại phải có các filter CLI tự chèn: `null`/`anull`,
+  làm hỏng việc nạp thư viện. Với `FFMPEG_FILTERS=keep`, danh sách giữ lại phải có các filter CLI tự chèn: `null`/`anull`,
   `format`/`aformat`, `scale`/`aresample`, `trim`/`atrim`, `apad`, `crop`, `hflip`, `vflip`,
   `transpose`, `rotate`.
 - Linux: RUNPATH của `libavfilter` là `$ORIGIN` (đặt bằng `patchelf`, vì configure của FFmpeg
   biến `$$` thành PID), và mọi file trong `bin/` được sửa RPATH thành `$ORIGIN/../lib`.
   Trước khi thay, script so bảng export (`nm -D`) của `libavfilter` mới với bản build sẵn: thiếu
   symbol nào thì dừng.
-- `libavfilter` rút gọn chỉ link `avutil`, `swscale`, `swresample`, nên không build
-  `avcodec`/`avformat`/`avdevice`. Có `nasm` thì bật SIMD.
+- `libavfilter` build lại (`--disable-autodetect`, mặc định LGPL) chỉ link `avutil`, `swscale`, `swresample`,
+  nên không build `avcodec`/`avformat`/`avdevice`. Filter cần chúng, thư viện ngoài (`drawtext`, `zscale`,
+  `subtitles`…) hoặc GPL (`boxblur`…) vẫn thiếu dù đã bật mọi filter (win64: 440 filter thay vì 62, dll
+  `avfilter` 1,2 MB -> 6 MB, build lâu thêm khoảng một phút). Có `nasm` thì bật SIMD.
 - win64: `avfilter-12.dll` dùng `msvcrt.dll` còn bản build sẵn dùng UCRT (xem
   [Backlog-vi.md](Backlog-vi.md)).
 - win64: `bin/` có `dxcompiler.dll` (DXC, tải từ NuGet bằng `scripts/fetch-dxc.sh`, kiểm
@@ -720,7 +726,8 @@ win64 trên runner `windows-latest`.
 `libgpufx` bằng Rust, chép submodule `external/FFmpeg` ra thư mục tạm (submodule giữ
 nguyên), chạy `integrate.sh`, rồi configure FFmpeg với:
 
-- `--disable-filters` rồi bật lại **mọi filter audio** cùng danh sách tối thiểu trong
+- Mặc định build mọi filter (`FFMPEG_FILTERS=all`). Với `FFMPEG_FILTERS=keep` thì dùng
+  `--disable-filters` rồi bật lại **mọi filter audio** cùng danh sách tối thiểu trong
   `docker/keep-filters.txt` (`null`, `format`, `scale`, `trim`, `crop`, `hflip`, `vflip`,
   `transpose`, `rotate`, `sendcmd`, `split`, `gpufx`). Các filter video còn giữ là hạ tầng
   mà ffmpeg CLI tự chèn (trim cho `-ss/-t`, xoay theo metadata) hoặc gpufx cần (đổi

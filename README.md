@@ -91,9 +91,10 @@ filters therefore uploads each frame once and reads it back once. Fastest first:
 2. separate filters between `gpufx_upload` and `gpufx_download`, `out_format=rgba` on all but the last;
 3. separate filters behind one upload (by the first `gpufx` or `hwupload`), then `hwdownload`.
 
-D3D12 and D3D11 frames are `nv12` or `p010le` only: `hwdownload` from them gives that format, and an output with
-alpha loses it there. Vulkan keeps alpha with `out_format=rgba`. On D3D, split the result and send one copy
-through [alpha-extract](examples/effects/ffmpeg/alpha-extract/README.md) to get the alpha as a gray picture, then
+**Limitation: no alpha with D3D12 and D3D11 frames.** FFmpeg makes D3D12 frames of `nv12` and `p010le` only
+(D3D11: no `rgba` either), so `hwdownload` gives one of those, an output with alpha loses it there, and
+`out_format=rgba`, `yuva420p` or `yuva444p` fails (`Unsupported pixel format: rgba`).
+Vulkan keeps alpha with `out_format=rgba`. On D3D, split the result and send one copy through [alpha-extract](examples/effects/ffmpeg/alpha-extract/README.md) to get the alpha as a gray picture, then
 join both on the CPU with `alphamerge`.
 
 Intel GPUs on Windows with FFmpeg 9: `hwupload` (and `hwdownload` of `hwupload` frames) fails to allocate or
@@ -160,7 +161,7 @@ skipped checks: add `-- --nocapture` to see them.
 
 Take the prebuilt FFmpeg 9.0 shared build from
 [tqk2811/FFmpegBuild](https://github.com/tqk2811/FFmpegBuild/releases), rebuild only
-`libavfilter` (gpufx + a trimmed filter list) and swap it into the package. `ffmpeg`, `ffprobe` and
+`libavfilter` (gpufx + every FFmpeg filter that builds without extra libraries) and swap it into the package. `ffmpeg`, `ffprobe` and
 the remaining libraries (`avcodec`, `avformat`...) stay as they are in the prebuilt. It takes a few minutes:
 
 ```sh
@@ -176,17 +177,20 @@ target `x86_64-pc-windows-gnu`). Change the prebuilt with the variables `FFBUILD
 `libavfilter` must be built from **exactly the same commit** as the prebuilt so the ABI matches the other
 libraries. The `external/FFmpeg` submodule is pinned to that commit (`n9.0-2-g03d9533176`, branch
 `release/9.0`); the script stops if the two differ. `ffmpeg` looks up filters by name at run time,
-so it does not care how many filters `libavfilter` contains. A command that uses a removed filter is the
+so it does not care how many filters `libavfilter` contains. A command that uses a missing filter is the
 only one that reports `No such filter`.
 
 Notes for this build:
-- Only the filters in [docker/keep-filters.txt](docker/keep-filters.txt) remain, plus `gpufx`: plumbing
-  (`scale`, `format`, `trim`, `split`, `sendcmd`...) and filters that normalise the inputs: timing, metadata, layout,
-  deinterlacing and colour space (`fps`, `setpts`, `setsar`, `setdar`, `settb`, `setrange`, `setparams`, `pad`, `concat`,
-  `select`, `loop`, `reverse`, `yadif`, `bwdif`, `colorspace`, `showinfo`) plus basic audio (`volume`, `amix`, `adelay`, `afade`, `atempo`...).
-  `hwupload`, `hwdownload` and `hwmap` stay for Vulkan, D3D12 and D3D11 frames. Visual filters (`drawtext`, `overlay`, `gblur`...)
-  and other hw filters (`scale_cuda`, `scale_vulkan`...) are gone. If you need another filter, add its name to that
-  file and rebuild.
+- Every FFmpeg filter is built by default (`FFMPEG_FILTERS=all`), plus `gpufx`: `overlay`, `xfade`, `alphaextract`,
+  `alphamerge`, `testsrc2`, `color`... (win64: 440 filters instead of 62, the `avfilter` dll grows from 1.2 MB to
+  6 MB, the build takes about one minute longer). The prebuilt build rebuilds only `libavfilter`, with
+  `--disable-autodetect`, without `avcodec`/`avformat`, and under LGPL by default, so some filters are still
+  missing: those that need `avcodec`/`avformat`, external libraries (`drawtext` with freetype, `zscale`,
+  `subtitles`...) or GPL (`boxblur`...). For a small build use `FFMPEG_FILTERS=keep`: only the list in
+  [docker/keep-filters.txt](docker/keep-filters.txt) remains, plus `gpufx` (plumbing such as `scale`, `format`,
+  `trim`, `split`, `sendcmd`; input normalisers such as `fps`, `setpts`, `pad`, `concat`, `yadif`, `colorspace`;
+  basic audio; `hwupload`, `hwdownload`, `hwmap`). To keep another filter there, add its name to that file and
+  rebuild.
 - Vulkan frames need Vulkan in the prebuilt `libavutil` (the FFmpegBuild releases have it) and the Khronos
   Vulkan-Headers, which the script clones (tag `v1.4.321`, or `VULKAN_HEADERS=<dir>`); without them the filter is
   built without Vulkan frames and says so.
@@ -222,10 +226,9 @@ effects/  the sample effects packaged as .zip
 include/  gpufx.h
 ```
 
-This build **disables all of FFmpeg's built-in video filters** (overlay, drawtext, gblur...).
-Video effects come from `gpufx` packages. Audio filters are kept, and a few minimal video filters that the
-ffmpeg CLI or gpufx need are kept too (`scale`, `format`, `trim`, `split`,
-`sendcmd`...). The list is in [docker/keep-filters.txt](docker/keep-filters.txt); edit that file
+This build enables **every FFmpeg filter** by default (`FFMPEG_FILTERS=all`), so `overlay`, `xfade`, `gblur`...
+are there next to the `gpufx` effects. `FFMPEG_FILTERS=keep` restores the short list in
+[docker/keep-filters.txt](docker/keep-filters.txt) plus every audio filter; edit that file
 to add or remove filters. Codecs use FFmpeg's built-in set; external libraries such as x264 are not included yet.
 
 Later builds are faster for the Rust part thanks to the Docker volumes `gpufx-work-<target>` and `gpufx-cargo-registry`; FFmpeg is rebuilt from scratch every time to keep it clean.

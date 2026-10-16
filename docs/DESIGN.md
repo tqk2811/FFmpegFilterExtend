@@ -512,7 +512,7 @@ image copies are broken; the frames contexts gpufx creates drop the host-transfe
   of the build, and `vkGetDeviceQueue2` then returns no queue. The filters fetch the queues again with the
   device's `queue_flags` (the validation layer still reports the pool's first call once, VUID-06225).
 - Build: `integrate.sh` adds `vf_gpufx_transfer.o vulkan.o` (libavfilter's copy of `libavutil/vulkan.c`)
-  and `gpufx_upload/download_filter_deps="vulkan"`; `docker/keep-filters.txt` keeps both.
+  and `gpufx_upload/download_filter_deps="vulkan"`; `docker/keep-filters.txt` (`FFMPEG_FILTERS=keep`) keeps both.
 - Tests (`scripts/test-bundle.sh`): nv12, yuv420p and rgba round trips are bit-exact, multiplane and
   `disable_multiplane=1`, mixed with `hwupload` / `hwdownload`; `gpufx` between them equals the software
   path; every frame comes out with `latency=4`. Also checked by hand: p010, the Vulkan validation layer
@@ -535,6 +535,9 @@ ffmpeg -init_hw_device d3d11va=dx -filter_hw_device dx -i a.mp4 \
   d3d11va that gpufx reads); libgpufx also takes RGBA8/RGBA16 resources (`rgba`, `rgba64le`) from other callers.
   Others are refused at configuration (d3d11va's BGRA would need a swizzle: backlog). Textures with more than
   one mip level are refused.
+- **No alpha.** None of these sw_formats has alpha, so an effect output with alpha loses it at `hwdownload`,
+  and an alpha `out_format` fails when FFmpeg makes the frames. The `alpha-extract` package carries the alpha as
+  a gray `nv12` picture through a graph output instead; `alphamerge` joins it back on the CPU.
 - **D3D12, one device.** wgpu-hal 30 has no `device_from_raw` for DX12, but D3D12 devices are singletons per
   adapter and process: libgpufx opens the wgpu DX12 adapter whose LUID is the device's
   (`ID3D12Device::GetAdapterLuid`) and checks that wgpu got the very same `ID3D12Device` (COM identity);
@@ -709,22 +712,26 @@ scripts/            build-prebuilt.sh (builds only libavfilter, swaps it into th
 
 **Fast way (what CI uses):** `scripts/build-prebuilt.sh [linux64|win64]` downloads the prebuilt FFmpeg
 9.0 shared build (tqk2811/FFmpegBuild), builds `libgpufx` and **only `libavfilter`** from the
-submodule with `--disable-everything` + `docker/keep-filters.txt` + gpufx, then swaps
+submodule with `--disable-everything` + every filter (`FFMPEG_FILTERS=all`, the default; `keep` limits it to
+`docker/keep-filters.txt`) + gpufx, then swaps
 `libavfilter.so.12` / `avfilter-12.dll` in the package. Conditions for sharing the same ABI:
 
 - the same FFmpeg commit as the prebuilt (the submodule pins `03d9533176`, and the script checks it);
 - the same major name (`libavfilter.so.12`, `avfilter-12.dll`); the script stops if the prebuilt
   has no file with that name;
 - the ffmpeg CLI uses only the public API and looks up filters by name at run time, so removing filters does not
-  break library loading. The list of kept filters must include the filters the CLI inserts itself: `null`/`anull`,
+  break library loading. With `FFMPEG_FILTERS=keep` the list must include the filters the CLI inserts itself: `null`/`anull`,
   `format`/`aformat`, `scale`/`aresample`, `trim`/`atrim`, `apad`, `crop`, `hflip`, `vflip`,
   `transpose`, `rotate`.
 - Linux: the RUNPATH of `libavfilter` is `$ORIGIN` (set with `patchelf`, because FFmpeg's configure
   turns `$$` into the PID), and every file in `bin/` gets its RPATH changed to `$ORIGIN/../lib`.
   Before swapping, the script compares the export table (`nm -D`) of the new `libavfilter` with the prebuilt's: if any
   symbol is missing, it stops.
-- The trimmed `libavfilter` links only `avutil`, `swscale`, `swresample`, so `avcodec`/`avformat`/`avdevice`
-  are not built. SIMD is enabled if `nasm` is available.
+- The rebuilt `libavfilter` (`--disable-autodetect`, LGPL by default) links only `avutil`, `swscale`,
+  `swresample`, so `avcodec`/`avformat`/`avdevice` are not built. Filters that need them, external libraries
+  (`drawtext`, `zscale`, `subtitles`...) or GPL (`boxblur`...) are still missing even with all filters on
+  (win64: 440 filters instead of 62, `avfilter` dll 1.2 MB -> 6 MB, about one minute more build time).
+  SIMD is enabled if `nasm` is available.
 - win64: `avfilter-12.dll` uses `msvcrt.dll` while the prebuilt uses UCRT (see
   [Backlog-vi.md](Backlog-vi.md) (Vietnamese)).
 - win64: `bin/` holds `dxcompiler.dll` (DXC, downloaded from NuGet by
@@ -740,7 +747,8 @@ win64 on a `windows-latest` runner.
 `libgpufx` with Rust, copies the `external/FFmpeg` submodule to a temporary directory (the submodule is left
 untouched), runs `integrate.sh`, then configures FFmpeg with:
 
-- `--disable-filters`, then re-enables **all audio filters** plus the minimal list in
+- By default every filter is built (`FFMPEG_FILTERS=all`). With `FFMPEG_FILTERS=keep` it uses
+  `--disable-filters`, then re-enables **all audio filters** plus the minimal list in
   `docker/keep-filters.txt` (`null`, `format`, `scale`, `trim`, `crop`, `hflip`, `vflip`,
   `transpose`, `rotate`, `sendcmd`, `split`, `gpufx`). The video filters that are kept are the infrastructure
   that the ffmpeg CLI inserts itself (trim for `-ss/-t`, rotation from metadata) or that gpufx needs (converting

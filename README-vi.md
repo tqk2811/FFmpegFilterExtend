@@ -88,8 +88,10 @@ ra format đó). Vì vậy một chuỗi `gpufx` chỉ upload mỗi frame một 
 2. các filter riêng kẹp giữa `gpufx_upload` và `gpufx_download`, `out_format=rgba` trên mọi filter trừ cái cuối;
 3. các filter riêng sau một lần upload (do `gpufx` đầu tiên hoặc `hwupload`), rồi `hwdownload`.
 
-Frame D3D12 và D3D11 chỉ có `nv12` hoặc `p010le`: `hwdownload` từ chúng ra đúng định dạng đó, và output có alpha
-sẽ mất alpha ở đây. Vulkan giữ alpha với `out_format=rgba`. Trên D3D, tách kết quả làm hai và cho một bản đi qua
+**Hạn chế: frame D3D12 và D3D11 không có alpha.** FFmpeg chỉ làm frame D3D12 dạng `nv12` và `p010le`
+(D3D11 cũng không có `rgba`), nên `hwdownload` ra một trong hai dạng đó, output có alpha mất alpha ở đây, và
+`out_format=rgba`, `yuva420p` hay `yuva444p` báo lỗi (`Unsupported pixel format: rgba`).
+Vulkan giữ alpha với `out_format=rgba`. Trên D3D, tách kết quả làm hai và cho một bản đi qua
 [alpha-extract](examples/effects/ffmpeg/alpha-extract/README.md) để lấy alpha thành ảnh xám, rồi ghép hai bản
 trên CPU bằng `alphamerge`.
 
@@ -158,7 +160,7 @@ phần chưa kiểm: thêm `-- --nocapture` để thấy các dòng đó.
 
 Lấy bản FFmpeg 9.0 shared build sẵn từ
 [tqk2811/FFmpegBuild](https://github.com/tqk2811/FFmpegBuild/releases), chỉ build lại
-`libavfilter` (gpufx + danh sách filter rút gọn) rồi thay vào gói. `ffmpeg`, `ffprobe` và
+`libavfilter` (gpufx + mọi filter của FFmpeg build được mà không cần thư viện ngoài) rồi thay vào gói. `ffmpeg`, `ffprobe` và
 các thư viện còn lại (`avcodec`, `avformat`…) giữ nguyên bản build sẵn. Mất vài phút:
 
 ```sh
@@ -174,17 +176,19 @@ target `x86_64-pc-windows-gnu`). Đổi bản build sẵn bằng biến `FFBUILD
 `libavfilter` phải build từ **đúng commit** của bản build sẵn để khớp ABI với các thư viện
 kia. Submodule `external/FFmpeg` được ghim vào commit đó (`n9.0-2-g03d9533176`, nhánh
 `release/9.0`); script dừng lại nếu hai bên lệch nhau. `ffmpeg` tìm filter theo tên lúc chạy
-nên không quan tâm `libavfilter` có bao nhiêu filter. Lệnh nào gọi filter đã bị bỏ thì chỉ lệnh
+nên không quan tâm `libavfilter` có bao nhiêu filter. Lệnh nào gọi filter không có thì chỉ lệnh
 đó báo `No such filter`.
 
 Lưu ý với bản này:
-- Chỉ còn các filter trong [docker/keep-filters.txt](docker/keep-filters.txt) cùng `gpufx`: filter nối
-  graph (`scale`, `format`, `trim`, `split`, `sendcmd`…) và filter chuẩn hoá đầu vào: thời gian, metadata,
-  bố cục, khử xen kẽ và không gian màu (`fps`, `setpts`, `setsar`, `setdar`, `settb`, `setrange`, `setparams`,
-  `pad`, `concat`, `select`, `loop`, `reverse`, `yadif`, `bwdif`, `colorspace`, `showinfo`), cùng audio cơ bản (`volume`, `amix`, `adelay`,
-  `afade`, `atempo`…). `hwupload`, `hwdownload`, `hwmap` được giữ cho frame Vulkan, D3D12 và D3D11. Filter hình (`drawtext`,
-  `overlay`, `gblur`…) và các filter hw khác (`scale_cuda`, `scale_vulkan`…) không còn. Cần filter nào thì thêm
-  tên vào file đó rồi build lại.
+- Mặc định build mọi filter của FFmpeg (`FFMPEG_FILTERS=all`) cùng `gpufx`: `overlay`, `xfade`, `alphaextract`,
+  `alphamerge`, `testsrc2`, `color`… (win64: 440 filter thay vì 62, dll `avfilter` từ 1,2 MB lên 6 MB, build lâu
+  thêm khoảng một phút). Bản build sẵn chỉ build lại `libavfilter`, với `--disable-autodetect`, không có
+  `avcodec`/`avformat`, và mặc định LGPL, nên vẫn thiếu một số filter: filter cần `avcodec`/`avformat`, thư viện
+  ngoài (`drawtext` cần freetype, `zscale`, `subtitles`…) hoặc GPL (`boxblur`…). Muốn bản nhỏ thì dùng
+  `FFMPEG_FILTERS=keep`: chỉ còn danh sách trong [docker/keep-filters.txt](docker/keep-filters.txt) cùng `gpufx`
+  (filter nối graph như `scale`, `format`, `trim`, `split`, `sendcmd`; filter chuẩn hoá đầu vào như `fps`,
+  `setpts`, `pad`, `concat`, `yadif`, `colorspace`; audio cơ bản; `hwupload`, `hwdownload`, `hwmap`). Muốn giữ
+  thêm filter ở chế độ này thì thêm tên vào file đó rồi build lại.
 - Frame Vulkan cần `libavutil` build sẵn có Vulkan (bản phát hành FFmpegBuild có) và Vulkan-Headers của Khronos,
   script tự clone (tag `v1.4.321`, hoặc `VULKAN_HEADERS=<thư mục>`); thiếu thì filter được build không có frame
   Vulkan và script báo điều đó.
@@ -220,10 +224,9 @@ effects/  các hiệu ứng mẫu đã đóng gói .zip
 include/  gpufx.h
 ```
 
-Bản build này **tắt toàn bộ filter video có sẵn của FFmpeg** (overlay, drawtext, gblur...).
-Hiệu ứng video đến từ gói `gpufx`. Filter audio được giữ nguyên, và một số filter video tối
-thiểu mà ffmpeg CLI hoặc gpufx cần vẫn được giữ (`scale`, `format`, `trim`, `split`,
-`sendcmd`...). Danh sách nằm ở [docker/keep-filters.txt](docker/keep-filters.txt), sửa file
+Bản build này mặc định **bật mọi filter của FFmpeg** (`FFMPEG_FILTERS=all`), nên `overlay`, `xfade`, `gblur`...
+có sẵn cạnh các hiệu ứng `gpufx`. `FFMPEG_FILTERS=keep` quay về danh sách ngắn trong
+[docker/keep-filters.txt](docker/keep-filters.txt) cộng mọi filter audio, sửa file
 này để thêm/bớt. Codec dùng bộ có sẵn của FFmpeg; chưa kèm thư viện ngoài như x264.
 
 Lần build sau nhanh hơn ở phần Rust nhờ Docker volume `gpufx-work-<target>` và `gpufx-cargo-registry`; FFmpeg được build lại từ đầu mỗi lần cho sạch.
