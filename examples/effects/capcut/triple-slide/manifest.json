@@ -1,0 +1,33 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.triple-slide",
+  "name": "Triple Slide",
+  "version": "1.0.0",
+  "description": "The frame splits into three columns that slide vertically in opposite directions with motion blur, pushing the first clip out and the second in, while the picture bobs in a zoom. Recreation of the CapCut \"Triple Slide\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/triple-slide.wgsl"
+    }
+  ]
+}

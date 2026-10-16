@@ -1,0 +1,33 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.flash-split",
+  "name": "Flash Split",
+  "version": "1.0.0",
+  "description": "Hard cut to the second clip framed by two white flashes, first over the left half of the first clip, then over the right half of the second clip. Recreation of the CapCut \"Flash Split\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/flash-split.wgsl"
+    }
+  ]
+}

@@ -18,6 +18,17 @@
 - **Vì sao**: đỡ tốn GPU ở độ phân giải cao và giống demo hơn. Sửa xong chấm lại bằng `scripts/capcut-compare.py`.
 - **Ngày ghi**: 2026-10-17
 
+### [Thấp] Hiệu ứng CapCut đợt 6: các finding review để sau
+- **Vấn đề**:
+  - bubble-blur: khoảng 63/98 tap bokeh có trọng số 0 (vùng trong vòng) nhưng vẫn fetch; `spiral_end()` lặp 98 vòng mỗi pixel cho một hằng số; 4 pass soften luôn chạy kể cả khi không dùng — thử bỏ và chấm lại.
+  - cube-spins-2: mỗi tap blur tính lại khoảng 10 keyframe Bezier (giống nhau cho mọi pixel); đầu hiệu ứng tap có thể lấy mẫu trước t=0.033 nên khung đầu có thể nhảy nhẹ.
+  - cube-roll: chưa đo chỗ nối t=0.9→0.91 (mặt clip sau phải thẳng và phủ kín khung); hằng số FOV dọc chưa có chú thích nguồn. Điểm 25.5 dB (lệch độ sáng lớp xám).
+  - triple-slide: chưa đo dải đen mép trái ở progress 0.9–0.97 (zoom và drift dùng easing khác nhau).
+  - diagonal-wipes dùng `textureDimensions(first)` thay vì `globals.size`/`pixel_aspect`; mép dải không AA. flash-split: flash chỉ 1–3 frame comp nên ở fps thấp/thời lượng ngắn có thể gần như mất.
+- **Vị trí**: [bokeh.wgsl](../examples/effects/capcut/bubble-blur/shaders/bokeh.wgsl), [cube-spins-2.wgsl](../examples/effects/capcut/cube-spins-2/shaders/cube-spins-2.wgsl), [cube-roll.wgsl](../examples/effects/capcut/cube-roll/shaders/cube-roll.wgsl), [triple-slide.wgsl](../examples/effects/capcut/triple-slide/shaders/triple-slide.wgsl), [diagonal-wipes.wgsl](../examples/effects/capcut/diagonal-wipes/shaders/diagonal-wipes.wgsl), [flash-split.wgsl](../examples/effects/capcut/flash-split/shaders/flash-split.wgsl).
+- **Vì sao**: đỡ tốn GPU và tránh giật nhẹ ở chỗ nối. Sửa xong chấm lại bằng `scripts/capcut-compare.py`.
+- **Ngày ghi**: 2026-10-17
+
 ### [Thấp] Lỗi `out_format` trên D3D liệt kê `rgba` dù FFmpeg không làm được frame đó
 - **Vấn đề**: `out_format=rgba` trên D3D12/D3D11 hỏng với `Unsupported pixel format: rgba` từ FFmpeg, nhưng thông báo của gpufx vẫn liệt kê `nv12, p010le, rgba, rgba64le` là ghi được. Bộ frame D3D12 của FFmpeg chỉ có `nv12`/`p010` ([hwcontext_d3d12va.c:71](../external/FFmpeg/libavutil/hwcontext_d3d12va.c#L71)); D3D11 có `bgra` chứ không có `rgba`.
 - **Vị trí**: `sw_format_list` ở [vf_gpufx.c:1166](../ffmpeg/vf_gpufx.c#L1166), dùng ở các thông báo dòng 1216, 1356, 1361.

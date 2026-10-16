@@ -1,0 +1,47 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.diagonal-wipes",
+  "name": "Diagonal Wipes",
+  "version": "1.0.0",
+  "description": "Three diagonal strips switch from the first clip to the second one after another, each zooming in, streaking along the diagonal and settling back, while the whole frame shakes. Recreation of the CapCut \"Diagonal Wipes\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    },
+    {
+      "name": "duration",
+      "type": "float",
+      "default": 0.8,
+      "min": 0.01,
+      "max": 10,
+      "description": "Real transition length in seconds; sets the speed of the shake"
+    },
+    {
+      "name": "animate",
+      "type": "bool",
+      "default": true,
+      "description": "true (default) = the shake wobbles in real time over `duration`. false = like CapCut's export: the frame sits at one fixed shaken offset while only the shake amplitude and the zoom change"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/diagonal-wipes.wgsl"
+    }
+  ]
+}

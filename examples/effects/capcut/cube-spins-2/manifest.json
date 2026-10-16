@@ -1,0 +1,33 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.cube-spins-2",
+  "name": "Cube Spins 2",
+  "version": "1.0.0",
+  "description": "The first clip shrinks away onto a spinning cube that splits into two halves while a cube of the second clip grows and spins between them, then the camera rushes back in onto the second clip. Recreation of the CapCut \"Cube Spins 2\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/cube-spins-2.wgsl"
+    }
+  ]
+}
