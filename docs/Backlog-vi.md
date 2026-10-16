@@ -29,6 +29,18 @@
 - **Vì sao**: đỡ tốn GPU và tránh giật nhẹ ở chỗ nối. Sửa xong chấm lại bằng `scripts/capcut-compare.py`.
 - **Ngày ghi**: 2026-10-17
 
+### [Thấp] Hiệu ứng CapCut đợt 7: các finding review để sau
+- **Vấn đề**:
+  - negative-glitch: với `animate=false` ảnh lệch dọc khoảng 31 px và sharpen/smear bật hết cỡ ngay từ progress > 0, nên khung đầu/cuối nhảy so với clip gốc. Demo CapCut cũng lệch như vậy (khung 24 vẫn 26 dB) nên đang giữ; nếu muốn mượt hơn thì thêm envelope ngoài khoảng t 0.78–1.27. Nhiễu theo dòng quét phụ thuộc độ phân giải. Khung p=0.5 trắng hơn demo (16 dB); CapCut chạy pass glitch ở nửa độ phân giải.
+  - pixel-vibe (20 dB): lưới halftone vẽ procedural không trùng ảnh của CapCut; tìm ảnh halftone license tự do giống hơn. Tấm halftone không phủ kín khung rất rộng (> 2.3:1); zoom blur bỏ tap ngoài khung nhưng vẫn tính vào mẫu số.
+  - silky-switch: mép thẻ có viền tối khoảng 5 px khi thẻ phủ kín khung (ngay sau 0, ngay trước 1); cần so với demo.
+  - red-swipe: ENLARGE 1.01 gây nhảy 1 % ở khung đầu/cuối; strip chỉ 256 mẫu theo chiều dọc nên vùng bị sort mất chi tiết ở 1080p; điểm đen thuần thành đỏ khi tint đầy.
+  - square-out: thứ tự ưu tiên góc kiểu chong chóng chưa đối chiếu demo.
+  - Cả nhóm: ghi alpha chưa thống nhất (có hiệu ứng ép 1, ripple-vibe giữ alpha nguồn).
+- **Vị trí**: [smear.wgsl](../examples/effects/capcut/negative-glitch/shaders/smear.wgsl), [signal.wgsl](../examples/effects/capcut/negative-glitch/shaders/signal.wgsl), [halftone.wgsl](../examples/effects/capcut/pixel-vibe/shaders/halftone.wgsl), [zoom.wgsl](../examples/effects/capcut/pixel-vibe/shaders/zoom.wgsl), [silky-switch.wgsl](../examples/effects/capcut/silky-switch/shaders/silky-switch.wgsl), [finish.wgsl](../examples/effects/capcut/red-swipe/shaders/finish.wgsl), [square-out.wgsl](../examples/effects/capcut/square-out/shaders/square-out.wgsl).
+- **Vì sao**: giống demo hơn và tránh giật ở chỗ nối. Sửa xong chấm lại bằng `scripts/capcut-compare.py`.
+- **Ngày ghi**: 2026-10-17
+
 ### [Thấp] Lỗi `out_format` trên D3D liệt kê `rgba` dù FFmpeg không làm được frame đó
 - **Vấn đề**: `out_format=rgba` trên D3D12/D3D11 hỏng với `Unsupported pixel format: rgba` từ FFmpeg, nhưng thông báo của gpufx vẫn liệt kê `nv12, p010le, rgba, rgba64le` là ghi được. Bộ frame D3D12 của FFmpeg chỉ có `nv12`/`p010` ([hwcontext_d3d12va.c:71](../external/FFmpeg/libavutil/hwcontext_d3d12va.c#L71)); D3D11 có `bgra` chứ không có `rgba`.
 - **Vị trí**: `sw_format_list` ở [vf_gpufx.c:1166](../ffmpeg/vf_gpufx.c#L1166), dùng ở các thông báo dòng 1216, 1356, 1361.

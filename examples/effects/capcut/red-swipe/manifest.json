@@ -1,0 +1,49 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.red-swipe",
+  "name": "Red Swipe",
+  "version": "1.0.0",
+  "description": "Pixel-sorted vertical streaks melt the first clip down while a colour wheel floods its red channel, then the streaks and the red cast drain away from the second clip. Recreation of the CapCut \"Red Swipe\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/strip.wgsl",
+      "inputs": ["first", "second"],
+      "output": "strip"
+    },
+    {
+      "shader": "shaders/rank.wgsl",
+      "inputs": ["strip"],
+      "output": "ranks"
+    },
+    {
+      "shader": "shaders/sort.wgsl",
+      "inputs": ["strip", "ranks"],
+      "output": "sorted"
+    },
+    {
+      "shader": "shaders/finish.wgsl",
+      "inputs": ["first", "second", "sorted"]
+    }
+  ]
+}

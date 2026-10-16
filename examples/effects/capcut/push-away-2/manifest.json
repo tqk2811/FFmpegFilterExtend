@@ -1,0 +1,49 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.push-away-2",
+  "name": "Push Away 2",
+  "version": "1.0.0",
+  "description": "The first clip pinches, shrinks and turns away with a camera shake, then the second clip spins in from a bulged, enlarged view under a spin blur, a highlight glow and a white flash. Recreation of the CapCut \"Push Away 2\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/compose.wgsl",
+      "inputs": ["first", "second"],
+      "output": "layer"
+    },
+    {
+      "shader": "shaders/spin.wgsl",
+      "inputs": ["layer"],
+      "output": "spun"
+    },
+    {
+      "shader": "shaders/glow-h.wgsl",
+      "inputs": ["spun"],
+      "output": "glow_h"
+    },
+    {
+      "shader": "shaders/finish.wgsl",
+      "inputs": ["spun", "glow_h", "first", "second"]
+    }
+  ]
+}
