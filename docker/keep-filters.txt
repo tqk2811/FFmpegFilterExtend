@@ -1,6 +1,6 @@
-# Filters kept next to gpufx; FFmpeg's own video filters are disabled, effects come from
-# gpufx packages instead. The filters below stay because the ffmpeg CLI or gpufx needs
-# them, or because they normalise the inputs without being a visual effect.
+# Short filter list for a small build: used only with FFMPEG_FILTERS=keep (the default,
+# FFMPEG_FILTERS=all, builds every filter). The filters below stay because the ffmpeg CLI
+# or gpufx needs them, or because they normalise the inputs without being a visual effect.
 #   build.sh (full Docker build): this list plus every audio filter.
 #   scripts/build-prebuilt.sh:    this list only. Any other filter (scale_cuda, drawtext...)
 #                                 gives "No such filter"; add it here to keep it.

@@ -18,7 +18,7 @@ for target in $TARGETS; do
     mkdir -p dist
     # Named volumes keep the cargo registry and Rust build output between runs.
     docker run --rm \
-        -e TARGET="$target" -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
+        -e TARGET="$target" -e FFMPEG_FILTERS="${FFMPEG_FILTERS:-all}" -e HOST_UID="$(id -u)" -e HOST_GID="$(id -g)" \
         -v "$PWD:/src:ro" \
         -v "$PWD/dist:/out" \
         -v gpufx-cargo-registry:/opt/cargo/registry \

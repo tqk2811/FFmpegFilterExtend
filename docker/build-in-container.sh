@@ -1,7 +1,7 @@
 #!/bin/bash
 # Runs inside the build image: builds libgpufx, then FFmpeg (from the external/FFmpeg
-# submodule) with gpufx and without FFmpeg's built-in video filters, and writes a
-# ready-to-run bundle to /out/$TARGET.
+# submodule) with gpufx (and every filter, or the keep-filters.txt list with
+# FFMPEG_FILTERS=keep), and writes a ready-to-run bundle to /out/$TARGET.
 #
 # Expects: /src = this repository (read-only is fine), /out = output dir,
 #          TARGET = linux64 | win64, optional HOST_UID/HOST_GID to chown the output.
@@ -44,12 +44,20 @@ mkdir -p "$WORK/ffmpeg"
 tar -C "$SRC/external/FFmpeg" --exclude=.git -cf - . | tar -C "$WORK/ffmpeg" -xf -
 "$SRC/ffmpeg/integrate.sh" "$WORK/ffmpeg"
 
-# Every audio filter plus the short list of video filters in keep-filters.txt.
-AUDIO=$(sed -n 's/^extern const FFFilter ff_\(af\|asrc\|asink\)_\([a-z0-9_]*\);$/\2/p' \
-        "$WORK/ffmpeg/libavfilter/allfilters.c")
-KEEP=$(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' "$SRC/docker/keep-filters.txt")
-FILTERS=$(echo $AUDIO $KEEP | tr ' ' ',')
-echo "    $(echo $AUDIO | wc -w) audio filters, video filters: $(echo $KEEP | tr '\n' ' ')"
+# FFMPEG_FILTERS=all (default): every filter configure can build. keep: every audio filter
+# plus the short list of video filters in keep-filters.txt.
+FILTER_FLAGS=()
+case ${FFMPEG_FILTERS:-all} in
+    all) ;;
+    keep)
+        AUDIO=$(sed -n 's/^extern const FFFilter ff_\(af\|asrc\|asink\)_\([a-z0-9_]*\);$/\2/p' \
+                "$WORK/ffmpeg/libavfilter/allfilters.c")
+        KEEP=$(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' "$SRC/docker/keep-filters.txt")
+        FILTERS=$(echo $AUDIO $KEEP | tr ' ' ',')
+        echo "    $(echo $AUDIO | wc -w) audio filters, video filters: $(echo $KEEP | tr '\n' ' ')"
+        FILTER_FLAGS=(--disable-filters --enable-filter="$FILTERS") ;;
+    *) echo "FFMPEG_FILTERS=$FFMPEG_FILTERS: use all or keep" >&2; exit 1 ;;
+esac
 
 # gpufx outputs GPU frames only: FFmpeg needs Vulkan (hwcontext_vulkan), which wants
 # vulkan.h >= 1.3.277, newer than the distro packages. The loader is opened at run time.
@@ -81,7 +89,7 @@ PKG_CONFIG_LIBDIR="$PREFIX/lib/pkgconfig" ./configure \
     --disable-doc --disable-debug --disable-ffplay \
     --enable-libgpufx --enable-zlib \
     --enable-vulkan --extra-cflags="-I$VK_HDR/include" \
-    --disable-filters --enable-filter="$FILTERS" \
+    ${FILTER_FLAGS[@]+"${FILTER_FLAGS[@]}"} \
     ${CONFIGURE_TARGET[@]+"${CONFIGURE_TARGET[@]}"}
 
 echo "==> build FFmpeg"

@@ -1,6 +1,6 @@
 #!/bin/sh
 # Fast build: takes a prebuilt shared FFmpeg from tqk2811/FFmpegBuild, rebuilds only
-# libavfilter (with gpufx and the short filter list of docker/keep-filters.txt) from
+# libavfilter (with gpufx and every filter it can build) from
 # the external/FFmpeg submodule, and swaps it into the bundle. Every other library and
 # the ffmpeg/ffprobe executables stay the prebuilt ones. Takes a few minutes.
 #
@@ -18,6 +18,8 @@
 #   MINGW_HEADERS_TAG  win64: mingw-w64 tag whose d3d12*.h headers are fetched when the
 #                    installed mingw-w64 has no d3d12video.h (v12.0.0). gpufx takes D3D12
 #                    and D3D11 frames when the prebuilt libavutil has d3d12va / d3d11va.
+#   FFMPEG_FILTERS   all (default): every filter libavfilter builds without avcodec, avformat
+#                    and external libraries; keep: only gpufx and docker/keep-filters.txt.
 #   REQUIRE_D3D      win64: 1 makes building without D3D12/D3D11 frames an error (CI).
 #   REQUIRE_LICENSES 1 makes a missing cargo-about an error (CI); without it the bundle
 #                    has no THIRD-PARTY-LICENSES-gpufx.txt (the Rust crate licenses).
@@ -171,15 +173,21 @@ fi
 echo "==> libgpufx"
 "$ROOT/scripts/install-libgpufx.sh" "$WORK/prefix" $RUST_TARGET
 
-echo "==> libavfilter (gpufx + docker/keep-filters.txt)"
+FFMPEG_FILTERS=${FFMPEG_FILTERS:-all}
+case $FFMPEG_FILTERS in
+    all) FILTER_FLAGS=--enable-filters ;;
+    keep) FILTER_FLAGS=--enable-filter=$(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' "$ROOT/docker/keep-filters.txt" | tr '\n' ',' | sed 's/,$//') ;;
+    *) echo "FFMPEG_FILTERS=$FFMPEG_FILTERS: use all or keep" >&2; exit 1 ;;
+esac
+echo "==> libavfilter (gpufx, filters: $FFMPEG_FILTERS)"
 rm -rf "$WORK/ffmpeg"
 mkdir -p "$WORK/ffmpeg"
 tar -C "$SRC" --exclude=.git -cf - . | tar -C "$WORK/ffmpeg" -xf -
 "$ROOT/ffmpeg/integrate.sh" "$WORK/ffmpeg"
-FILTERS=$(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' "$ROOT/docker/keep-filters.txt" | tr '\n' ',' | sed 's/,$//')
 cd "$WORK/ffmpeg"
-# Only libavfilter is kept. With these filters it links to avutil, swscale and swresample
-# alone, so avcodec/avformat/avdevice are not built. SIMD needs nasm.
+# Only libavfilter is built; it links to avutil, swscale and swresample alone, so filters
+# that need avcodec, avformat or an external library (movie, drawtext, zscale...) are left
+# out by configure. SIMD needs nasm.
 ASM=
 command -v nasm >/dev/null || { ASM=--disable-x86asm; echo "    nasm not found: building without SIMD"; }
 # shellcheck disable=SC2086
@@ -187,7 +195,7 @@ PKG_CONFIG_LIBDIR="$WORK/prefix/lib/pkgconfig" ./configure \
     --enable-shared --disable-static $LICENSE_FLAGS $ASM \
     --disable-programs --disable-doc --disable-debug --disable-autodetect \
     --disable-avdevice --disable-avformat --disable-avcodec \
-    --disable-everything --enable-filter="$FILTERS" --enable-libgpufx \
+    --disable-everything $FILTER_FLAGS --enable-libgpufx \
     $VULKAN $D3D $CROSS > "$WORK/configure.log" || { tail -20 "$WORK/configure.log"; exit 1; }
 if [ -n "$VULKAN" ] && ! grep -q '^#define CONFIG_VULKAN 1' config.h; then
     echo "configure did not enable Vulkan; see $WORK/configure.log" >&2; exit 1
@@ -241,4 +249,4 @@ cp "$ROOT/crates/gpufx-ffi/include/gpufx.h" "$OUT/include/"
 cp "$ROOT/LICENSE" "$OUT/LICENSE-gpufx.txt"
 "$ROOT/scripts/third-party-licenses.sh" "$OUT/THIRD-PARTY-LICENSES-gpufx.txt" "$RUST_TARGET"
 "$ROOT/scripts/pack-effects.sh" -o "$OUT/effects" > /dev/null
-echo "==> done: $OUT ($(sed -e 's/#.*//' -e '/^[[:space:]]*$/d' "$ROOT/docker/keep-filters.txt" | wc -l) filters)"
+echo "==> done: $OUT ($(grep -c '^#define CONFIG_[A-Z0-9_]*_FILTER 1' "$WORK/ffmpeg/config.h") filters)"

@@ -207,7 +207,8 @@ MAIN_N=$("$FF" -hide_banner -nostdin -v error -i "$A" -an -vf "format=rgba" -f f
 "$FF" -hide_banner -version | head -n1
 "$FF" -hide_banner -filters > "$CLIPS/filters.txt" 2>&1
 grep -qw gpufx "$CLIPS/filters.txt" && pass "gpufx is registered" || fail "gpufx is registered"
-if grep -qwE "overlay|drawtext|gblur" "$CLIPS/filters.txt"; then fail "built-in video filters removed"; else pass "built-in video filters removed"; fi
+# alpha-extract mattes are joined back with alphamerge (kept by both FFMPEG_FILTERS modes).
+grep -qw alphamerge "$CLIPS/filters.txt" && pass "alphamerge is registered" || fail "alphamerge is registered"
 
 NULL="-f null -"
 # Without a device gpufx has nowhere to put its GPU frames: refused, with the fix.

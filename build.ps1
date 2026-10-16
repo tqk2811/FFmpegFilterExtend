@@ -18,6 +18,7 @@ foreach ($t in $targets) {
     New-Item -ItemType Directory -Force dist | Out-Null
     docker run --rm `
         -e TARGET=$t `
+        -e FFMPEG_FILTERS=$(if ($env:FFMPEG_FILTERS) { $env:FFMPEG_FILTERS } else { "all" }) `
         -v "${PWD}:/src:ro" `
         -v "${PWD}/dist:/out" `
         -v gpufx-cargo-registry:/opt/cargo/registry `
