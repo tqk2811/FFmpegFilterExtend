@@ -265,6 +265,8 @@ fi
 vulkan_tests() {
 # Two input transitions driven by `progress`.
 TRANSITIONS="wipe-transition crossfade slide-transition circle-reveal clock-wipe collapse expand dip-to-color dissolve pixelize-transition zoom-transition fade-grays blinds checkerboard push-box push-film photo-collection box-in sliding-bars spin-transition"
+# Every capcut effect is a two input transition too.
+for e in "$FX"/capcut/*.zip; do TRANSITIONS="$TRANSITIONS $(basename "$e" .zip)"; done
 echo "single input effects (audio stream kept, GPU frames into the null muxer):"
 for e in "$FX"/*/*.zip; do
     case " $TRANSITIONS overlay fit " in *" $(basename "$e" .zip) "*) continue ;; esac
