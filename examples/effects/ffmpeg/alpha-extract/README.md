@@ -24,7 +24,15 @@ Written inline after the package name: `alpha-extract.zip=name=value`. Several o
 
 ## Example
 
-Direct3D 12 (Windows): `push-box` with a transparent background, fill and matte written to two lossless files:
+Direct3D 12 (Windows): `push-box` with a transparent background, joined back into a VP9 video with alpha. `format=gray` also turns the matte's limited range into full range, so black is alpha 0:
+
+```sh
+ffmpeg -init_hw_device d3d12va=dx -filter_hw_device dx -i a.mp4 -i b.mp4 -filter_complex \
+  "[0][1]gpufx=graph='[0][1]push-box.zip=progress=clip((t-1)/1.5\,0\,1)&color=#00000000[x]; [x]split[fill][m]; [m]alpha-extract.zip[matte]'[f][k];[f]hwdownload,format=nv12[f2];[k]hwdownload,format=nv12,format=gray[k2];[f2][k2]alphamerge,format=yuva420p" \
+  -c:v libvpx-vp9 out.webm
+```
+
+Or fill and matte written to two lossless files, to be joined later (by an editor, or by the command below):
 
 ```sh
 ffmpeg -init_hw_device d3d12va=dx -filter_hw_device dx -i a.mp4 -i b.mp4 -filter_complex \
@@ -32,7 +40,7 @@ ffmpeg -init_hw_device d3d12va=dx -filter_hw_device dx -i a.mp4 -i b.mp4 -filter
   -map "[f2]" -c:v ffv1 fill.mkv -map "[k2]" -c:v ffv1 matte.mkv
 ```
 
-Joined into a VP9 video with alpha (any FFmpeg build with `alphamerge`; `format=gray` also turns the matte's limited range into full range, so black is alpha 0):
+Joined into a VP9 video with alpha:
 
 ```sh
 ffmpeg -i fill.mkv -i matte.mkv -filter_complex "[1]format=gray[a];[0][a]alphamerge,format=yuva420p" \

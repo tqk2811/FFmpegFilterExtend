@@ -62,6 +62,9 @@ colorspace
 # Deinterlacing
 yadif
 bwdif
+# Alpha: join a gray matte (from the alpha-extract package) back as alpha, for D3D frames
+# that cannot carry it: [fill][matte]alphamerge
+alphamerge
 # Padding, joining, picking and looping frames
 pad
 tpad
