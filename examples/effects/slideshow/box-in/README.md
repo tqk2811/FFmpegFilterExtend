@@ -35,7 +35,7 @@ Direct3D 12 (Windows):
 
 ```sh
 ffmpeg -init_hw_device d3d12va=dx -filter_hw_device dx -i a.mp4 -i b.mp4 -filter_complex \
-  "[0][1]gpufx=effect='box-in.zip=progress=clip((t-1)/2\,0\,1)&direction=0&color=#202020',hwdownload,format=yuv420p" out.mp4
+  "[0][1]gpufx=effect='box-in.zip=progress=clip((t-1)/2\,0\,1)&direction=0&color=#202020',hwdownload,format=nv12" out.mp4
 ```
 
 The effect runs on every backend the filter supports (Vulkan, D3D12/D3D11, Metal on macOS); see the [README](https://github.com/tqk2811/FFmpegGpuFilter/blob/master/README.md).
