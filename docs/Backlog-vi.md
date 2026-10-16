@@ -1,5 +1,11 @@
 # Việc còn treo
 
+### [Thấp] Lỗi `out_format` trên D3D liệt kê `rgba` dù FFmpeg không làm được frame đó
+- **Vấn đề**: `out_format=rgba` trên D3D12/D3D11 hỏng với `Unsupported pixel format: rgba` từ FFmpeg, nhưng thông báo của gpufx vẫn liệt kê `nv12, p010le, rgba, rgba64le` là ghi được. Bộ frame D3D12 của FFmpeg chỉ có `nv12`/`p010` ([hwcontext_d3d12va.c:71](../external/FFmpeg/libavutil/hwcontext_d3d12va.c#L71)); D3D11 có `bgra` chứ không có `rgba`.
+- **Vị trí**: `sw_format_list` ở [vf_gpufx.c:1166](../ffmpeg/vf_gpufx.c#L1166), dùng ở các thông báo dòng 1216, 1356, 1361.
+- **Vì sao**: người dùng thử `rgba` theo gợi ý rồi gặp lỗi khó hiểu; nên nói rõ định dạng nào FFmpeg làm được trên API đó, và gợi ý `alpha-extract` khi cần alpha. Cần build lại FFmpeg để kiểm.
+- **Ngày ghi**: 2026-10-16
+
 ### [Thấp] Test box-in chưa phủ direction 1 và 3
 - **Vấn đề**: test chỉ thử `direction` 0 và 2; đảo dấu riêng ở nhánh 1/3 không bị bắt.
 - **Vị trí**: [crates/gpufx-core/tests/effects.rs](../crates/gpufx-core/tests/effects.rs) (`transition_modes_have_clean_endpoints_and_their_own_midpoint`), [box_in.wgsl](../examples/effects/slideshow/box-in/shaders/box_in.wgsl).

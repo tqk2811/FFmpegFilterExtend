@@ -91,6 +91,11 @@ filters therefore uploads each frame once and reads it back once. Fastest first:
 2. separate filters between `gpufx_upload` and `gpufx_download`, `out_format=rgba` on all but the last;
 3. separate filters behind one upload (by the first `gpufx` or `hwupload`), then `hwdownload`.
 
+D3D12 and D3D11 frames are `nv12` or `p010le` only: `hwdownload` from them gives that format, and an output with
+alpha loses it there. Vulkan keeps alpha with `out_format=rgba`. On D3D, split the result and send one copy
+through [alpha-extract](examples/effects/ffmpeg/alpha-extract/README.md) to get the alpha as a gray picture, then
+join both on the CPU with `alphamerge`.
+
 Intel GPUs on Windows with FFmpeg 9: `hwupload` (and `hwdownload` of `hwupload` frames) fails to allocate or
 corrupts the picture through the driver's host image copy; use `gpufx_upload` / `gpufx_download`, or open the
 device with `disable_multiplane=1,linear_images=1`. `gpufx` refuses such frames. See [docs/INTEL_VULKAN.md](docs/INTEL_VULKAN.md).

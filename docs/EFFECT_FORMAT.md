@@ -344,6 +344,7 @@ The examples live in three group folders under `examples/effects/`: `ffmpeg/` (e
 | `examples/effects/ffmpeg/transform` | Zoom, rotate, pan (Ken Burns), a `vec2` parameter |
 | `examples/effects/ffmpeg/fade` | Fade to a color |
 | `examples/effects/ffmpeg/chroma-key` | Green screen → alpha; input `formats` **rules**, output `rgba`/`yuva420p`/`yuva444p` |
+| `examples/effects/ffmpeg/alpha-extract` | Alpha as a gray matte (`invert` option), to carry alpha through D3D frames and join it back with `alphamerge` |
 | `examples/effects/ffmpeg/overlay` | 2-input picture-in-picture, with a border |
 | `examples/effects/ffmpeg/crossfade`, `examples/effects/ffmpeg/slide-transition`, `examples/effects/ffmpeg/circle-reveal` | 2-input transitions; `same_size` **rule** |
 | `examples/effects/ffmpeg/clock-wipe` | Clock-hand transition, a `bool` parameter `reverse` |

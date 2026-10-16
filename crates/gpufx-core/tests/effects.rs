@@ -277,6 +277,25 @@ fn zero_strength_vignette_is_identity() {
 }
 
 #[test]
+fn alpha_extract_writes_alpha_as_opaque_gray() {
+    let Some(ctx) = gpu() else { return };
+    let mut fx = Effect::new(ctx, Package::open(example("alpha-extract")).unwrap()).unwrap();
+    let (w, h) = (16, 1);
+    let src: Vec<u8> = (0..w).flat_map(|x| [200, 50, 10, (x * 17) as u8]).collect();
+    let image = [Image { data: &src, width: w, height: h, stride: w * 4 }];
+    let mut out = vec![0u8; (w * h * 4) as usize];
+    for invert in [false, true] {
+        fx.params_mut().set_str("invert", if invert { "1" } else { "0" }).unwrap();
+        fx.process(&image, target(&mut out, w, h, w * 4), &FrameInfo::new(0.0, 0)).unwrap();
+        for (x, p) in out.chunks(4).enumerate() {
+            let a = (x * 17) as u8;
+            let g = if invert { 255 - a } else { a };
+            assert_eq!(p, [g, g, g, 255], "invert={invert}, pixel {x}");
+        }
+    }
+}
+
+#[test]
 fn shader_errors_point_at_the_author_file() {
     let Some(ctx) = gpu() else { return };
     let dir = std::env::temp_dir().join(format!("gpufx-bad-{}", std::process::id()));

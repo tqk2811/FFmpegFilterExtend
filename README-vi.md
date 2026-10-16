@@ -88,6 +88,11 @@ ra format đó). Vì vậy một chuỗi `gpufx` chỉ upload mỗi frame một 
 2. các filter riêng kẹp giữa `gpufx_upload` và `gpufx_download`, `out_format=rgba` trên mọi filter trừ cái cuối;
 3. các filter riêng sau một lần upload (do `gpufx` đầu tiên hoặc `hwupload`), rồi `hwdownload`.
 
+Frame D3D12 và D3D11 chỉ có `nv12` hoặc `p010le`: `hwdownload` từ chúng ra đúng định dạng đó, và output có alpha
+sẽ mất alpha ở đây. Vulkan giữ alpha với `out_format=rgba`. Trên D3D, tách kết quả làm hai và cho một bản đi qua
+[alpha-extract](examples/effects/ffmpeg/alpha-extract/README.md) để lấy alpha thành ảnh xám, rồi ghép hai bản
+trên CPU bằng `alphamerge`.
+
 GPU Intel trên Windows với FFmpeg 9: `hwupload` (và `hwdownload` frame của `hwupload`) báo lỗi cấp phát hoặc
 làm hỏng ảnh do host image copy của driver; dùng `gpufx_upload` / `gpufx_download`, hoặc mở device với
 `disable_multiplane=1,linear_images=1`. `gpufx` từ chối các frame đó. Xem [docs/INTEL_VULKAN-vi.md](docs/INTEL_VULKAN-vi.md).
