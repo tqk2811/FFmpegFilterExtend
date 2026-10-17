@@ -1,0 +1,33 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.pink-grunge",
+  "name": "Pink Grunge",
+  "version": "1.0.0",
+  "description": "The picture flips to a shaking, motion-blurred negative under a flickering pink and red grunge light leak, cutting to the second clip at 40%. Recreation of the CapCut \"Pink Grunge\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/pink-grunge.wgsl"
+    }
+  ]
+}

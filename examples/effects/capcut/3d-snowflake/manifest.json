@@ -1,0 +1,33 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.3d-snowflake",
+  "name": "3D Snowflake",
+  "version": "1.0.0",
+  "description": "Snow falls over the first clip while a crystal snowflake tumbles towards the camera, fills the frame, shatters and drifts away over the second clip. Recreation of the CapCut \"3D Snowflake\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/3d-snowflake.wgsl"
+    }
+  ]
+}
