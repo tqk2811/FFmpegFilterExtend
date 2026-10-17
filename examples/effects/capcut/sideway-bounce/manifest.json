@@ -1,0 +1,69 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.sideway-bounce",
+  "name": "Sideway Bounce",
+  "version": "1.0.0",
+  "description": "The picture zooms in and is knocked sideways by a fading wobble with motion smear and a bright glow, cutting to the second clip at the peak before settling back. Recreation of the CapCut \"Sideway Bounce\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    },
+    {
+      "name": "duration",
+      "type": "float",
+      "default": 0.8,
+      "min": 0,
+      "max": 10,
+      "description": "Real length of the transition in seconds; sets the speed of the wobble (0 freezes it, like CapCut exports)"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/shake.wgsl",
+      "inputs": [
+        "first",
+        "second"
+      ],
+      "output": "shaken"
+    },
+    {
+      "shader": "shaders/glow-h.wgsl",
+      "inputs": [
+        "shaken"
+      ],
+      "output": "glow_h"
+    },
+    {
+      "shader": "shaders/glow-v.wgsl",
+      "inputs": [
+        "glow_h"
+      ],
+      "output": "glow"
+    },
+    {
+      "shader": "shaders/finish.wgsl",
+      "inputs": [
+        "first",
+        "second",
+        "shaken",
+        "glow"
+      ]
+    }
+  ]
+}

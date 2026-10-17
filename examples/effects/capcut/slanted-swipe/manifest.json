@@ -1,0 +1,33 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.slanted-swipe",
+  "name": "Slanted Swipe",
+  "version": "1.0.0",
+  "description": "The first clip smears into a strong slanted motion blur with fast black flicker, cuts to the second clip under the blur (with a split white flash), and the blur and flicker fade out. Recreation of the CapCut \"Slanted Swipe\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/slanted-swipe.wgsl"
+    }
+  ]
+}
