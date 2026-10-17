@@ -1,0 +1,82 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.subject-flash",
+  "name": "Subject Flash",
+  "version": "1.0.0",
+  "description": "The first clip twists away about its vertical axis while it blows out into glowing round bokeh, then the second clip twists back in out of the same glare. Recreation of the CapCut \"Subject Flash\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/bend.wgsl",
+      "inputs": [
+        "first",
+        "second"
+      ],
+      "output": "bent"
+    },
+    {
+      "shader": "shaders/glow-x.wgsl",
+      "inputs": [
+        "bent"
+      ],
+      "output": "glow_x"
+    },
+    {
+      "shader": "shaders/glow-y.wgsl",
+      "inputs": [
+        "glow_x"
+      ],
+      "output": "glow"
+    },
+    {
+      "shader": "shaders/soft-y.wgsl",
+      "inputs": [
+        "bent",
+        "glow"
+      ],
+      "output": "soft_y"
+    },
+    {
+      "shader": "shaders/soft-x.wgsl",
+      "inputs": [
+        "soft_y"
+      ],
+      "output": "soft"
+    },
+    {
+      "shader": "shaders/bokeh.wgsl",
+      "inputs": [
+        "soft"
+      ],
+      "output": "bokeh"
+    },
+    {
+      "shader": "shaders/final.wgsl",
+      "inputs": [
+        "first",
+        "second",
+        "bokeh"
+      ]
+    }
+  ]
+}

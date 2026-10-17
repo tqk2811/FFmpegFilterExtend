@@ -1,0 +1,46 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.film-wipe",
+  "name": "Film Wipe",
+  "version": "1.0.0",
+  "description": "The first clip shrinks into a frame of a film strip that races down the screen under a vertical motion blur, until the second clip's frame stops in the middle and grows back to full screen. Recreation of the CapCut \"Film Wipe\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/strip.wgsl",
+      "inputs": [
+        "first",
+        "second"
+      ],
+      "output": "strip"
+    },
+    {
+      "shader": "shaders/blur.wgsl",
+      "inputs": [
+        "first",
+        "second",
+        "strip"
+      ]
+    }
+  ]
+}
