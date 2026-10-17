@@ -1,0 +1,421 @@
+{
+  "api": 1,
+  "id": "io.github.tqk2811.capcut.golden-sand",
+  "name": "Golden Sand",
+  "version": "1.0.0",
+  "description": "The first clip bursts into glowing golden sand that sweeps down the frame while the second clip is uncovered from the top. Recreation of the CapCut \"Golden Sand\" transition. Drive `progress` from 0 to 1.",
+  "inputs": [
+    {
+      "name": "first",
+      "description": "Outgoing clip"
+    },
+    {
+      "name": "second",
+      "description": "Incoming clip (same size as the first)",
+      "same_size": true
+    }
+  ],
+  "params": [
+    {
+      "name": "progress",
+      "type": "float",
+      "default": 0.5,
+      "min": 0,
+      "max": 1,
+      "description": "0 = first clip, 1 = second clip"
+    }
+  ],
+  "passes": [
+    {
+      "shader": "shaders/band.wgsl",
+      "entry": "upper",
+      "inputs": [
+        "first"
+      ],
+      "output": "band"
+    },
+    {
+      "shader": "shaders/glow-x-first.wgsl",
+      "entry": "blur_x_1",
+      "inputs": [
+        "band"
+      ],
+      "output": "g_x"
+    },
+    {
+      "shader": "shaders/glow-y.wgsl",
+      "entry": "blur_y_1",
+      "inputs": [
+        "g_x"
+      ],
+      "output": "g_y"
+    },
+    {
+      "shader": "shaders/glow-comp-first.wgsl",
+      "entry": "comp_1_upper",
+      "inputs": [
+        "band",
+        "g_y"
+      ],
+      "output": "g_b"
+    },
+    {
+      "shader": "shaders/glow-x-b.wgsl",
+      "entry": "blur_x_2",
+      "inputs": [
+        "g_b"
+      ],
+      "output": "g_x"
+    },
+    {
+      "shader": "shaders/glow-y.wgsl",
+      "entry": "blur_y_2",
+      "inputs": [
+        "g_x"
+      ],
+      "output": "g_y"
+    },
+    {
+      "shader": "shaders/glow-comp-b.wgsl",
+      "entry": "comp_2_upper",
+      "inputs": [
+        "g_b",
+        "g_y"
+      ],
+      "output": "g_a"
+    },
+    {
+      "shader": "shaders/glow-x-a.wgsl",
+      "entry": "blur_x_3",
+      "inputs": [
+        "g_a"
+      ],
+      "output": "g_x"
+    },
+    {
+      "shader": "shaders/glow-y.wgsl",
+      "entry": "blur_y_3",
+      "inputs": [
+        "g_x"
+      ],
+      "output": "g_y"
+    },
+    {
+      "shader": "shaders/glow-comp-a.wgsl",
+      "entry": "comp_3_upper",
+      "inputs": [
+        "g_a",
+        "g_y"
+      ],
+      "output": "g_b"
+    },
+    {
+      "shader": "shaders/glow-x-b.wgsl",
+      "entry": "blur_x_4",
+      "inputs": [
+        "g_b"
+      ],
+      "output": "g_x"
+    },
+    {
+      "shader": "shaders/glow-y.wgsl",
+      "entry": "blur_y_4",
+      "inputs": [
+        "g_x"
+      ],
+      "output": "g_y"
+    },
+    {
+      "shader": "shaders/glow-comp-b.wgsl",
+      "entry": "comp_4_upper",
+      "inputs": [
+        "g_b",
+        "g_y"
+      ],
+      "output": "g_a"
+    },
+    {
+      "shader": "shaders/glow-x-a.wgsl",
+      "entry": "blur_x_5",
+      "inputs": [
+        "g_a"
+      ],
+      "output": "g_x"
+    },
+    {
+      "shader": "shaders/glow-y.wgsl",
+      "entry": "blur_y_5",
+      "inputs": [
+        "g_x"
+      ],
+      "output": "g_y"
+    },
+    {
+      "shader": "shaders/glow-comp-a.wgsl",
+      "entry": "comp_5_upper",
+      "inputs": [
+        "g_a",
+        "g_y"
+      ],
+      "output": "g_b"
+    },
+    {
+      "shader": "shaders/glow-x-b.wgsl",
+      "entry": "blur_x_6",
+      "inputs": [
+        "g_b"
+      ],
+      "output": "g_x"
+    },
+    {
+      "shader": "shaders/glow-y.wgsl",
+      "entry": "blur_y_6",
+      "inputs": [
+        "g_x"
+      ],
+      "output": "g_y"
+    },
+    {
+      "shader": "shaders/glow-comp-b.wgsl",
+      "entry": "comp_6_upper",
+      "inputs": [
+        "g_b",
+        "g_y"
+      ],
+      "output": "g_a"
+    },
+    {
+      "shader": "shaders/glow-x-a.wgsl",
+      "entry": "blur_x_7",
+      "inputs": [
+        "g_a"
+      ],
+      "output": "g_x"
+    },
+    {
+      "shader": "shaders/glow-y.wgsl",
+      "entry": "blur_y_7",
+      "inputs": [
+        "g_x"
+      ],
+      "output": "g_y"
+    },
+    {
+      "shader": "shaders/glow-comp-a.wgsl",
+      "entry": "comp_7_upper",
+      "inputs": [
+        "g_a",
+        "g_y"
+      ],
+      "output": "g_b"
+    },
+    {
+      "shader": "shaders/glow-post.wgsl",
+      "inputs": [
+        "band",
+        "g_b"
+      ],
+      "output": "glow_upper"
+    },
+    {
+      "shader": "shaders/band.wgsl",
+      "entry": "lower",
+      "inputs": [
+        "first"
+      ],
+      "output": "band"
+    },
+    {
+      "shader": "shaders/glow-x-first.wgsl",
+      "entry": "blur_x_1",
+      "inputs": [
+        "band"
+      ],
+      "output": "g_x"
+    },
+    {
+      "shader": "shaders/glow-y.wgsl",
+      "entry": "blur_y_1",
+      "inputs": [
+        "g_x"
+      ],
+      "output": "g_y"
+    },
+    {
+      "shader": "shaders/glow-comp-first.wgsl",
+      "entry": "comp_1_lower",
+      "inputs": [
+        "band",
+        "g_y"
+      ],
+      "output": "g_b"
+    },
+    {
+      "shader": "shaders/glow-x-b.wgsl",
+      "entry": "blur_x_2",
+      "inputs": [
+        "g_b"
+      ],
+      "output": "g_x"
+    },
+    {
+      "shader": "shaders/glow-y.wgsl",
+      "entry": "blur_y_2",
+      "inputs": [
+        "g_x"
+      ],
+      "output": "g_y"
+    },
+    {
+      "shader": "shaders/glow-comp-b.wgsl",
+      "entry": "comp_2_lower",
+      "inputs": [
+        "g_b",
+        "g_y"
+      ],
+      "output": "g_a"
+    },
+    {
+      "shader": "shaders/glow-x-a.wgsl",
+      "entry": "blur_x_3",
+      "inputs": [
+        "g_a"
+      ],
+      "output": "g_x"
+    },
+    {
+      "shader": "shaders/glow-y.wgsl",
+      "entry": "blur_y_3",
+      "inputs": [
+        "g_x"
+      ],
+      "output": "g_y"
+    },
+    {
+      "shader": "shaders/glow-comp-a.wgsl",
+      "entry": "comp_3_lower",
+      "inputs": [
+        "g_a",
+        "g_y"
+      ],
+      "output": "g_b"
+    },
+    {
+      "shader": "shaders/glow-x-b.wgsl",
+      "entry": "blur_x_4",
+      "inputs": [
+        "g_b"
+      ],
+      "output": "g_x"
+    },
+    {
+      "shader": "shaders/glow-y.wgsl",
+      "entry": "blur_y_4",
+      "inputs": [
+        "g_x"
+      ],
+      "output": "g_y"
+    },
+    {
+      "shader": "shaders/glow-comp-b.wgsl",
+      "entry": "comp_4_lower",
+      "inputs": [
+        "g_b",
+        "g_y"
+      ],
+      "output": "g_a"
+    },
+    {
+      "shader": "shaders/glow-x-a.wgsl",
+      "entry": "blur_x_5",
+      "inputs": [
+        "g_a"
+      ],
+      "output": "g_x"
+    },
+    {
+      "shader": "shaders/glow-y.wgsl",
+      "entry": "blur_y_5",
+      "inputs": [
+        "g_x"
+      ],
+      "output": "g_y"
+    },
+    {
+      "shader": "shaders/glow-comp-a.wgsl",
+      "entry": "comp_5_lower",
+      "inputs": [
+        "g_a",
+        "g_y"
+      ],
+      "output": "g_b"
+    },
+    {
+      "shader": "shaders/glow-x-b.wgsl",
+      "entry": "blur_x_6",
+      "inputs": [
+        "g_b"
+      ],
+      "output": "g_x"
+    },
+    {
+      "shader": "shaders/glow-y.wgsl",
+      "entry": "blur_y_6",
+      "inputs": [
+        "g_x"
+      ],
+      "output": "g_y"
+    },
+    {
+      "shader": "shaders/glow-comp-b.wgsl",
+      "entry": "comp_6_lower",
+      "inputs": [
+        "g_b",
+        "g_y"
+      ],
+      "output": "g_a"
+    },
+    {
+      "shader": "shaders/glow-x-a.wgsl",
+      "entry": "blur_x_7",
+      "inputs": [
+        "g_a"
+      ],
+      "output": "g_x"
+    },
+    {
+      "shader": "shaders/glow-y.wgsl",
+      "entry": "blur_y_7",
+      "inputs": [
+        "g_x"
+      ],
+      "output": "g_y"
+    },
+    {
+      "shader": "shaders/glow-comp-a.wgsl",
+      "entry": "comp_7_lower",
+      "inputs": [
+        "g_a",
+        "g_y"
+      ],
+      "output": "g_b"
+    },
+    {
+      "shader": "shaders/glow-post.wgsl",
+      "inputs": [
+        "band",
+        "g_b"
+      ],
+      "output": "glow_lower"
+    },
+    {
+      "shader": "shaders/finish.wgsl",
+      "inputs": [
+        "first",
+        "second",
+        "glow_upper",
+        "glow_lower"
+      ]
+    }
+  ]
+}
