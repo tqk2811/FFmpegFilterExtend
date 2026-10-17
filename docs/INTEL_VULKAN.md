@@ -88,8 +88,15 @@ The cost: linear images are slower for the GPU to sample and write than optimal 
 what the texture units are built for), and every plane is a separate image. `gpufx` accepts such frames.
 The whole gpufx test suite passes on the Intel GPU with these options and `hwupload` (`VK_DEVICE_OPTS=disable_multiplane=1,linear_images=1 VK_ADAPTER=1 sh scripts/test-bundle.sh ...`: 157 ok, 2026-10-14).
 
-The other way out on Windows is D3D11 frames (`-init_hw_device d3d11va=dx -filter_hw_device dx`), which `gpufx`
-also reads and writes.
+The other way out on Windows is D3D11 or D3D12 frames (`-init_hw_device d3d11va=dx -filter_hw_device dx`), which
+`gpufx` also reads and writes. They do not go through host image copy, so neither bug shows up there. Checked on the
+same Intel GPU and driver (2026-10-17):
+
+- `hwupload,hwdownload` through `d3d11va=dx:1` is bit-exact for nv12 and bgra, while the same round trip through
+  `vulkan` on that device still gives a wrong nv12 (B) and fails rgba/bgra allocation (A). D3D11 has no rgba download
+  format, so use bgra there.
+- `VK_ADAPTER=1 DX_ADAPTER=1 REQUIRE_D3D=1 sh scripts/test-bundle.sh dist/win64`: every D3D12 and D3D11 frame test
+  passes, none skipped.
 
 ## Status upstream
 
